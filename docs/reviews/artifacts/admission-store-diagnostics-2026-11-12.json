@@ -1,0 +1,40 @@
+{
+  "evidence_kind": "synthetic_admission_store_diagnostics",
+  "source_parent": "848c075f1b542f7d6a0f751d71608c4288997e96",
+  "source_sha256": {
+    "crates/sandhi-store/src/ledger/evidence/progress.rs": "3c69e529322ea6c36bf680e129f9ef432926b72a970d59179ec83ad0c6eeb992",
+    "crates/sandhi-store/src/ledger/evidence.rs": "734205fde6cce1fb13297be546039ba5a218a5e9683e465ea78d699f1c9724f7",
+    "crates/sandhi-store/src/ledger/evidence/context.rs": "44ec31ce01090f349c274a36f3738cc8c24d2a253fc0505eee79cf2d8cb9eba4",
+    "crates/sandhi-store/src/sharded.rs": "460b9572f7e17fa9c9ff8d35fbe7fa6098f4e78c250116dd265c81534c3ef03b",
+    "crates/sandhi-proxy/src/settlement/admission.rs": "a8744ef432d77f17f97f665bf23348bd521a490e889ad8ef993ffdd758592ea5",
+    "crates/sandhi-proxy/src/settlement/diagnostics.rs": "43fa0c9c5d2ec91e8e3680871f038308fffcf6e9637d26833f5f0c1b95a3d860",
+    "crates/sandhi-proxy/src/settlement/jobs.rs": "58586bc20d3ed9db2f9c58bc78f8d40d5ed9de623105eb5df90a84a41b7ea02f",
+    "crates/sandhi-proxy/tests/proxy.rs": "888e4b867bf5b6518f6a8a5bbee61e4705403a79ceade3f0c53e7901cda28e1c"
+  },
+  "log_sha256": {
+    "sandhi-m5u-workspace-observed.log": "4d4c2907897fe13ee13613a381f27c964527c2b779d40c793d30f558eb022a0b",
+    "sandhi-m5u-progress-test.log": "5b2b1fa8241a2dfa96183ddd89c2d3437bb0c407a370e8be361eb94037b9a027",
+    "sandhi-m5u-admission-pipeline-final.log": "766347d4b51c99a133c70afa16efff1ed70ad0c7d689af4db75a7fc7dc016a4a",
+    "sandhi-m5u-clippy.log": "78748f1f1b4661b1dba481485d26f3afa0e0c227e5dfe66522fe4f2278789fee",
+    "sandhi-m5u-features-clippy.log": "658988d2702782d03e7ae762638247bdcd39592b4f6f411b57705a7dc3c39fa6"
+  },
+  "workspace": {
+    "passed": 1223,
+    "failed": 0,
+    "ignored": 6,
+    "suites": 52
+  },
+  "controlled_checks": [
+    "Actual SQLite writer holds immediate transaction: observed begin_transaction, no early reservations; releasing writer admits original request and two linked reservations, no receipt or dispatch.",
+    "Context trigger rejection rolls back all observed admission rows.",
+    "Owned proxy admission emits one store-stage timeout log, keeps original ticket, clears stage after return and closes original pair before dispatch with no charge."
+  ],
+  "limits": [
+    "No spontaneous stall recurred; this passing run does not diagnose prior failures.",
+    "Workspace run preceded the additional test-only stale-stage assertion; that assertion passed in a separate focused run. No production code changed afterward.",
+    "Stage entry includes cleanup, I/O and scheduler time; not transaction/commit or durability evidence.",
+    "Only contextual paired admissions have these store markers; other operations remain unobserved.",
+    "Synthetic failure database retention is exercised only if an unexpected back-leg fixture failure occurs. No failure database was produced by this passing run."
+  ],
+  "disposition": "Diagnostic coverage only; prior admission and terminal-settlement reliability/merge gates remain open."
+}

@@ -1,0 +1,1362 @@
+{
+  "evidence_kind": "integrated_explicit_gateway_peer_source_checkpoint",
+  "source_parent": "f1c224e45a957e290c72f76989499b7dbb99cd3c",
+  "runtime_and_fixture_files": [
+    {
+      "path": "bindings/node/README.md",
+      "sha256": "c172f290cafa683df51605ec1a23bfb8947bdc07dab2b2249ed01e9aadfbd139"
+    },
+    {
+      "path": "bindings/node/__test__/gateway.test.mjs",
+      "sha256": "9a88e25950a0e0d1a19e636ceac0a49d038f2418edca803be790c4d29475b745"
+    },
+    {
+      "path": "bindings/node/src/lib.rs",
+      "sha256": "4afddd391cd9f22ca242270e9e175aeccc173e8505a8c3aa89703b7ac405d0ec"
+    },
+    {
+      "path": "bindings/python/README.md",
+      "sha256": "d24685ee7ee2292a466f6433e1d6ee8ff6458c1c0ccc7c029d56c54384b7932f"
+    },
+    {
+      "path": "bindings/python/sandhi_gateway.pyi",
+      "sha256": "5942ba11a4669cf866b07af8001471f57dbbe5240fe346bd78184ae8b99ca22b"
+    },
+    {
+      "path": "bindings/python/src/lib.rs",
+      "sha256": "b26dead5b6b215d5209a87a7e35f7251281c82563d28b1ec0051a5ff8c837790"
+    },
+    {
+      "path": "bindings/python/tests/test_gateway_peer.py",
+      "sha256": "f5266a9b00ed1cf6a5ba8197968a70da72350803cabfbcbe3955733acd4f56c8"
+    },
+    {
+      "path": "crates/sandhi-core/src/lib.rs",
+      "sha256": "0ac57a9a529829752b1bd939c9d38b5e7a8166ddb3a0e6b5c268db67870e0049"
+    },
+    {
+      "path": "crates/sandhi-core/src/peer.rs",
+      "sha256": "7f7c520a18bd847289e49e02756d58e18b860930873b6d4aaa2ac0d688c10abb"
+    },
+    {
+      "path": "crates/sandhi-providers/src/anthropic.rs",
+      "sha256": "c51911033f6994ae5357fa42aad83c80c5f4c3cc4652ffc8725ee498f1c97a89"
+    },
+    {
+      "path": "crates/sandhi-providers/src/anthropic_typed.rs",
+      "sha256": "0b67f50bada63894cc9c14911e61b83a8b85e626b6e178fa49fad2145ba57842"
+    },
+    {
+      "path": "crates/sandhi-providers/src/attempt.rs",
+      "sha256": "868713a04f55002b5600489b631ff1237f6fe710bad5bce686912359646f2f6e"
+    },
+    {
+      "path": "crates/sandhi-providers/src/buffered_completion.rs",
+      "sha256": "cf350b274521ace6e20bb585d2a1e755c44c61ce2842c7ef3382b2c64559d03f"
+    },
+    {
+      "path": "crates/sandhi-providers/src/cache_policy.rs",
+      "sha256": "0bcd67b3fc863eb2b174d41ee4201a8383b27e99d33cbf82495f307ed69e2ab8"
+    },
+    {
+      "path": "crates/sandhi-providers/src/cohere.rs",
+      "sha256": "92a203fe46eadf1238522df9fc8a19ec0c644091aeeec521525773ee6393b674"
+    },
+    {
+      "path": "crates/sandhi-providers/src/escape_hatch.rs",
+      "sha256": "e33f23353f0924f6d794ff1c81f4787f68ffae7c8094b5663359fa62bfb3a170"
+    },
+    {
+      "path": "crates/sandhi-providers/src/factory.rs",
+      "sha256": "cf1f116d4ea95e2c93ad93cf8951a376c8e30d2b3d3446cedad8ba5705618793"
+    },
+    {
+      "path": "crates/sandhi-providers/src/gemini.rs",
+      "sha256": "493680babdcbef320285e8119c31fb8bca4e227fb8d1d7f372b602d377921415"
+    },
+    {
+      "path": "crates/sandhi-providers/src/gemini_typed.rs",
+      "sha256": "0f7f49127b55d578e1634302fe707808b72a88e7eb9c9165d579421b68c4b05d"
+    },
+    {
+      "path": "crates/sandhi-providers/src/lib.rs",
+      "sha256": "bd52d7796ef0b67369a0edfac66f7aff88bd9457b86374bc7a052bad43586824"
+    },
+    {
+      "path": "crates/sandhi-providers/src/local.rs",
+      "sha256": "96c77fa56fbdda9c7ef596d18314bcefff74cf712f9f481d09bb11ec1d1100e8"
+    },
+    {
+      "path": "crates/sandhi-providers/src/metering.rs",
+      "sha256": "c35dc10384e9d689127c7cfc616ef4949941835e1767b3bd30eebaa76df60b90"
+    },
+    {
+      "path": "crates/sandhi-providers/src/openai.rs",
+      "sha256": "aebc1c4494ece10f3992c461ac0f2096ed9051523e470beeb4a31922d30b0b81"
+    },
+    {
+      "path": "crates/sandhi-providers/src/openai_responses.rs",
+      "sha256": "49c8c8649ec93e675e76cdd42765ea53050fff815374bcd678f3fdf611a80947"
+    },
+    {
+      "path": "crates/sandhi-providers/src/openai_responses_typed.rs",
+      "sha256": "96a999a705d3b41a055542b0f92a646055b23c6ef1f3cb0ae2203b5cd6a2f9df"
+    },
+    {
+      "path": "crates/sandhi-providers/src/peer.rs",
+      "sha256": "bb7269ed0615050c9d357c41b3293a313508d1332c860c52d624a66111304fbd"
+    },
+    {
+      "path": "crates/sandhi-providers/src/qualified_stream.rs",
+      "sha256": "6f1fe7ab473efa1e2e901a6ee3d3683520610d8c36a3b0cba20a8881dceee6b4"
+    },
+    {
+      "path": "crates/sandhi-providers/src/raw.rs",
+      "sha256": "cebc22021b2e51b9a1e6dec76df6ef88e3a47da906b747393d15a95eb816e476"
+    },
+    {
+      "path": "crates/sandhi-providers/src/raw/qualified_stream.rs",
+      "sha256": "2f2f4e6f92a6ed5b3e2d1a9fcc15140eca7edd84262d3c85a5dbb8d8f586e5b8"
+    },
+    {
+      "path": "crates/sandhi-providers/src/resilience.rs",
+      "sha256": "ee952dffd1e0180fcd8fe867c7ca09e3e871f2a37d318ec08a438c98daf78098"
+    },
+    {
+      "path": "crates/sandhi-providers/src/stream_usage.rs",
+      "sha256": "f19ef959821c79399ca8ec76a44348c263adbd616cde3a7e71ed0c03e5a44bdc"
+    },
+    {
+      "path": "crates/sandhi-providers/src/typed.rs",
+      "sha256": "92bfa4767cfd6eb514da20c920fa4b59761e685c1244e06a69b0335e8d2bf02a"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/codec.rs",
+      "sha256": "a527ff66b6078f72753db8ffbaad04509f950cf491357babbd5577e4e128230a"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/lib.rs",
+      "sha256": "b1eb806318addfce882bf3ea68aad62e2af88bb007ad26c79d99524c1ae901fb"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/streaming/qualified.rs",
+      "sha256": "b62ceaac737ba62f9e72cd91c3330494c59d72c799159c6c6279bf79064fb8c7"
+    },
+    {
+      "path": "crates/sandhi-proxy/tests/gateway_peer.rs",
+      "sha256": "355ea25b39b212a69bdbdd4417ea8b4ce24a44b658c0a7f5479d9f1d822fb51d"
+    },
+    {
+      "path": "mkdocs.yml",
+      "sha256": "b5a872f9bdd423fa2a1ff92410e385e976127083e5979c8318f7c5923d31c6ed"
+    },
+    {
+      "path": "scripts/gen-binding-contract-facades.py",
+      "sha256": "a005c34e53c4e1c87efb23918fae54be840a7ff4a02446061b8bb19f8f0b8080"
+    },
+    {
+      "path": "tests/sdk-conformance/conftest.py",
+      "sha256": "e63cd9c8a7302e8656ee24bdf895b5d709b77711f2de534000ce35c11d7822f0"
+    },
+    {
+      "path": "tests/sdk-conformance/source_provenance.py",
+      "sha256": "a1deeb194d068574d4ae9e1c5eb668a80e9774b5ada9c1d6224cdad95eae22a9"
+    },
+    {
+      "path": "tests/sdk-conformance/test_acceptance_decisions.py",
+      "sha256": "77e8d8c182971193b81a358217b33bbba1dd22de5e2c88ce8dad24bd7db12d25"
+    },
+    {
+      "path": "tests/sdk-conformance/test_backend_registry.py",
+      "sha256": "619acd4382780cec627edcfca518e76bb3244392c309b3eca97aa1258e0a2b62"
+    },
+    {
+      "path": "tests/sdk-conformance/test_broker.py",
+      "sha256": "7314a7b053c6dde850109d776a53b8f93c8c388613efc893615807ce53cc2a26"
+    },
+    {
+      "path": "tests/sdk-conformance/test_executable_fixture_selection.py",
+      "sha256": "413359766ce20f9a53d46c2b372ec19756909ae9a833e17dd52ad227036349dd"
+    },
+    {
+      "path": "tests/sdk-conformance/test_management.py",
+      "sha256": "d3fa30cc2a4933b77160f201e93aa29ec1197ba8a1b88d6f5158442dcb2f45bd"
+    },
+    {
+      "path": "tests/sdk-conformance/test_run_tree_rendering.py",
+      "sha256": "b31e239a61a24c4502da3acd433994392ee3486321d455b9863058a4ef793e5a"
+    }
+  ],
+  "validation": {
+    "rust": {
+      "passed": 1241,
+      "ignored": 6,
+      "suites": 53
+    },
+    "python": {
+      "passed": 323,
+      "seconds": 16.56
+    },
+    "node": {
+      "passed": 88
+    },
+    "clippy": "default and policy-onnx,sentinelpass-ipc all-target checks passed",
+    "peer_http": {
+      "tests": 6,
+      "seconds": 4.84,
+      "success_switch_cells": 112,
+      "cache_owner_cells": 16,
+      "unsupported_ttl_refusals": 4,
+      "http_error_cells": 32,
+      "sse_error_cells": 8,
+      "unknown_source_calls": 8,
+      "unknown_holds": 16,
+      "unknown_receipts": 0
+    },
+    "sdk": {
+      "passed": 590,
+      "skipped": 3,
+      "seconds": 630.15,
+      "sdk_pins": {
+        "openai": "3.49.0",
+        "anthropic": "2.8.0",
+        "google-genai": "3.2.0"
+      }
+    },
+    "artifact_components": {
+      "passed": 23,
+      "seconds": 0.87,
+      "author_old_behavior_red_cases": 5
+    }
+  },
+  "python_wheel": {
+    "path": "/tmp/sandhi-m5y-integrated-wheels/sandhi_gateway-0.17.0-cp311-abi3-manylinux_2_34_x86_64.whl",
+    "sha256": "2547f8407e053e831d546f917378475051a5dad2643bb2f27bfce6faf5536b3b",
+    "scope": "Local development wheel, Linux x86_64/Python3.12, not full supported-platform qualification."
+  },
+  "sdk_frozen_executables": {
+    "unique_hashes": 5,
+    "source_diff_count": 1,
+    "observations": [
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries0/provenance.json",
+        "manifest_sha256": "c99e7971d42bdd4e54708d0d97153ad0d120cca661b83f10e01bb59b594e9ecc",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries0/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries0/provenance.json",
+        "manifest_sha256": "c99e7971d42bdd4e54708d0d97153ad0d120cca661b83f10e01bb59b594e9ecc",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries1/provenance.json",
+        "manifest_sha256": "a4026f3529cb853f05e36c1897fd8df5d07b469082df221fa803fca04db9e082",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries1/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries1/provenance.json",
+        "manifest_sha256": "a4026f3529cb853f05e36c1897fd8df5d07b469082df221fa803fca04db9e082",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries1/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries5/provenance.json",
+        "manifest_sha256": "3808c95f210ba5c8b3ca54f8ebb20f07e0ae5ba04e7078b050f433691dab2551",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries5/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries5/provenance.json",
+        "manifest_sha256": "3808c95f210ba5c8b3ca54f8ebb20f07e0ae5ba04e7078b050f433691dab2551",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries5/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries6/provenance.json",
+        "manifest_sha256": "45af68f239101fb6ee502879b4d40af5a013ff61f0441065308939d2cb5c5403",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries6/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries6/provenance.json",
+        "manifest_sha256": "45af68f239101fb6ee502879b4d40af5a013ff61f0441065308939d2cb5c5403",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries6/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries7/provenance.json",
+        "manifest_sha256": "a138bb0deaad5f912eb759081b2d448ffcb2b8371eeeb7e41aeb1351a5d85945",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries7/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries7/provenance.json",
+        "manifest_sha256": "a138bb0deaad5f912eb759081b2d448ffcb2b8371eeeb7e41aeb1351a5d85945",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries7/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries8/provenance.json",
+        "manifest_sha256": "4c47ab84a0333525b2f15183ab6bc900bd0937f0096b548241ab47078855b909",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries8/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries8/provenance.json",
+        "manifest_sha256": "4c47ab84a0333525b2f15183ab6bc900bd0937f0096b548241ab47078855b909",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/backend-binaries8/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/cli-binary1/provenance.json",
+        "manifest_sha256": "e307a3142bcc222c13370bd62684c34f3107795a0cd3c1e07a8faf2c8e1b6a23",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/cli-binary1/sandhi",
+        "binary_sha256": "25bf45fdca45fe043a3c39b7b190d952a0edfbc66a017dbc13d7ae476be11c36",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/example-build-provenance.json",
+        "manifest_sha256": "dc78fba5585c7d45f3cf2e538afef789327b3e91787940a507f4fa062dd1dc46",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sdk_broker_transport",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/sdk_broker_transport",
+        "binary_sha256": "53abfcd1466845e792c78737b484716c443120e020b28a4742ccecd0ce7cd87d",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/examples/sdk_broker_transport",
+          "target_name": "sdk_broker_transport",
+          "target_kind": "example",
+          "features": [
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/proxy-build-provenance.json",
+        "manifest_sha256": "649bfc12bbbcdf36093c19096005d008d11b39ec0a8e87b482a8d79632572209",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/sandhi-proxy",
+        "binary_sha256": "a772a8a5b055437125bcce5f944fdc324c7ce9949cb56236456a95be03753227",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/proxy-build-provenance.json",
+        "manifest_sha256": "649bfc12bbbcdf36093c19096005d008d11b39ec0a8e87b482a8d79632572209",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin0/sandhi",
+        "binary_sha256": "05e80936610a5d0b746c0229b6f4bbf7b5c7c23b0ed001417580542122647cd6",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/example-build-provenance.json",
+        "manifest_sha256": "b92839fa738564cf1f9e285b16bd11d0063b3a4355cc8099d5967567eb88220a",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sdk_broker_transport",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/sdk_broker_transport",
+        "binary_sha256": "53abfcd1466845e792c78737b484716c443120e020b28a4742ccecd0ce7cd87d",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/examples/sdk_broker_transport",
+          "target_name": "sdk_broker_transport",
+          "target_kind": "example",
+          "features": [
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/proxy-build-provenance.json",
+        "manifest_sha256": "92fb3874e6370ec088f03c1b794b83115a67ebaf2bcafdc55d3584dd0568c9be",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/sandhi-proxy",
+        "binary_sha256": "a772a8a5b055437125bcce5f944fdc324c7ce9949cb56236456a95be03753227",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/proxy-build-provenance.json",
+        "manifest_sha256": "92fb3874e6370ec088f03c1b794b83115a67ebaf2bcafdc55d3584dd0568c9be",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin1/sandhi",
+        "binary_sha256": "05e80936610a5d0b746c0229b6f4bbf7b5c7c23b0ed001417580542122647cd6",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/example-build-provenance.json",
+        "manifest_sha256": "261175f520a9963d52e029c0ac82eec880296c8c25c75ffd7c256bdb0396f9a3",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sdk_broker_transport",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/sdk_broker_transport",
+        "binary_sha256": "53abfcd1466845e792c78737b484716c443120e020b28a4742ccecd0ce7cd87d",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/examples/sdk_broker_transport",
+          "target_name": "sdk_broker_transport",
+          "target_kind": "example",
+          "features": [
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/proxy-build-provenance.json",
+        "manifest_sha256": "051013ee4827c3b83856a873271b9199afbcc7e8a60ba729c2d6d71f6e75971a",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/sandhi-proxy",
+        "binary_sha256": "a772a8a5b055437125bcce5f944fdc324c7ce9949cb56236456a95be03753227",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/proxy-build-provenance.json",
+        "manifest_sha256": "051013ee4827c3b83856a873271b9199afbcc7e8a60ba729c2d6d71f6e75971a",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/native-broker-bin5/sandhi",
+        "binary_sha256": "05e80936610a5d0b746c0229b6f4bbf7b5c7c23b0ed001417580542122647cd6",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi",
+          "target_name": "sandhi",
+          "target_kind": "bin",
+          "features": [
+            "default",
+            "sentinelpass-ipc"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/plain-broker-bin0/provenance.json",
+        "manifest_sha256": "912582a11e4eb56610e15d2ec93f0180537d99e37d693262f5c97b3eacabb044",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/plain-broker-bin0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/plain-broker-bin3/provenance.json",
+        "manifest_sha256": "de941d79b46743999779b98f452b907db852f8937e04fa1ac6490a3be4f9daab",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/plain-broker-bin3/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/provenance.json",
+        "manifest_sha256": "fc863c1eaa4c734fe7f52f4214a23db3a38cbb49bbe7a9f7dd5aab70fe7a0ecb",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_body_started_before_cutof0/launch-provenance.json",
+        "manifest_sha256": "876b7f5caf164b8c4e7a215b1914828568253933621e7c125cb43e372604a10b",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_hung_sse_obeys_one_total_0/launch-provenance.json",
+        "manifest_sha256": "8421bbc67b99c8717901156ac35507d6dc2db20857262f49db6fa1fa249f69ec",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_inflight_sse_finishes_but0/launch-provenance.json",
+        "manifest_sha256": "bab0420206b8adec278f649a5743dc681c837439fe35bc2ab66bc97cd11c6e1a",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_inflight_sse_finishes_but1/launch-provenance.json",
+        "manifest_sha256": "1c7f23c14eef360763a3f6eb6f0b20a921216958b0f0f36246e9ac8eeca3c03d",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_locked_settlement_cannot_0/launch-provenance.json",
+        "manifest_sha256": "290b252cf11c2ce6ceda6ca29a1b3b6627efa007056a1fdf2b87803c5161d438",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_probe_reachability_during0/launch-provenance.json",
+        "manifest_sha256": "66475c170657c66e7154c3ffc25ed304a421f9c331aa4de57d7a215473f1fc23",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_sigterm_keeps_fresh_and_k0/launch-provenance.json",
+        "manifest_sha256": "f62a81ce6977a90abaa08399236ca543ff5afeef6ea8ea44b7e10381dbb479c5",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_sigterm_keeps_fresh_and_k1/launch-provenance.json",
+        "manifest_sha256": "a3bb5cabb4ef7700be2236f4974a2b7d81597c70f0d7af185f846eea01f27433",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio0/launch-provenance.json",
+        "manifest_sha256": "0529bd84fcb5dcbf655e227fa25ca463f8acf688dedfd1cb715cbd39eda9ff8b",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio1/launch-provenance.json",
+        "manifest_sha256": "82fefb78c6a6a55f2325dcd75516f82abf6842371c1765ab3ae4e721d3ccabf3",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio2/launch-provenance.json",
+        "manifest_sha256": "129f01891fbabb8d44fa7d25dc5e717ced3c50190a768bdd6722e36aa2db075b",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio3/launch-provenance.json",
+        "manifest_sha256": "c6189bf63b10d047131310732de2cd2144ee948c7d1cdf820a763dc41c152035",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio4/launch-provenance.json",
+        "manifest_sha256": "fbd8307943ae6024c4a26669c284a37c987dc48bd127ddce9248186c07a5e116",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio5/launch-provenance.json",
+        "manifest_sha256": "25e119f2cb8e2882b92b3196e654391f520e9d0096a71afa49256f8759e7e2fc",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio6/launch-provenance.json",
+        "manifest_sha256": "1ff105b7792ab3af8d6b4e118a52bf6cd286e92ac3d347555039ef111d22b803",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      },
+      {
+        "manifest": "/tmp/sandhi-m5y-sdk-corrected/test_tracked_binary_correlatio7/launch-provenance.json",
+        "manifest_sha256": "e1d58b8c4158420c27786498333910a938089cf163813b937b3379b7fb870a62",
+        "source_diff_sha256": "7bc2442d463a05b4396157410310db6c207e1a8b2e02e04355957d59d90016c6",
+        "source_inventory_sha256": "b5b109cdc86c5bf8aae63c855a3545e501b6de55aedd657f50a33a5cca1977f3",
+        "name": "sandhi-proxy",
+        "snapshot": "/tmp/sandhi-m5y-sdk-corrected/proxy-binary0/sandhi-proxy",
+        "binary_sha256": "9200aac418ba9eece1c519ba7b0d00794c4dc3efd36949ac4ce29a761167c639",
+        "cargo_artifact": {
+          "executable": "/tmp/sandhi-watchdog-private-target/debug/sandhi-proxy",
+          "target_name": "sandhi-proxy",
+          "target_kind": "bin",
+          "features": [
+            "default"
+          ],
+          "fresh": true,
+          "profile": {
+            "opt_level": "0",
+            "debuginfo": 0,
+            "debug_assertions": true,
+            "overflow_checks": true,
+            "test": false
+          }
+        }
+      }
+    ],
+    "verification_observations": 41,
+    "distinct_snapshot_paths": 25,
+    "count_semantics": "Build and launch manifests can reference the same immutable snapshot; each observation hash was verified, and distinct paths are counted separately."
+  },
+  "victor": {
+    "local_only_commit": "a3f2b77c655e12f246a118c7351c44e9265f33e7",
+    "independent_review": "Scoped clean;232 independently selected tests; local attestation check passed",
+    "root_tests_passed": 2265,
+    "root_tests_skipped": 5,
+    "full_collection": 40283,
+    "publication_gate": "Keep consumer local until Sandhi dependency publication and qualification.",
+    "report": "Victor docs/reviews/sandhi-explicit-peer-2026-11-12.md"
+  },
+  "retained_failures": {
+    "clippy_initial": "One items-after-test-module error; declaration moved before tests; both full lint configurations passed.",
+    "local_sdk_wrong_artifacts": {
+      "failed": 32,
+      "passed": 110,
+      "skipped": 2,
+      "seconds": 226.09,
+      "exit": 2,
+      "reason": "Interrupted after confirming default-target executable guesses despite configured CARGO_TARGET_DIR; retained run is not full candidate qualification."
+    },
+    "public_ui_source": {
+      "source": "f1c224e45a957e290c72f76989499b7dbb99cd3c",
+      "run": 43309146521,
+      "sdk_job": 131500396509,
+      "failed": 1,
+      "passed": 566,
+      "errors": 11,
+      "skipped": 3,
+      "seconds": 746.26,
+      "reason": "Two stale browser helper expectations for old billable-tokens label; numeric and malformed-data checks retained with corrected observed-token-units expectations."
+    }
+  },
+  "logs": {
+    "rust": {
+      "path": "/tmp/sandhi-m5y-workspace.log",
+      "sha256": "a3defcd48c1499fb2e0116050db430fdf8ef482bfd3d3304b1409e4974ac9cda"
+    },
+    "clippy": {
+      "path": "/tmp/sandhi-m5y-clippy.log",
+      "sha256": "4587ce01e678fe5ca504e9500ef8cceb3ba92f5c52724a91c2b40e2645ed089a"
+    },
+    "features": {
+      "path": "/tmp/sandhi-m5y-features.log",
+      "sha256": "e3cf2cfcce2a4649297697eb8a56105ecf986f8461896d79a5ed433ddb5de66a"
+    },
+    "python": {
+      "path": "/tmp/sandhi-m5y-python-final.log",
+      "sha256": "4397bf6df2ea5ecf75121e12843e15c256faf42a6494c2be72c6014b95bad313"
+    },
+    "node": {
+      "path": "/tmp/sandhi-m5y-node.log",
+      "sha256": "5f9bcb21a044f4b3666a07a26468c61652938a56d0f03d91d280c59ff91b041a"
+    },
+    "peer_http": {
+      "path": "/tmp/sandhi-m5y-peer-http.log",
+      "sha256": "f278612afc8a7b1df658047235f90c5f6673c34e72d64bdb1d4aca18061d751c"
+    },
+    "sdk_corrected": {
+      "path": "/tmp/sandhi-m5y-sdk-corrected.log",
+      "sha256": "ab4420eff8910ac078e4c2a899c07a8318e3ab368816f95d9724c0184b6a8d06"
+    },
+    "sdk_stale_artifact_interrupted": {
+      "path": "/tmp/sandhi-m5y-sdk.log",
+      "sha256": "1f33a1b3e676072028689774df4ff96f93eb79ae8e4b2a519d81b0d67eba7f63"
+    },
+    "artifact_components": {
+      "path": "/tmp/sandhi-m5y-artifact-components.log",
+      "sha256": "b6c5548352d9e4bbbdbc027b9edaaeb3c5ca1b5ebe1df2ea28ea3a0c803cc998"
+    },
+    "public_ui_sdk_failed": {
+      "path": "/tmp/sandhi-m5x-public-sdk-failed.log",
+      "sha256": "0d124dbe29624cbb982a5a9fb6ebc6e8c4c9a79f90a43f6cde2d4d2c7f989602"
+    },
+    "public_ui_allocations": {
+      "path": "/tmp/sandhi-m5x-public-jobs-final.jsonl",
+      "sha256": "f877a1dab5364907fb1b8ccf8a9f9e78d056fd8f51213fe8d4b499a4bb7a72e9"
+    }
+  },
+  "open_gates": [
+    "Independent exact-tip review, final staged configured-secret scan, and public CI of this checkpoint.",
+    "Canonical durable accounting default/old execution-path retirement and immutable upstream namespace/identity migration are separate in-progress work.",
+    "Native Cohere/Ollama HTTP qualification must preserve previously supported sources through mandatory-owner cutover.",
+    "Broader native state/cache resource/subscription/agent/media acceptance and retained accounting-wait/native-exit/shutdown reliability.",
+    "Supported native/wheel platforms; prepared Sandhi0.17/Victor0.29 are not published releases."
+  ],
+  "provenance_limit": "Cargo executable selection and bounded source/config inventories do not establish hermetic compilation or all external/generated/ignored inputs. Documentation-only evidence additions follow the tested runtime source and preserve listed runtime/fixture file hashes."
+}

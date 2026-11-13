@@ -1,0 +1,145 @@
+{
+  "evidence_kind": "native_reference_issuer_ownership",
+  "status": "author validation complete; integration and independent review required",
+  "base": "12d7291d2bdeb03d2dee4f35217ca4b82a239c2c plus frozen provider-identity patch4416ca64428fdd08a2f6a8ec5467da053fc3998f154347ffc26e353cb9c98ce2",
+  "source": "/tmp/sandhi-reference-ownership",
+  "runtime_source": [
+    {
+      "path": "crates/sandhi-providers/src/typed.rs",
+      "sha256": "df97336f9a7e6623aaf0019c4359335bf64ff627c26fb24dcb476bb753590f31"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/codec/fidelity.rs",
+      "sha256": "8976d64bbdb8f9ec1dca6000c8669d254265b12d7e6e5a99d6c8584cbf2afa47"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/lib.rs",
+      "sha256": "9e727470c116089bdb38f67f2f315e0d41ae645752bc12bab8c175f25f98f02f"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/main.rs",
+      "sha256": "41bc8e56b172aded109ce1261f39e8c75dbc5442ac41f148cfb574ee32c58811"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/preparation.rs",
+      "sha256": "e46258718c250b590b3ec3d8382380736336340e293d738425d33bfe1f4d30fa"
+    },
+    {
+      "path": "crates/sandhi-proxy/src/reference_ownership.rs",
+      "sha256": "2745b303b138a14e47db158998f78a788d5f058164d863d303f7b8e37fac32e4"
+    },
+    {
+      "path": "crates/sandhi-proxy/tests/reference_ownership.rs",
+      "sha256": "8fa51b13aff4de70d0295dd3938f71bc71cd80c3e7857f2bfcd683014da1cb93"
+    },
+    {
+      "path": "crates/sandhi-store/src/lib.rs",
+      "sha256": "fd4ec9a8f9cfd6bbd586726f5029adefcdb0805dcc9fe19bcf8ffbf5cbb87ff0"
+    },
+    {
+      "path": "crates/sandhi-store/src/references.rs",
+      "sha256": "6cd685881ee4563eed565ffee0d3d300ce3a15a63fa7cfa0daa6d9f9e578a408"
+    }
+  ],
+  "bounds": {
+    "global_proof_rows": 100000,
+    "owner_proof_rows": 4096,
+    "operation_unique_references": 128,
+    "frame_and_retention_bytes": 8388608,
+    "metadata_slots": 4,
+    "expiry_cleanup_max_rows": 256,
+    "proof_max_ttl_seconds": 86400
+  },
+  "schema": {
+    "proof_primary_key": [
+      "binding",
+      "kind",
+      "reference_digest",
+      "owner"
+    ],
+    "self_contained_multiple_issuer_kinds": [
+      "encrypted_reasoning",
+      "thinking_signature",
+      "redacted_thinking"
+    ],
+    "resource_ids": "single-owner partial unique index; ambiguous collision refuses",
+    "legacy_private_schema": "refuses; never published or guessed into new authority"
+  },
+  "validation": {
+    "store_filter": {
+      "passed": 4,
+      "new_registry_tests": 3,
+      "existing_vault_test": 1
+    },
+    "proxy_units": 10,
+    "proxy_integration_tests": 3,
+    "http_requests": 210,
+    "source_sends": 146,
+    "pre_admission_refusals": 64,
+    "protocol_route_delivery_cells": 20,
+    "forced_write_failure_cells": 10,
+    "independent_opaque_reissuance_cells": 8,
+    "actual_process_tcp": {
+      "gateway_requests": 9,
+      "source_sends": 5,
+      "foreign_or_unbound_refusals": 4,
+      "restart_own_reference": "accepted",
+      "foreign_after_restart": "refused",
+      "paired_receipts": 5,
+      "settled_leases": 10,
+      "unsettled": 0
+    },
+    "default_clippy": "all targets, warnings denied",
+    "feature_clippy": "proxy ONNX and SentinelPass all targets, warnings denied"
+  },
+  "binary": {
+    "path": "/tmp/sandhi-reference-ownership-review-binaries-final/sandhi-proxy",
+    "sha256": "13e621582064c4dfb8118437e07e065e1fa9c1975de34e63ee049b36fe60857f"
+  },
+  "evidence_files": [
+    {
+      "path": "/tmp/sandhi-reference-ownership-store-final.log",
+      "sha256": "8a590a9bafe641f48660e90bac4e923462262784c182a563266a2692864467ef"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-unit-final.log",
+      "sha256": "fa1f7ef620cce78280b2f5552396fcc3efb4e02b4015c3645b4bba60db8b9a34"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-http-final.log",
+      "sha256": "d9e8d633d4854a5d22abbf221e99e8f1b21afa501fdddc0fcfead88df0abc6c4"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-clippy.log",
+      "sha256": "e22f2315da0d31fb11824a5c71c168d715f826f7e0eb3d12751a1035f253ccd9"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-features-clippy.log",
+      "sha256": "88b0aa2911714e39b720c318faed8fd96ba1499bc64c1f00a2be3eb502090fe6"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-binary-final.log",
+      "sha256": "d0a7b27649a8ab54310bf96205e07fee5b3ad010375caa235d2acf93ae1986de"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-green-final.log",
+      "sha256": "0ea55a56de298ae17a15f0c570c990e068586c1177c73eead41810761e5b2488"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-green-final-joins.json",
+      "sha256": "d1e24dea492c152871e238143f1e886b353bd3a1170acb9a80be162019009a97"
+    },
+    {
+      "path": "/tmp/sandhi-reference-ownership-red-valid/result.json",
+      "sha256": "fe9f067eecbb07ebecd585ce1d6e652ca76bc3f5ae835be40fe41d70c992415c"
+    }
+  ],
+  "limits": [
+    "No full workspace, consumer SDK suite, live-provider or platform qualification claimed for this isolated increment.",
+    "Native own-issued reuse preserved; unobserved/external resources require a future explicit adoption contract.",
+    "Source issuer proof is not creation/deletion/liveness, final usage or settlement authority.",
+    "Known standard fields only; arbitrary future custom-provider resource extensions require codec/resource-contract review.",
+    "Original accounting-wait, Python native failure and historical shutdown timing gates remain open.",
+    "No author approval, commit, push, merge, deployment or release approval."
+  ]
+}

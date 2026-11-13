@@ -4,6 +4,11 @@ Status: W03 complete in the working tree; release/migration contract below. Stri
 Date: 2026-09-05
 Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
 
+The reasoning-minor-7 sections retain their original scope/date. Current HTTP serving
+follows the [0.17.0 durable-owner migration](../releases/v0.17.0.md) and shares strict
+source qualification; a legacy optional measurement marker does not authorize unknown
+usage to settle as zero or reactivate a permissive execution mode.
+
 ## Reasoning accounting: contract minor 7
 
 `ParsedUsage`, `UsageV2` and `UsageEvent` carry optional `reasoning_included`:
@@ -65,8 +70,12 @@ publish the deferred success. Transparent Gemini bytes remain unchanged.
 ## What budget enforcement actually guarantees
 
 Admission reserves `ceil(ingress_body_bytes / 4) + effective_output_max`, at least one token.
-The output default is injected for a capped Block request that omits an output limit, which
-requires translation. The input term is a heuristic, not a tokenizer or upper-bound proof.
+The current HTTP execution contract injects the operator-owned output default
+when a chat request omits its limit, under both Block and Warn policies. Canonical
+encoding carries the bound to the selected codec; native state is preserved or
+refused. Text Completions retains its explicit native default and aggregate batch
+exposure; Embeddings reserves input only. The input term is a heuristic, not a
+tokenizer or upper-bound proof. See the [durable migration](../operator/buffered-accounting.md).
 
 | Provider/path or request category | Input-bound evidence in Sandhi | Output/reasoning control | Advertised class |
 |---|---|---|---|
@@ -82,8 +91,12 @@ requires translation. The input term is a heuristic, not a tokenizer or upper-bo
 **No provider/model combination currently qualifies as a strict total-token cap.** There is no
 strict mode to select today. A Block policy atomically rejects a reservation exceeding available
 capacity; it does not promise that later measured usage stays below that reservation. Warn
-admits over budget and tracks usage. Volatile mode resets on restart; durable single-node mode
-persists leases and charges. Fleet coordination remains a separate gate.
+admits over a soft cap and tracks usage, but never bypasses an admission storage failure.
+Current HTTP generation requires the original single-file durable owner; there is no volatile
+serving mode. Qualified source evidence commits one paired receipt; unknown dispatch/usage
+keeps both liabilities through expiry/restart. Historical unpaired TTL rules stay distinct.
+Pure provider FFI remains ledger-free; fleet coordination remains a separate gate. See
+[the 0.17.0 migration](../releases/v0.17.0.md).
 
 Measured settlement is never clamped to an estimate. Every in-flight underestimated call can
 contribute excess: two reservations of 50 under a 100 cap may settle at 80 and 90, producing 170

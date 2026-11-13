@@ -9,8 +9,9 @@
 <a class="skip-link" href="#overview">Skip to overview</a>
 <header>
   <div class="brand">
+    <span class="brand-mark" aria-hidden="true">S</span>
     <h1>Sandhi</h1>
-    <span class="tagline">the metering layer for AI agents — neutral units, no pricing</span>
+    <span class="tagline">Operator console</span>
   </div>
   <div id="sso-box" hidden><a class="btn primary" id="sso-login" href="/auth/login">Sign in with SSO</a>
     <button class="btn" id="sso-logout" type="button" data-action="logout" hidden>Sign out</button></div>
@@ -23,29 +24,114 @@
     <button class="btn" type="button" data-action="clearToken">Clear token</button>
   </form>
   <button class="btn" type="button" data-action="refresh">Refresh</button>
+  <span id="refresh-status" class="muted" role="status"></span>
   <span id="auth-status" role="status">Checking access…</span>
 </header>
 <main class="wrap">
 <nav class="section-nav" aria-label="Dashboard sections">
-  <a href="#overview">Overview</a><a href="#configuration">Configuration</a><a href="#topology-section">Topology</a>
-  <a href="#access">Keys &amp; credentials</a><a href="#budget-section">Budgets</a>
-  <a href="#policy-section">Policy</a><a href="#alert-section">Alerts</a><a href="#run-section">Run lookup</a>
+  <span class="rail-label">Workspace</span>
+  <a href="#overview">Overview</a>
+  <a href="#routing-section">Backends &amp; routes</a>
+  <a href="#access">Keys &amp; credentials</a>
+  <a href="#budget-section">Budgets</a><a href="#alert-section">Alerts</a>
+  <a href="#run-section">Run explorer</a>
+  <a href="#evidence-section">Usage evidence</a>
+  <span class="rail-label">Gateway</span>
+  <a href="#flow-section">Routing &amp; cache guide</a>
+  <a href="#policy-section">Content policy</a>
+  <a href="#configuration">Configuration</a><a href="#topology-section">Topology</a>
 </nav>
+<div class="content">
+<div class="workspace-context"><span>Workspace</span><span aria-hidden="true">/</span><strong id="current-view">Overview</strong><span id="workspace-role" class="badge">Checking access</span></div>
 
+<section class="workspace-view" data-view="overview" aria-labelledby="overview">
 <h2 id="overview" tabindex="-1">Overview</h2>
+<p class="view-description">Understand request volume, token reuse and the teams behind your model traffic.</p>
+<div class="operator-shortcuts" aria-label="Explore gateway controls">
+  <a href="#flow-section" data-view-link><strong>Reuse context</strong><span>Follow routing, cache controls and token evidence</span><span aria-hidden="true">↗</span></a>
+  <a href="#policy-section" data-view-link><strong>Control egress</strong><span>Review configured rules and local evaluators</span><span aria-hidden="true">↗</span></a>
+  <a href="#evidence-section" data-view-link><strong>Inspect evidence</strong><span>Look up persisted observations by exact ID</span><span aria-hidden="true">↗</span></a>
+</div>
+<section class="panel execution-panel" id="execution" aria-label="Gateway execution readiness" aria-live="polite"></section>
 <section class="panel" id="usage" aria-label="Usage overview"></section>
+</section>
 
+<section class="workspace-view" data-view="flow-section" aria-labelledby="flow-section" hidden>
+<h2 id="flow-section" tabindex="-1">Routing, cache &amp; evidence</h2>
+<p class="view-description">Choose a client API, inspect its backend binding, and follow the evidence. Cache reuse and local egress control share the same request path.</p>
+<section class="panel flow-guide" aria-labelledby="call-path-title">
+  <div class="guide-heading"><div><span class="eyebrow">One request path</span><h3 id="call-path-title">From agent call to source evidence</h3></div><a class="docs-link" href="https://anvai-labs.github.io/sandhi/product/cache-aware-routing/" target="_blank" rel="noopener noreferrer">Read the guide ↗</a></div>
+  <ol class="call-path" aria-label="Request path">
+    <li><span class="path-step">01</span><strong>Client API</strong><p>Chat, Messages, Responses or Gemini</p><span class="hint">The request dialect</span></li>
+    <li><span class="path-step">02</span><strong>Gateway decisions</strong><p>Authorize the logical model and evaluate configured egress rules</p><span class="hint">Before source dispatch</span></li>
+    <li><span class="path-step">03</span><strong>Backend binding</strong><p>Select protocol/profile, model and credential reference; compile declared cache intent</p><span class="hint">One server cache compiler</span></li>
+    <li><span class="path-step">04</span><strong>Durable execution</strong><p>Reserve both scopes, dispatch once, retain qualified source usage and commit one receipt</p><span class="hint">Unknown usage keeps both holds</span></li>
+  </ol>
+  <div class="evidence-views">
+    <article><span class="eyebrow">Client wire view</span><h4>Compatible response</h4><p>The selected API format can combine or omit categories. It does not reconstruct the original source evidence.</p></article>
+    <article><span class="eyebrow">Server accounting view</span><h4>Original source counts</h4><p>The durable owner retains disjoint fresh/read/write counts, reasoning inclusion and paired settlement evidence. Unknown usage retains liability.</p></article>
+  </div>
+  <p class="callout info">A response, an observed usage row and a settlement receipt are different facts. This console's aggregate and Usage evidence views show observations; they do not prove that every call settled.</p>
+</section>
+<div class="guide-grid">
+  <section class="panel"><span class="eyebrow">Context efficiency</span><h3>Reuse an eligible prefix</h3><p>Keep stable instructions and tools before the changing conversation tail. The selected backend's declared cache policy determines eligible marker placement, lifetime and namespace rules.</p><p>Changing a backend, model or account does not transfer its cache or opaque state.</p><a class="btn" href="#routing-section" data-view-link>Inspect backends &amp; routes</a></section>
+  <section class="panel"><span class="eyebrow">Local egress control</span><h3>Review what may leave</h3><p>Configured policy can evaluate supported request content before inference, optionally with a local ONNX evaluator. The shipped sensitive-text classifier audits; deterministic rules own its blocks.</p><p>Protocol routing support does not imply identical inspected-content coverage.</p><a class="btn" href="#policy-section" data-view-link>Inspect content policy</a></section>
+</div>
+<section class="panel" aria-labelledby="token-guide-title">
+  <div class="guide-heading"><div><span class="eyebrow">Measure before pricing</span><h3 id="token-guide-title">Read the token categories</h3></div><a class="docs-link" href="https://anvai-labs.github.io/sandhi/product/cache-aware-routing/#follow-the-tokens-then-evaluate-cost" target="_blank" rel="noopener noreferrer">Token semantics ↗</a></div>
+  <dl class="token-glossary">
+    <div><dt><i class="token-fresh" aria-hidden="true"></i>Fresh input</dt><dd>Input outside the source's reported cache-read and cache-write categories.</dd></div>
+    <div><dt><i class="token-read" aria-hidden="true"></i>Cache read</dt><dd>Reported reused input. An absent or malformed report is not a measured zero.</dd></div>
+    <div><dt><i class="token-write" aria-hidden="true"></i>Cache write</dt><dd>A separate reported source category. It does not prove new KV state or a retention guarantee.</dd></div>
+    <div><dt>Output &amp; reasoning</dt><dd>Reasoning may overlap output or be separate. Add it only when the inclusion convention says it is excluded.</dd></div>
+  </dl>
+  <div class="wire-example"><strong>Illustrative protocol conversion</strong><p>Source: <code>2 fresh + 6 read + 2 write</code> → Gemini wire: <code>4 uncached + 6 read</code>. Gemini's response format has no separate cache-write category; the server's original source split remains separate.</p></div>
+  <p class="hint">Cache-read share describes input composition, not currency saved. Model rates, cache writes, retention and subscription quotas determine economic benefit. Sandhi reports neutral units.</p>
+  <a class="btn" href="#evidence-section" data-view-link>Inspect usage evidence</a>
+</section>
+<section class="panel" aria-labelledby="support-guide-title">
+  <div class="guide-heading"><div><span class="eyebrow">Independent dimensions</span><h3 id="support-guide-title">Protocol support is separate from credentials</h3></div><a class="docs-link" href="https://anvai-labs.github.io/sandhi/product/protocol-and-credential-matrix/" target="_blank" rel="noopener noreferrer">Capability matrix ↗</a></div>
+  <dl class="token-glossary"><div><dt>Client APIs</dt><dd>Chat, Messages, Responses and Gemini share the portable router. Native features may require a compatible backend or an explicit refusal.</dd></div><div><dt>Backend APIs</dt><dd>Qualified Chat-compatible, Messages, Responses, Gemini, Cohere and Ollama sources. Codex uses its constrained Responses profile.</dd></div><div><dt>Plaintext APIs</dt><dd>Native OpenAI-compatible Text Completions and Embeddings retain their endpoint shapes and use the same durable owner.</dd></div><div><dt>Subscription boundaries</dt><dd>GLM Coding Plan uses a Z.AI Bearer API key. It does not qualify first-party Claude Pro/Max OAuth. Codex account fencing is operator-configured, not independent identity verification.</dd></div></dl>
+  <p class="hint">Configured support and synthetic tests are distinct from live provider acceptance. Issuer-bound continuation ownership and broader lifecycle qualification remain separate gates.</p>
+</section>
+<section class="panel" aria-labelledby="defaults-reference-title">
+  <span class="eyebrow">Policy reference</span><h3 id="defaults-reference-title">Bounded defaults, explicit authority</h3>
+  <dl class="token-glossary"><div><dt>Output default</dt><dd>Chat requests without a limit receive 4,096 tokens by default. Operators can override it; an explicit declared model ceiling can narrow it.</dd></div><div><dt>Streaming defaults</dt><dd>30 s setup · 90 s idle · 180 s body, under a 240 s ceiling. Configured route policy takes precedence.</dd></div></dl>
+  <p class="hint">These are source defaults, not a readout of this process’s effective policy. Inspect Configuration for active deadline overrides. Reservations estimate liability; they are not strict physical token guarantees. Text Completions retains its explicit native default; Embeddings reserves input only.</p>
+  <div class="callout info">Standalone generation requires the original durable store and one ledger shard. Pure provider FFI remains ledger free. API-key/static Bearer credentials are distinct from managed subscription leases; client headers never grant backend credential authority.</div>
+</section>
+</section>
+
+<section class="workspace-view" data-view="routing-section" aria-labelledby="routing-section" hidden>
+<h2 id="routing-section" tabindex="-1">Backends &amp; routes</h2>
+<p class="view-description">Inspect configured provider labels, endpoint protocols, credential references and immutable budget authority separately.</p>
+<div class="callout info">Routes select an authorized backend before inference. Session affinity keeps compatible turns together; a failed call is not automatically replayed elsewhere.</div>
+<p class="hint">Budget authority is the backend record’s stored <code>upstream_budget_scope</code>. A family-named bucket may remain authoritative after a vendor label changes. Missing metadata is unavailable; the console never derives a namespace from the provider label.</p>
+<h3>Backend inventory</h3><section class="panel" id="backends" aria-label="Backend inventory"></section>
+<h3>Logical model routes</h3><section class="panel" id="routes" aria-label="Logical model routes"></section>
+</section>
+
+<section class="workspace-view" data-view="configuration" aria-labelledby="configuration" hidden>
 <h2 id="configuration">Declarative config <span class="hint">providers, budgets, alerts &amp; vkeys declared in a committed JSON file</span></h2>
+<p class="view-description">Preview desired state before applying it. Existing entries omitted from the file remain unchanged.</p>
 <section class="panel" id="config"></section>
 <div id="config-result" data-sensitive role="status"></div>
+</section>
 
+<section class="workspace-view" data-view="topology-section" aria-labelledby="topology-section" hidden>
 <h2 id="topology-section">Deployment topology <span class="hint">where this gateway and its peers live (SANDHI_TOPOLOGY_FILE)</span></h2>
 <section class="panel" id="topology"></section>
+</section>
 
+<section class="workspace-view" data-view="policy-section" aria-labelledby="policy-section" hidden>
 <h2 id="policy-section">Content policy</h2>
+<p class="view-description">Review the active inspection rules, evaluator actions and audit capacity before allowing requests to leave the gateway.</p>
 <section class="panel" id="policy" aria-label="Content policy status"></section>
+</section>
 
+<section class="workspace-view" data-view="access" aria-labelledby="access" hidden>
 <h2 id="access">Virtual keys &amp; credentials <span class="hint">who has access, and where calls actually go</span></h2>
+<p class="view-description">Manage caller access separately from upstream credentials. New virtual-key secrets appear once.</p>
 <section class="panel"><div id="keys"></div>
 <details class="actions"><summary>Mint a virtual key</summary>
         <div class="form-row">
@@ -60,11 +146,13 @@
       </details>
       <details class="actions"><summary>Add a credential</summary>
         <p class="hint">Existing references use a read grant and never write a secret. Native broker
-          IPC is required for SentinelPass reference onboarding; capabilities do not imply granted access.</p>
+          IPC is required for SentinelPass reference onboarding; capabilities do not imply granted access.
+          Bearer API transport does not establish a consumer subscription or managed OAuth lease.</p>
         <div class="form-row">
           <div class="field"><label for="c-mode">Credential source</label><select id="c-mode"><option value="write">Write secret</option><option value="reference">Existing reference (read-only)</option></select></div>
           <div class="field"><label for="c-provider">Provider</label><input id="c-provider" placeholder="ollama" style="width:7rem"></div>
           <div class="field"><label for="c-label">Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
+          <div class="field"><label for="c-scheme">API authentication</label><select id="c-scheme"><option value="api_key">API key</option><option value="bearer">Bearer API credential</option></select></div>
           <div class="field"><label for="c-baseurl">Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
           <div class="field"><label for="c-secret">Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
           <button class="btn primary" data-needs-token data-action="addCredential">Add</button>
@@ -72,8 +160,11 @@
         <div id="c-result" data-sensitive role="status"></div>
       </details>
 </section>
+</section>
 
+<section class="workspace-view" data-view="budget-section" aria-labelledby="budget-section" hidden>
 <h2 id="budget-section">Budgets <span class="hint">neutral-token caps per scope</span></h2>
+<p class="view-description">Set allowance windows and review spent, reserved and remaining capacity.</p>
 <section class="panel">
   <div id="budgets"></div>
   <p class="callout info">Admission uses estimated reservations, not strict token bounds.
@@ -92,11 +183,16 @@
     <div id="b-result" data-sensitive role="status"></div>
   </details>
 </section>
+</section>
 
+<section class="workspace-view" data-view="alert-section" aria-labelledby="alert-section" hidden>
 <h2 id="alert-section">Alerts <span class="hint">threshold rules on budget scopes</span></h2>
 <section class="panel" id="alerts"></section>
+</section>
 
-<h2 id="run-section">Run cost tree <span class="hint">one agent run's spend, per step, own vs subtree</span></h2>
+<section class="workspace-view" data-view="run-section" aria-labelledby="run-section" hidden>
+<h2 id="run-section">Run usage tree <span class="hint">one agent run's neutral usage, per step, own vs subtree</span></h2>
+<p class="view-description">Trace an agent run from individual steps to its total neutral-token usage.</p>
 <section class="panel">
   <div class="form-row" style="margin-top:0">
     <div class="field"><label for="run-id">Run ID</label><input id="run-id" placeholder="run_01HK..." style="width:16rem"></div>
@@ -104,12 +200,28 @@
   </div>
   <div id="run-tree" style="margin-top:.75rem"></div>
 </section>
+</section>
+
+<section class="workspace-view" data-view="evidence-section" aria-labelledby="evidence-section" hidden>
+<h2 id="evidence-section">Usage evidence</h2>
+<p class="view-description">Inspect bounded persisted usage by request, session or run ID. Missing rows do not prove that no traffic occurred.</p>
+<p class="hint">This view requires diagnostics permission. Results contain correlation metadata, not raw prompts or credentials.</p>
+<section class="panel">
+  <div class="form-row">
+    <div class="field"><label for="evidence-kind">Look up by</label><select id="evidence-kind"><option value="request">Request ID</option><option value="session">Session ID</option><option value="run">Run ID</option></select></div>
+    <div class="field"><label for="evidence-value">Exact identifier</label><input id="evidence-value" maxlength="256" placeholder="Paste the correlation ID"></div>
+    <button class="btn primary" data-needs-token data-action="lookupEvidence">Inspect usage</button>
+  </div>
+  <div id="request-evidence" data-sensitive role="status"></div>
+</section>
+</section>
 
 <footer>
   SSO access follows your assigned role: viewers can inspect usage, operators can manage budgets
   and alerts, and administrators can manage credentials and configuration. Sign out ends this
   dashboard session. Token access is available only in the explicit compatibility mode.
 </footer>
+</div>
 </main>
 <div class="toast-wrap" id="toasts" role="status" aria-live="polite"></div>
 

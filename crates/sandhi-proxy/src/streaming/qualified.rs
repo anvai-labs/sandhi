@@ -6,7 +6,9 @@ use crate::{
 use axum::{body::Bytes, response::Response};
 use futures_util::StreamExt;
 use sandhi_core::{UsageCompleteness, UsageV2};
-use sandhi_providers::raw::QualifiedStreamObservation;
+use sandhi_providers::raw::{
+    QualifiedStreamEvidence, QualifiedStreamObservation, QualifiedStreamSnapshot,
+};
 use sandhi_providers::AttemptOutcome;
 use sandhi_providers::ProviderHandle;
 use std::sync::Arc;
@@ -25,13 +27,48 @@ pub(crate) fn capture_terminal(accounting: &mut RequestAccounting) {
     let Some(observed) = accounting.stream_observation.take() else {
         return;
     };
-    let snapshot = observed.observation.snapshot();
-    let mut usage: UsageV2 = snapshot.usage.map(Into::into).unwrap_or_default();
+    let evidence = observed.observation.evidence();
+    let snapshot = evidence.snapshot;
+    let has_usage = evidence.usage.is_some();
+    let mut usage: UsageV2 = evidence.usage.unwrap_or_default();
     usage.upstream_request_id = observed.upstream_request_id;
     reconcile_boundary_duration(&mut usage, elapsed_ms(observed.started));
     reconcile_boundary_ttft(&mut usage, observed.ttft_ms);
+    capture_usage(accounting, usage, has_usage, snapshot);
+}
+
+/// SSE-only buffered transports retain source evidence even when output
+/// aggregation fails. This uses the same qualifier/completeness settlement rule.
+pub(crate) fn capture_provider_terminal(
+    accounting: &mut RequestAccounting,
+    evidence: QualifiedStreamEvidence,
+) {
+    let has_usage = evidence.usage.is_some();
+    let mut usage = evidence.usage.unwrap_or_else(|| UsageV2 {
+        attempts: 1,
+        ..Default::default()
+    });
+    if let Some(previous) = &accounting.usage {
+        if usage.duration_ms.is_none() {
+            usage.duration_ms = previous.duration_ms;
+            usage.duration_source = previous.duration_source;
+        }
+        if usage.time_to_first_token_ms.is_none() {
+            usage.time_to_first_token_ms = previous.time_to_first_token_ms;
+            usage.time_to_first_token_source = previous.time_to_first_token_source;
+        }
+    }
+    capture_usage(accounting, usage, has_usage, evidence.snapshot);
+}
+
+fn capture_usage(
+    accounting: &mut RequestAccounting,
+    mut usage: UsageV2,
+    has_usage: bool,
+    snapshot: QualifiedStreamSnapshot,
+) {
     if let Some(error) = snapshot.qualification_error {
-        if snapshot.usage.is_some() {
+        if has_usage {
             usage.completeness = UsageCompleteness::Partial;
         }
         // Bounded enum diagnostic, not a decision parsed from prose. The ledger's
@@ -41,13 +78,16 @@ pub(crate) fn capture_terminal(accounting: &mut RequestAccounting) {
             accounting.outcome
         ));
         accounting.set_outcome("error");
-    } else if snapshot.usage.is_none() {
+    } else if !has_usage {
         usage.outcome = Some(format!(
             "stream_usage_unavailable;delivery:{}",
             accounting.outcome
         ));
         accounting.set_outcome("error");
     } else {
+        if snapshot.outcome == Some(AttemptOutcome::ProviderRejected) {
+            accounting.set_outcome("error");
+        }
         if accounting.outcome == "error" && snapshot.outcome == Some(AttemptOutcome::Timeout) {
             accounting.set_outcome("timeout");
         }
@@ -64,16 +104,29 @@ pub(crate) async fn qualified_response(
     dialect: IngressDialect,
     mut accounting: RequestAccounting,
     full_error_detail: bool,
+    gemini: Option<crate::GeminiRoute>,
     permit: Arc<AdmissionPermit>,
 ) -> Response {
     let started = Instant::now();
     let forwarder = provider
         .raw_forwarder()
-        .expect("tracked admission validates transport");
+        .expect("tracked admission validates transport")
+        .clone()
+        .with_metered_attempt_context(
+            provider.slug(),
+            Some(accounting.model.clone()),
+            accounting
+                .owned
+                .as_ref()
+                .expect("tracked owner")
+                .attempts
+                .context
+                .clone(),
+        );
     let headers = accounting.per_call_wire_headers();
     let raw = match forwarder
         .forward_stream_qualified_with_headers(
-            &upstream_path(provider.family(), None, dialect),
+            &upstream_path(provider.family(), gemini.as_ref(), dialect),
             request_body,
             session.as_deref(),
             Some(&accounting.request_id),
@@ -130,5 +183,10 @@ pub(crate) async fn qualified_response(
     if !headers.contains_key("content-type") {
         response = response.header("content-type", "text/event-stream");
     }
-    response.body(body).expect("valid streaming response")
+    crate::stamp_usage_convention(
+        response.body(body).expect("valid streaming response"),
+        &provider,
+        dialect,
+        true,
+    )
 }

@@ -69,7 +69,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
     launches = 0
 
     @contextmanager
-    def launch(database, *, shards=1, provider_enabled=True, tracked=False, oidc_grant=True):
+    def launch(database, *, shards=1, provider_enabled=True, explicit_deadlines=False, oidc_grant=True):
         nonlocal launches
         launches += 1
         database = Path(database)
@@ -77,7 +77,7 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
         # Configuration is separately provisioned, not smuggled into the DB snapshot.
         config = tmp_path / f"launch-{launches}.json"
         configuration = {"providers": [], "vkeys": [], "budgets": [], "alerts": []}
-        if tracked:
+        if explicit_deadlines:
             configuration["streaming_deadlines"] = STREAMING_DEADLINES
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
@@ -89,8 +89,6 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
             # No OS keyring or real broker reads, even if restored metadata is malformed.
             "SANDHI_VAULT_BACKEND": "recovery-fixture-unavailable",
         })
-        if tracked:
-            env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
         verify = True
         admin_headers = dict(ADMIN)
         member_token = None
@@ -190,6 +188,24 @@ def leases(base, shards):
                     "SELECT scope, id, ceiling, actual, settled, expires_at FROM budget_reservation ORDER BY id"
                 ).fetchall())
     return sorted(rows)
+
+
+BACK_LEG_PREFIX = "upstream:"
+
+
+def front_leases(base, shards):
+    """Front-leg (vk:/group:) leases; the recovery registry owns only these."""
+    return [row for row in leases(base, shards) if not row[0].startswith(BACK_LEG_PREFIX)]
+
+
+def back_leases(base, shards):
+    """Upstream budget leases; new tracked executions link these to their primary intent."""
+    return [row for row in leases(base, shards) if row[0].startswith(BACK_LEG_PREFIX)]
+
+
+def assert_denial_left_no_accounting_rows(after, admitted):
+    """Both tracked budget legs share one transaction; denial must leave every row unchanged."""
+    assert after == admitted
 
 
 def get(client, path, *, headers=ADMIN):
@@ -300,7 +316,7 @@ def assert_security_state(gateway, keys):
         assert key["virtual_key"] not in json.dumps(get(gateway.client, "/admin/keys/virtual"))
 
 
-@pytest.mark.parametrize("shards", [1, 2], ids=["single-file", "two-shards"])
+@pytest.mark.parametrize("shards", [1], ids=["canonical-single-file"])
 def test_clean_restart_and_isolated_restore_preserve_evidence_and_continue_accounting(
     recovery_gateway, gated_provider, tmp_path, shards, record_property,
 ):
@@ -349,7 +365,7 @@ def test_clean_restart_and_isolated_restore_preserve_evidence_and_continue_accou
     assert persisted_rows(source, shards) == committed, "restore/continued accounting mutated source"
 
 
-@pytest.mark.parametrize("shards", [1, 2], ids=["single-file", "two-shards"])
+@pytest.mark.parametrize("shards", [1], ids=["canonical-single-file"])
 def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
     recovery_gateway, gated_provider, tmp_path, shards,
 ):
@@ -357,6 +373,10 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
     with recovery_gateway(source, shards=shards) as gateway:
         keys = seed(gateway)
         baseline = public_evidence(gateway.client)
+        prior_receipts = [part.get("budget_settlement_outbox", [])
+                          for part in persisted_rows(source, shards)]
+        assert sum(map(len, prior_receipts)) == 2
+        prior_executions = {row[0] for row in tracked_rows(source)["budget_execution_intent"]}
         with gateway.client.stream("POST", "/v1/chat/completions", headers={
             "Authorization": "Bearer " + keys["active"]["virtual_key"],
         }, json={**BODY, "stream": True, "max_tokens": 64}) as response:
@@ -365,9 +385,13 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
             assert b"data:" in next(chunks)
             assert gated_provider.entered.wait(1)
             admitted = leases(source, shards)
-            dangling = [row for row in admitted if row[4] == 0]
+            execution, = {row[0] for row in tracked_rows(source)["budget_execution_intent"]} - prior_executions
+            dangling = [row for row in front_leases(source, shards) if row[4] == 0]
             assert len(dangling) == 1 and dangling[0][2] > 0 and dangling[0][3] == 0
             assert dangling[0][5] > time.time(), "test must not use expired/retimed fixture leases"
+            # The back leg is reserved with the same ceiling and is equally unsettled.
+            back, = [row for row in back_leases(source, shards) if row[4] == 0]
+            assert back[2] == dangling[0][2] and back[3] == 0
             gateway.process.kill()
             assert gateway.process.wait(timeout=3) == -9
     gated_provider.release.set()
@@ -377,8 +401,15 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
         assert len(gated_provider.requests) == 3
         with closing(sqlite3.connect(source)) as connection:
             assert connection.execute("SELECT COUNT(*) FROM usage_events").fetchone() == (2,)
-        for part in persisted_rows(source, shards):
-            assert part.get("budget_settlement_outbox", []) == [], "proxy must not invent inactive W05a receipts"
+        recovered_receipts = [part.get("budget_settlement_outbox", [])
+                              for part in persisted_rows(source, shards)]
+        assert recovered_receipts == prior_receipts, "crash recovery must preserve only the prior measured receipts"
+        with closing(sqlite3.connect(source)) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM budget_settlement_outbox r "
+                "JOIN budget_execution_intent i ON i.reservation_id = r.reservation_id "
+                "WHERE i.execution_id = ?", (execution,)
+            ).fetchone() == (0,), "an unmeasured physical dispatch cannot receive a settlement receipt"
         # Prove the surviving lease still holds admission capacity, not merely a
         # historical row. Set the cap to exactly settled spend plus its ceiling.
         scope, _lease_id, ceiling, _actual, _settled, _expires = dangling[0]
@@ -392,7 +423,9 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
         assert len(gated_provider.requests) == 3
         assert leases(source, shards) == admitted
         assert get(restarted.client, "/dashboard/api/usage") == baseline["usage"]
-        restarted.stop()
+        # The unresolved durable execution still holds both liabilities; it
+        # cannot claim a clean accounting shutdown or fabricate a receipt.
+        restarted.stop(expected_status=124)
 
 
 def test_old_snapshot_revocation_is_reconciled_without_provider_credentials_before_admission(
@@ -435,8 +468,29 @@ def tracked_rows(database):
         connection.execute("BEGIN")
         return {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
                 for table in ("budget_execution_intent", "budget_request_correlation",
-                              "budget_dispatch_fence", "budget_terminal_observation",
+                              "budget_dispatch_fence", "budget_execution_context", "budget_execution_back_leg", "budget_physical_attempt", "budget_terminal_observation",
                               "budget_settlement_outbox", "budget_reservation", "usage_events")}
+
+
+def assert_physical_attempt(rows, *, terminal):
+    intent, = rows["budget_execution_intent"]
+    fence, = rows["budget_dispatch_fence"]
+    attempt, = rows["budget_physical_attempt"]
+    execution, identity, authorized_at, encoded = attempt
+    assert execution == intent[0] == fence[0]
+    assert len(identity) == 64 and all(c in "0123456789abcdef" for c in identity)
+    assert fence[-2:] == (1, identity) and authorized_at == fence[2]
+    if not terminal:
+        assert encoded is None, "authorization alone must leave send status unknown"
+        return
+    evidence = json.loads(encoded)
+    assert evidence["version"] == 2 and evidence["attempt_id"] == identity
+    context = json.loads(rows["budget_execution_context"][0][2])
+    assert evidence["observed_provider"] == {"provider": context["provider"], "model": context["actual_model"]}
+    assert evidence["attempt_ordinal"] == 1
+    assert evidence["dispatch_observed_at_ms"] is not None
+    assert evidence["terminal"] is not None
+    assert evidence["dropped_observations"] == 0 and evidence["invalid"] is False
 
 
 def await_terminal(database):
@@ -444,6 +498,7 @@ def await_terminal(database):
     while True:
         rows = tracked_rows(database)
         if len(rows["budget_terminal_observation"]) == 1:
+            assert_physical_attempt(rows, terminal=True)
             return rows
         assert time.monotonic() < deadline, rows
         time.sleep(0.02)
@@ -468,7 +523,7 @@ def test_tracked_oidc_stream_terminal_lifecycle(
     gated_provider.qualified_stream = True
     gated_provider.gate_after_usage = True
     source = tmp_path / "tracked-stream.db"
-    with recovery_gateway(source, tracked=True) as gateway:
+    with recovery_gateway(source, explicit_deadlines=True) as gateway:
         assert gateway.client.base_url.scheme == "https"
         configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
             "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
@@ -550,7 +605,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
     gated_provider.gate_buffered = True
     gated_provider.qualified_stream = streaming
     outcomes = []
-    with recovery_gateway(source, tracked=True) as gateway:
+    with recovery_gateway(source, explicit_deadlines=True) as gateway:
         configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
             "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
         })
@@ -576,9 +631,12 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert correlation[0] == fence[0] == intent[0]
             assert correlation[1] and fence[1] == 1 and fence[2] is not None
             assert admitted["budget_terminal_observation"] == []
+            assert_physical_attempt(admitted, terminal=False)
             assert admitted["budget_settlement_outbox"] == admitted["usage_events"] == []
-            held, = leases(source, 1)
+            held, = front_leases(source, 1)
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+            back, = back_leases(source, 1)
+            assert back[2] == held[2] and back[3:5] == (0, 0)
 
             with closing(sqlite3.connect(source, timeout=1)) as blocker:
                 blocker.execute("BEGIN IMMEDIATE")
@@ -624,7 +682,8 @@ def test_tracked_terminal_observed_during_sqlite_contention(
                 for table in ("budget_execution_intent", "budget_request_correlation",
                               "budget_dispatch_fence"):
                     assert recovered[table] == admitted[table], table
-                assert leases(source, 1)[0][3:5] == (14, 1)
+                # The back leg commits in the same Settle work as the retained front receipt.
+                assert [row[3:5] for row in leases(source, 1)] == [(14, 1), (14, 1)]
                 assert observed_tokens(gateway.client, headers=gateway.admin_headers) == expected
                 gateway.stop()
                 recovered = tracked_rows(source)
@@ -643,7 +702,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             thread.join(timeout=11)
             assert not thread.is_alive(), "client thread leaked"
 
-    with recovery_gateway(source, tracked=True) as restarted:
+    with recovery_gateway(source, explicit_deadlines=True) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         if crash:
             changed = restarted.client.post("/admin/budget", headers=restarted.admin_headers, json={
@@ -652,7 +711,7 @@ def test_tracked_terminal_observed_during_sqlite_contention(
             assert changed.status_code == 200, changed.text
             assert call(restarted.client, key, step="held-capacity").status_code == 429
             restarted.stop(expected_status=124)
-            assert tracked_rows(source) == admitted
+            assert_denial_left_no_accounting_rows(tracked_rows(source), admitted)
         else:
             assert tracked_rows(source) == recovered
             budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
@@ -671,7 +730,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
     source = tmp_path / "tracked-unknown.db"
     gated_provider.gate_buffered = True
     outcomes = []
-    with recovery_gateway(source, tracked=True) as gateway:
+    with recovery_gateway(source, explicit_deadlines=True) as gateway:
         expected_scheme = "https" if request.node.callspec.params["recovery_gateway"] == "oidc" else "http"
         assert gateway.client.base_url.scheme == expected_scheme
         key = gateway.member_token if gateway.member_token is not None else mint(gateway.client)["virtual_key"]
@@ -695,11 +754,14 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
             assert correlation[0] == fence[0] == intent[0]
             assert correlation[1] and fence[1] == 1 and fence[2] is not None
             assert admitted["budget_terminal_observation"] == []
+            assert_physical_attempt(admitted, terminal=False)
             assert admitted["budget_settlement_outbox"] == []
             assert admitted["usage_events"] == []
-            held, = leases(source, 1)
+            held, = front_leases(source, 1)
             assert held[0] == SCOPES[0]
             assert held[1] == intent[1] and held[2] > 0 and held[3:5] == (0, 0)
+            back, = back_leases(source, 1)
+            assert back[2] == held[2] and back[3:5] == (0, 0)
             gateway.process.kill()
             assert gateway.process.wait(timeout=3) == -9
         finally:
@@ -709,7 +771,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
         assert len(outcomes) == 1 and isinstance(outcomes[0], httpx.TransportError), outcomes
         record_property("executable_sha256", gateway.executable_sha256)
 
-    with recovery_gateway(source, tracked=True) as restarted:
+    with recovery_gateway(source, explicit_deadlines=True) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         # The held ceiling must still deny new work after all RAM owners are lost.
         changed = restarted.client.post("/admin/budget", headers=restarted.admin_headers, json={
@@ -720,7 +782,7 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
         assert denied.status_code == 429, denied.text
         assert denied.json()["error"]["message"] == "budget exhausted"
         restarted.stop(expected_status=124)
-    assert tracked_rows(source) == admitted
+    assert_denial_left_no_accounting_rows(tracked_rows(source), admitted)
     assert len(gated_provider.requests) == 1
 
 
@@ -732,7 +794,7 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
     gated_provider.qualified_stream = streaming
     source = tmp_path / "tracked-ready.db"
     gated_provider.release.set()
-    with recovery_gateway(source, tracked=True) as gateway:
+    with recovery_gateway(source, explicit_deadlines=True) as gateway:
         expected_scheme = "https" if request.node.callspec.params["recovery_gateway"] == "oidc" else "http"
         assert gateway.client.base_url.scheme == expected_scheme
         configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
@@ -757,9 +819,14 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         assert terminal[0] == intent[0] and terminal[3] == 14
         assert before["budget_request_correlation"] == [(intent[0], request_id)]
         assert before["budget_settlement_outbox"] == []
-        held, = leases(source, 1)
+        held, = front_leases(source, 1)
         assert held[0] == SCOPES[0]
         assert held[1] == intent[1] and held[3:5] == (0, 0)
+        # Receipt failure rolls back both charges. Final usage is durable, while
+        # both linked reservations stay held for atomic recovery.
+        back, = back_leases(source, 1)
+        assert back[2] == held[2] and back[3:5] == (0, 0)
+        assert before["budget_execution_back_leg"] == [(intent[0], 1, back[1])]
         wait_usage(gateway.client, 1, headers=gateway.admin_headers)
         subject = "recovery-member" if gateway.member_token is not None else "recovery-subject"
         with closing(sqlite3.connect(source)) as connection:
@@ -775,15 +842,20 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
     with closing(sqlite3.connect(source, timeout=1)) as connection:
         connection.execute("DROP TRIGGER reject_test_receipt")
         connection.commit()
-    with recovery_gateway(source, tracked=True, oidc_grant=False) as restarted:
+    with recovery_gateway(source, explicit_deadlines=True, oidc_grant=False) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         recovered = await_receipt(source)
         receipt, = recovered["budget_settlement_outbox"]
         assert receipt[1:4] == (intent[1], held[0], 14)
-        settled, = leases(source, 1)
+        settled, = front_leases(source, 1)
         assert settled[1] == intent[1] and settled[3:5] == (14, 1)
+        recovered_back, = back_leases(source, 1)
+        assert recovered_back[:3] == back[:3] and recovered_back[3:5] == (14, 1)
+        assert recovered_back[5] == back[5]
+        with closing(sqlite3.connect(source)) as connection:
+            assert connection.execute("SELECT DISTINCT settled_at FROM budget_reservation").fetchall() == [(receipt[4],)]
         for table in ("budget_execution_intent", "budget_request_correlation",
-                      "budget_dispatch_fence", "budget_terminal_observation", "usage_events"):
+                      "budget_dispatch_fence", "budget_execution_context", "budget_execution_back_leg", "budget_physical_attempt", "budget_terminal_observation", "usage_events"):
             assert recovered[table] == before[table], table
         budget, = get(restarted.client, "/dashboard/api/budgets", headers=restarted.admin_headers)["budgets"]
         assert budget["spent"] == 14
@@ -796,7 +868,7 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
             assert len(gated_provider.requests) == 1
         restarted.stop()
     # Another process boundary must preserve receipt identity, time and spend.
-    with recovery_gateway(source, tracked=True, oidc_grant=False) as again:
+    with recovery_gateway(source, explicit_deadlines=True, oidc_grant=False) as again:
         assert again.executable_sha256 == gateway.executable_sha256
         assert tracked_rows(source) == recovered
         budget, = get(again.client, "/dashboard/api/budgets", headers=again.admin_headers)["budgets"]
@@ -804,3 +876,40 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
         again.stop()
     assert tracked_rows(source) == recovered
     assert len(gated_provider.requests) == 1
+
+
+def test_historical_shards_snapshot_restore_preserves_rows_and_refuses_automatic_cutover(
+    proxy_binary, tmp_path,
+):
+    """Offline recovery keeps old topology; canonical startup never auto-migrates it."""
+    source = tmp_path / "historical.db"
+    for ordinal, database in enumerate(databases(source, 2)):
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript(
+                "CREATE TABLE budget_limit(scope TEXT PRIMARY KEY,limit_tokens INTEGER,window TEXT,policy TEXT);"
+                "CREATE TABLE budget_reservation(scope TEXT,id INTEGER PRIMARY KEY,ceiling INTEGER,actual INTEGER,settled INTEGER,expires_at INTEGER);"
+                "CREATE TABLE idempotency_dedup(key TEXT PRIMARY KEY,expires_at INTEGER);"
+            )
+            connection.execute("INSERT INTO budget_limit VALUES(?,?,?,?)",
+                               (f"group:historical-{ordinal}", 100, "daily", "warn"))
+            connection.execute("INSERT INTO budget_reservation VALUES(?,?,?,?,?,?)",
+                               (f"group:historical-{ordinal}", 80 + ordinal, 30, 11, 1, 1234567890))
+            connection.execute("INSERT INTO idempotency_dedup VALUES(?,?)",
+                               (f"historical-dedup-{ordinal}", 1234567890))
+    original = persisted_rows(source, 2)
+    archive = tmp_path / "historical-snapshot"
+    snapshot(source, archive, shards=2, metadata={"fixture": "offline-historical-shards", "writers_stopped": True})
+    restored = restore(archive, tmp_path / "historical-restored", expected_shards=2)
+    assert persisted_rows(restored, 2) == original
+    before = {str(p): p.read_bytes() for p in databases(restored, 2)}
+    inventory = sorted(p.name for p in restored.parent.iterdir())
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
+    env.update(SANDHI_AUTH_MODE="tokens", SANDHI_STORE=str(restored), SANDHI_LEDGER_SHARDS="2",
+               SANDHI_BIND=f"127.0.0.1:{_free_port()}")
+    refusal = subprocess.run([str(proxy_binary)], env=env, capture_output=True, text=True, timeout=5)
+    assert refusal.returncode == 2
+    assert "requires SANDHI_LEDGER_SHARDS=1" in refusal.stderr
+    assert {str(p): p.read_bytes() for p in databases(restored, 2)} == before
+    assert sorted(p.name for p in restored.parent.iterdir()) == inventory
+    assert persisted_rows(source, 2) == original

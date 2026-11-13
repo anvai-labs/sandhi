@@ -26,13 +26,20 @@ pub use sandhi_core::usage::{
 pub mod anthropic;
 mod anthropic_typed;
 pub mod attempt;
+mod buffered_completion;
+mod buffered_fidelity;
+mod cache_policy;
 mod cache_read;
+mod chat_projection;
+mod responses_projection;
+pub use cache_policy::contains_native_cache_controls;
 pub mod catalog;
 pub mod cohere;
 mod deadline;
 pub use deadline::{BufferedDeadline, StreamingDeadline};
 mod cohere_typed;
 pub mod escape_hatch;
+mod factory;
 pub mod gemini;
 mod gemini_typed;
 pub mod local;
@@ -41,6 +48,8 @@ pub mod openai;
 pub mod openai_responses;
 mod openai_responses_typed;
 pub mod openai_roles;
+mod peer;
+pub use peer::GatewayFailure;
 pub mod raw;
 pub mod resilience;
 pub mod token_estimate;
@@ -48,7 +57,7 @@ pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};
 pub use attempt::{
     AttemptContext, AttemptContextError, AttemptObservation, AttemptOutcome, AttemptPhase,
-    AttemptReceiver, ATTEMPT_OBSERVATION_VERSION,
+    AttemptReceiver, QualifiedBufferedEvidence, ATTEMPT_OBSERVATION_VERSION,
 };
 pub use catalog::{
     openai_compat_descriptor, provider_descriptor, resolve_openai_compat_provider,
@@ -56,6 +65,7 @@ pub use catalog::{
 };
 pub use cohere::Cohere;
 pub use escape_hatch::FnProvider;
+pub use factory::{ConfiguredProvider, ProviderOptions};
 pub use gemini::{Gemini, GeminiAuthScheme};
 pub use local::Ollama;
 pub use openai::OpenAiCompat;
@@ -63,13 +73,16 @@ pub use openai_responses::{OpenAiResponses, OpenAiResponsesProfile};
 pub use openai_roles::{validate_openai_chat_messages, OpenAiChatRole};
 mod linesplit;
 pub mod metering;
+mod native_chat;
+mod native_stream;
+mod qualified_stream;
 pub mod stream_usage;
 pub use metering::MeteredProvider;
 pub use resilience::{CircuitBreaker, ResilientProvider, RetryConfig, TimeoutConfig};
 pub use token_estimate::TokenEstimateCalibrator;
 pub use typed::{
-    ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle, ProviderRuntime,
-    ProviderTransportConfig, UsageCadence,
+    BackendBinding, ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle,
+    ProviderRuntime, ProviderTransportConfig, UsageCadence,
 };
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
@@ -127,8 +140,8 @@ pub struct ProviderRequest {
     /// Who this call is for (metering decorator input). Never enters the wire body —
     /// attribution rides outside the cached prompt (ADR-0001 §4); adapters ignore it.
     pub attribution: Attribution,
-    /// Optional W05b physical-attempt observer. It stays outside the wire body and headers and is
-    /// not connected to settlement, persistence, export, or enforcement.
+    /// Transport observer outside the wire body and headers. Diagnostic contexts
+    /// are opt-in; tracked HTTP binds a single-attempt context to its durable owner.
     pub attempt_context: Option<AttemptContext>,
 }
 
@@ -242,6 +255,8 @@ pub fn merge_call_headers(base: &http::HeaderMap, call: &http::HeaderMap) -> htt
 /// A completed (non-streaming) response plus the usage measured **at the source**.
 #[derive(Debug, Clone)]
 pub struct ProviderResponse {
+    /// Resolved only for an explicitly configured gateway peer.
+    pub usage_convention: Option<sandhi_core::UsageConventionV1>,
     pub status: u16,
     pub body: serde_json::Value,
     pub usage: ParsedUsage,
@@ -252,12 +267,27 @@ pub struct ProviderResponse {
 /// A completed response and separately qualified usage from that same call.
 /// `Err` usage means the response arrived but cannot authorize final settlement.
 /// Retain liability/reconcile; never retry inference to repair accounting. On the
-/// typed path, `response.usage` retains legacy semantics; only `usage` is qualified.
+/// admitted typed paths, `response.usage` contains the same qualified counters or
+/// an unavailable measurement; only `usage: Ok` can authorize final settlement.
 #[derive(Debug)]
 #[must_use]
 pub struct QualifiedCompletion<T> {
     pub response: T,
     pub usage: Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError>,
+}
+
+/// Avoid competing interpretations of duplicate usage/content fields. Parse once
+/// under the transport guard; errors carry no provider body or credentials.
+pub(crate) async fn decode_response_json(
+    response: reqwest::Response,
+) -> Result<serde_json::Value, ProviderError> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| ProviderError::Transport(e.to_string()))?;
+    sandhi_core::policy::strict_json(&bytes).map_err(|_| {
+        ProviderError::OutputProjection("invalid or ambiguous upstream JSON response".into())
+    })
 }
 
 fn buffered_usage(
@@ -326,13 +356,32 @@ pub struct StreamChunk {
 /// A streaming response with one measurement-terminal item; transport bytes can follow it.
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>;
 
+/// Qualified bytes and response-owned evidence from one physical HTTP stream.
+/// Consumers must drain/drop the source before freezing its observation.
+pub struct QualifiedProviderStream {
+    pub stream: ByteStream,
+    pub observation: raw::QualifiedStreamObservation,
+}
+
+/// Transport bounds depend on the host delivery mode, even for SSE-only backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualifiedStreamDelivery {
+    Buffered,
+    Streaming,
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProviderError {
     /// The caller supplied a malformed provider-native request. Never retry.
     InvalidRequest(String),
+    /// Completed source output cannot be represented by the selected client.
+    /// Repeating inference is not a repair for this deterministic refusal.
+    OutputProjection(String),
     /// 401 / 403 — bad or missing credential.
     Auth,
+    /// An explicit gateway peer failed without authorizing inference replay.
+    GatewayFailure(GatewayFailure),
     /// 429 — provider rate limit.
     RateLimited,
     /// Any other non-success status, with a bounded snippet of the upstream
@@ -357,7 +406,15 @@ impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderError::InvalidRequest(e) => write!(f, "invalid request: {e}"),
+            ProviderError::OutputProjection(e) => write!(f, "output projection refused: {e}"),
             ProviderError::Auth => write!(f, "auth failed (401/403)"),
+            ProviderError::GatewayFailure(failure) => {
+                write!(f, "gateway request failed ({})", failure.code)?;
+                if let Some(message) = &failure.message {
+                    write!(f, ": {message}")?;
+                }
+                Ok(())
+            }
             ProviderError::RateLimited => write!(f, "rate limited (429)"),
             ProviderError::Upstream {
                 status,
@@ -489,6 +546,9 @@ pub(crate) fn provider_request_id(
 /// wrap this so accounting + circuit-breaker + retry apply uniformly (a later milestone).
 #[async_trait]
 pub trait Provider: Send + Sync {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        sandhi_core::PeerRoleV1::Provider
+    }
     /// Neutral provider slug (e.g. `anthropic`, `openai`).
     fn slug(&self) -> &str;
 
@@ -498,6 +558,18 @@ pub trait Provider: Send + Sync {
 
     /// Streaming call: SSE pass-through (O(1) memory), usage finalized from the terminal block.
     async fn stream(&self, req: ProviderRequest) -> Result<ByteStream, ProviderError>;
+
+    /// Opt-in complete-event qualification at the physical response boundary.
+    /// Host transports remain unsupported unless they implement this explicitly.
+    async fn stream_qualified(
+        &self,
+        _req: ProviderRequest,
+        _delivery: QualifiedStreamDelivery,
+    ) -> Result<QualifiedProviderStream, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified transport streaming is unsupported".into(),
+        ))
+    }
 }
 
 /// Hard cap on a single newline-delimited line while a stream is being decoded, on **both**
@@ -523,7 +595,7 @@ pub trait Provider: Send + Sync {
 /// allocation: normal SSE carries newlines every few KB, so the buffer stays small. Worst-case
 /// memory is this plus one chunk, times the concurrent streams — see TD-0014 P2, which bounds
 /// the second factor. Sizing against a real corpus is TD-0015's job.
-pub(crate) const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_STREAM_LINE_BYTES: usize = sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES;
 
 /// Wrap a provider's byte stream in the metered pass-through: forward every upstream chunk
 /// verbatim (O(1) forwarding, ADR-0047 D9) while running `sniff` over each complete newline-

@@ -1,10 +1,20 @@
-//! Internal settlement receipts, not physical-attempt or public usage events (TD-0026 W05a).
-//! Includes opt-in execution usage snapshots and settlement from their frozen charge.
+//! Internal receipts, execution context, paired ownership and tracked transport evidence.
+//! Includes immutable usage snapshots and settlement from their frozen charge.
 //! Existing untracked HTTP/settlement callers are unchanged.
 //! Receipt delivery is at least once;
 //! consumers must deduplicate by receipt ID. No network exporter is provided here.
 
+mod attempts;
+pub mod context;
+pub use attempts::{
+    AttemptEvidence, ObservedProvider, PhysicalAttempt, TransportOutcome, TransportTerminal,
+};
 mod dispatch;
+mod paired;
+mod progress;
+use progress::mark as mark_admission;
+pub(crate) use progress::AdmissionStage;
+pub use progress::{AdmissionProgress, AdmissionSnapshot};
 #[cfg(test)]
 mod tests;
 pub use dispatch::{ClosureOutcome, DispatchOutcome, DispatchPermit, PreDispatchClosure};
@@ -199,7 +209,10 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_settlement_pending
              ON budget_settlement_outbox(settled_at, receipt_id)
              WHERE acknowledged_at IS NULL;",
-    )
+    )?;
+    context::init(conn)?;
+    paired::init(conn)?;
+    attempts::init(conn)
 }
 
 fn opaque_id() -> Result<String, EvidenceError> {
@@ -216,9 +229,9 @@ fn opaque_id() -> Result<String, EvidenceError> {
 fn receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<SettlementReceipt> {
     Ok(SettlementReceipt {
         receipt_id: row.get(0)?,
-        reservation_id: row.get(1)?,
+        reservation_id: row.get::<_, i64>(1)? as u64,
         scope: row.get(2)?,
-        charged_tokens: row.get(3)?,
+        charged_tokens: row.get::<_, i64>(3)? as u64,
         settled_at: row.get(4)?,
     })
 }
@@ -273,7 +286,7 @@ fn intent_binding(
     conn: &Connection,
     execution_id: &str,
 ) -> Result<Option<(u64, String, bool)>, EvidenceError> {
-    let binding: Option<(Option<u64>, Option<String>, Option<bool>)> = conn
+    let binding: Option<(Option<i64>, Option<String>, Option<bool>)> = conn
         .query_row(
             "SELECT r.id, r.scope, r.settled FROM budget_execution_intent i
          LEFT JOIN budget_reservation r ON r.id = i.reservation_id WHERE i.execution_id = ?1",
@@ -282,7 +295,7 @@ fn intent_binding(
         )
         .optional()?;
     match binding {
-        Some((Some(id), Some(scope), Some(settled))) => Ok(Some((id, scope, settled))),
+        Some((Some(id), Some(scope), Some(settled))) => Ok(Some((id as u64, scope, settled))),
         Some(_) => Err(EvidenceError::CorruptObservation),
         None => {
             let retained: bool = conn.query_row(
@@ -306,7 +319,7 @@ fn read_observation(
     scope: &str,
 ) -> Result<Option<TerminalObservation>, EvidenceError> {
     // Bound allocation even if a newer/foreign writer violated this version's contract.
-    let row: Option<(u32, Option<String>, Option<u64>, i64)> = conn.query_row(
+    let row: Option<(u32, Option<String>, Option<i64>, i64)> = conn.query_row(
         "SELECT version, CASE WHEN length(CAST(usage_json AS BLOB)) <= 16384 THEN usage_json END,
                 frozen_charge, observed_at FROM budget_terminal_observation WHERE execution_id = ?1",
         [execution_id],
@@ -330,7 +343,7 @@ fn read_observation(
             reservation_id,
             scope: scope.to_string(),
             usage,
-            frozen_charge,
+            frozen_charge: frozen_charge.map(|v| v as u64),
             observed_at,
         })
     })
@@ -338,7 +351,15 @@ fn read_observation(
 }
 
 // The one eligibility rule shared by recovery inventory and canonical settlement.
-fn terminal_charge(observed: &TerminalObservation) -> Result<i64, EvidenceError> {
+fn terminal_charge(
+    conn: &Connection,
+    observed: &TerminalObservation,
+) -> Result<i64, EvidenceError> {
+    if attempts::read(conn, &observed.execution_id)?
+        .is_some_and(|a| a.evidence.is_none_or(|e| !e.complete()))
+    {
+        return Err(EvidenceError::UnresolvedObservation);
+    }
     if observed.usage.completeness != UsageCompleteness::Final
         || observed.usage.basis != UsageBasis::ProviderReported
     {
@@ -361,7 +382,7 @@ fn checked_terminal_receipt(
     let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
         .query_row(
             "SELECT scope = ?2, settled, actual, settled_at FROM budget_reservation WHERE id = ?1",
-            params![id, scope],
+            params![id as i64, scope],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
     let stored = conn
@@ -369,7 +390,7 @@ fn checked_terminal_receipt(
             "SELECT CASE WHEN length(CAST(receipt_id AS BLOB)) = 64 THEN receipt_id END,
                 reservation_id, CASE WHEN scope = ?2 THEN ?2 END, charged_tokens, settled_at
          FROM budget_settlement_outbox WHERE reservation_id = ?1",
-            params![id, scope],
+            params![id as i64, scope],
             receipt,
         )
         .optional()?;
@@ -460,7 +481,9 @@ fn settle_receipt(
 
 pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM budget_execution_intent WHERE reservation_id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM budget_execution_intent WHERE reservation_id = ?1)
+         OR EXISTS(SELECT 1 FROM budget_execution_back_leg WHERE reservation_id = ?1)
+         OR EXISTS(SELECT 1 FROM budget_dispatch_fence WHERE back_reservation_id = ?1)",
         [id],
         |row| row.get(0),
     )
@@ -495,13 +518,13 @@ impl SqliteLedger {
             None => tx.query_row(
                 "SELECT COALESCE(MAX(reservation_id),0) FROM budget_execution_intent",
                 [],
-                |r| r.get(0),
+                |r| Ok(r.get::<_, i64>(0)? as u64),
             )?,
         };
         let after = cursor.map_or("", |c| c.after.as_str());
         let mut stmt = tx.prepare("SELECT DISTINCT r.scope FROM budget_execution_intent i LEFT JOIN budget_reservation r ON r.id=i.reservation_id WHERE i.reservation_id<=?1 AND (r.scope>?2 OR r.scope IS NULL) ORDER BY r.scope LIMIT ?3")?;
         let scopes = stmt
-            .query_map(params![through_id, after, limit as i64], |r| {
+            .query_map(params![through_id as i64, after, limit as i64], |r| {
                 r.get::<_, Option<String>>(0)
             })?
             .map(|r| {
@@ -545,6 +568,8 @@ impl SqliteLedger {
             retained_limit,
             true,
             Some(request_id),
+            None,
+            None,
         )
     }
     pub fn request_id_durable(
@@ -615,6 +640,13 @@ impl SqliteLedger {
              WHERE i.execution_id IS NULL)
              OR EXISTS(SELECT 1 FROM budget_dispatch_fence f
              LEFT JOIN budget_execution_intent i ON i.execution_id = f.execution_id
+             WHERE i.execution_id IS NULL)
+             OR EXISTS(SELECT 1 FROM budget_execution_back_leg b
+             LEFT JOIN budget_execution_intent i USING(execution_id)
+             LEFT JOIN budget_reservation r ON r.id=b.reservation_id
+             WHERE i.execution_id IS NULL OR r.id IS NULL)
+             OR EXISTS(SELECT 1 FROM budget_physical_attempt a
+             LEFT JOIN budget_execution_intent i USING(execution_id)
              WHERE i.execution_id IS NULL)",
             [],
             |r| r.get(0),
@@ -630,7 +662,7 @@ impl SqliteLedger {
                     "SELECT COALESCE(MAX(i.reservation_id), 0) FROM budget_execution_intent i
                  JOIN budget_reservation r ON r.id = i.reservation_id WHERE r.scope = ?1",
                     [scope],
-                    |r| r.get::<_, u64>(0),
+                    |r| Ok(r.get::<_, i64>(0)? as u64),
                 )?,
             ),
         };
@@ -643,10 +675,15 @@ impl SqliteLedger {
                  WHERE r.scope = ?1 AND i.reservation_id > ?2 AND i.reservation_id <= ?3
                  ORDER BY i.reservation_id LIMIT ?4",
             )?;
-            let mapped = statement
-                .query_map(params![scope, after_id, through_id, limit + 1], |r| {
-                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, u64>(1)?))
-                })?;
+            let mapped = statement.query_map(
+                params![
+                    scope,
+                    after_id as i64,
+                    through_id as i64,
+                    (limit + 1) as i64
+                ],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as u64)),
+            )?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         let has_more = rows.len() > limit;
@@ -672,7 +709,10 @@ impl SqliteLedger {
                 continue;
             }
             let observed = read_observation(&tx, &execution_id, reservation_id, scope)?;
-            let charge = observed.as_ref().map(terminal_charge).transpose();
+            let charge = observed
+                .as_ref()
+                .map(|o| terminal_charge(&tx, o))
+                .transpose();
             let charge = match charge {
                 Ok(value) => value,
                 Err(EvidenceError::UnresolvedObservation) => None,
@@ -728,9 +768,12 @@ impl SqliteLedger {
         let observed = read_observation(&tx, execution_id, reservation_id, &stored_scope)?
             .ok_or(EvidenceError::MissingObservation)?;
         let id = i64::try_from(reservation_id).map_err(|_| EvidenceError::CorruptObservation)?;
-        let charge = terminal_charge(&observed)?;
+        let charge = terminal_charge(&tx, &observed)?;
         checked_terminal_receipt(&tx, scope, reservation_id, Some(charge))?;
+        let back = paired::read(&tx, execution_id, reservation_id)?;
         let outcome = settle_receipt(&tx, scope, id, charge)?;
+        paired::settle(&tx, back.as_ref(), &outcome)?;
+        paired::read(&tx, execution_id, reservation_id)?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -748,6 +791,30 @@ impl SqliteLedger {
         usage: &UsageV2,
         cache_read_bp: u32,
     ) -> Result<ObservationOutcome, EvidenceError> {
+        self.record_terminal_inner(scope, execution_id, usage, cache_read_bp, None)
+    }
+
+    /// Atomically retain transport evidence and qualified execution usage. Exact
+    /// replay is accepted; later refinements and missing required evidence refuse.
+    pub fn record_terminal_with_attempt_durable(
+        &mut self,
+        scope: &str,
+        execution_id: &str,
+        usage: &UsageV2,
+        cache_read_bp: u32,
+        attempt: &AttemptEvidence,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        self.record_terminal_inner(scope, execution_id, usage, cache_read_bp, Some(attempt))
+    }
+
+    fn record_terminal_inner(
+        &mut self,
+        scope: &str,
+        execution_id: &str,
+        usage: &UsageV2,
+        cache_read_bp: u32,
+        attempt: Option<&AttemptEvidence>,
+    ) -> Result<ObservationOutcome, EvidenceError> {
         validate_scope(scope)?;
         validate_execution_id(execution_id)?;
         let encoded = encode_usage(usage)?;
@@ -760,6 +827,12 @@ impl SqliteLedger {
             return Err(EvidenceError::WrongScope);
         }
         dispatch::require_observable(&tx, scope, execution_id, reservation_id)?;
+        if context::read(&tx, execution_id)?.is_some_and(|context| {
+            context.accounting_policy.cache_read_weight.basis_points() != cache_read_bp
+        }) {
+            return Err(EvidenceError::ConflictingCharge);
+        }
+        attempts::record(&tx, execution_id, attempt)?;
         if let Some(original) = read_observation(&tx, execution_id, reservation_id, scope)? {
             if original.usage != *usage {
                 return Err(EvidenceError::ConflictingObservation);
@@ -837,7 +910,17 @@ impl SqliteLedger {
         ttl: Duration,
         retained_limit: usize,
     ) -> Result<IntentAdmission, EvidenceError> {
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, false, None)
+        self.reserve_intent(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            false,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Opt-in storage prerequisite for dispatch fencing. Only file-backed ledgers.
@@ -854,7 +937,17 @@ impl SqliteLedger {
         if !self.is_file_backed() {
             return Err(EvidenceError::UnsupportedTrackedLedger);
         }
-        self.reserve_intent(scope, ceiling, now, ttl, retained_limit, true, None)
+        self.reserve_intent(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            true,
+            None,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -867,7 +960,10 @@ impl SqliteLedger {
         retained_limit: usize,
         prepared: bool,
         request_id: Option<&str>,
+        context: Option<context::PreparedContext<'_>>,
+        progress: Option<&AdmissionProgress>,
     ) -> Result<IntentAdmission, EvidenceError> {
+        mark_admission(progress, AdmissionStage::ValidateAdmission);
         if !(1..=100_000).contains(&retained_limit)
             || scope.is_empty()
             || scope.len() > 4096
@@ -877,28 +973,46 @@ impl SqliteLedger {
         {
             return Err(EvidenceError::InvalidInput);
         }
+        mark_admission(progress, AdmissionStage::GenerateIdentity);
         let execution_id = opaque_id()?;
+        mark_admission(progress, AdmissionStage::BeginTransaction);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mark_admission(progress, AdmissionStage::ReadCapacity);
         let count: i64 = tx.query_row("SELECT COUNT(*) FROM budget_execution_intent", [], |r| {
             r.get(0)
         })?;
         if count >= retained_limit as i64 {
             return Err(EvidenceError::IntentCapacity);
         }
+        mark_admission(progress, AdmissionStage::ReservePrimary);
         let reservation = match Self::reserve_in_transaction(&tx, scope, ceiling, now, ttl)? {
             ReserveOutcome::Admitted(reservation) => reservation,
             ReserveOutcome::Denied(denied) => return Ok(IntentAdmission::Denied(denied)),
         };
+        let back = if let Some(back_scope) = context.as_ref().and_then(|c| c.paired_scope) {
+            if back_scope == scope {
+                return Err(EvidenceError::InvalidInput);
+            }
+            mark_admission(progress, AdmissionStage::ReserveBackLeg);
+            match Self::reserve_in_transaction(&tx, back_scope, ceiling, now, ttl)? {
+                ReserveOutcome::Admitted(back) => Some(back),
+                ReserveOutcome::Denied(denied) => return Ok(IntentAdmission::Denied(denied)),
+            }
+        } else {
+            None
+        };
+        mark_admission(progress, AdmissionStage::WriteIntent);
         let inserted = tx.execute(
             "INSERT INTO budget_execution_intent (execution_id, reservation_id, created_at) VALUES (?1, ?2, ?3)",
-            params![execution_id, reservation.id, now.unix_timestamp()],
+            params![execution_id, reservation.id as i64, now.unix_timestamp()],
         )?;
         if inserted != 1 {
             return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
         }
         if prepared {
+            mark_admission(progress, AdmissionStage::WriteFence);
             let inserted = tx.execute(
                 "INSERT INTO budget_dispatch_fence (execution_id, phase) VALUES (?1, 0)",
                 [&execution_id],
@@ -908,12 +1022,31 @@ impl SqliteLedger {
             }
         }
         if let Some(request_id) = request_id {
+            mark_admission(progress, AdmissionStage::WriteCorrelation);
             tx.execute(
                 "INSERT INTO budget_request_correlation(execution_id, request_id) VALUES (?1, ?2)",
                 params![execution_id, request_id],
             )?;
         }
+        if let Some(context) = context {
+            mark_admission(progress, AdmissionStage::WriteContext);
+            tx.execute("INSERT INTO budget_execution_context(execution_id,version,context_json) VALUES (?1,1,?2)", params![execution_id,context.json])?;
+            tx.execute(
+                "UPDATE budget_dispatch_fence SET context_version=1 WHERE execution_id=?1",
+                [&execution_id],
+            )?;
+        }
+        if let Some(back) = back {
+            mark_admission(progress, AdmissionStage::WriteBackLeg);
+            tx.execute("INSERT INTO budget_execution_back_leg(execution_id,version,reservation_id) VALUES (?1,1,?2)",params![execution_id,back.id as i64])?;
+            tx.execute(
+                "UPDATE budget_dispatch_fence SET back_reservation_id=?2,attempt_version=1 WHERE execution_id=?1",
+                params![execution_id, back.id as i64],
+            )?;
+        }
+        mark_admission(progress, AdmissionStage::Commit);
         tx.commit()?;
+        mark_admission(progress, AdmissionStage::Returned);
         Ok(IntentAdmission::Admitted(ExecutionIntent {
             execution_id,
             reservation,
@@ -927,7 +1060,7 @@ impl SqliteLedger {
         execution_id: &str,
     ) -> Result<Option<ExecutionIntent>, EvidenceError> {
         validate_execution_id(execution_id)?;
-        let row: Option<(u64, String, u64, i64)> = self
+        let row: Option<(i64, String, i64, i64)> = self
             .conn
             .query_row(
                 "SELECT r.id, r.scope, r.ceiling, r.expires_at FROM budget_execution_intent i
@@ -942,9 +1075,9 @@ impl SqliteLedger {
             Ok(ExecutionIntent {
                 execution_id: execution_id.to_string(),
                 reservation: Reservation {
-                    id,
+                    id: id as u64,
                     scope,
-                    ceiling,
+                    ceiling: ceiling as u64,
                     expires_at,
                 },
             })

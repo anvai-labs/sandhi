@@ -1,5 +1,6 @@
 //! Prepared admission inputs and inert recovery evidence. No HTTP activation.
-use super::{with_durable_ledger, Failure, PendingDispatch};
+use super::diagnostics::{mark, Progress, Stage};
+use super::{with_durable_ledger_observed, Failure, PendingDispatch};
 use crate::{lifecycle::Lifecycle, ProxyLedger};
 use sandhi_core::Denied;
 use sandhi_store::ledger::evidence::{EvidenceError, IntentAdmission};
@@ -10,7 +11,6 @@ use std::sync::Mutex;
 #[derive(Debug)]
 pub struct PreparedAdmission {
     pub(super) evidence: AdmissionEvidence,
-    pub(super) correlated: bool,
 }
 
 /// Metadata for reconciliation against the supervisor's ORIGINAL ledger. It does
@@ -22,6 +22,7 @@ pub struct AdmissionEvidence {
     pub ceiling: u64,
     pub ttl: time::Duration,
     pub retained_limit: usize,
+    pub context: Option<Box<sandhi_store::ledger::evidence::context::ExecutionContext>>,
 }
 
 impl PreparedAdmission {
@@ -42,20 +43,24 @@ impl PreparedAdmission {
             return Err(EvidenceError::InvalidInput);
         }
         Ok(Self {
-            correlated: false,
             evidence: AdmissionEvidence {
                 request_id,
                 scope,
                 ceiling,
                 ttl,
                 retained_limit,
+                context: None,
             },
         })
     }
 
-    pub(crate) fn correlated(mut self) -> Self {
-        self.correlated = true;
-        self
+    pub(crate) fn with_context(
+        mut self,
+        context: sandhi_store::ledger::evidence::context::ExecutionContext,
+    ) -> Result<Self, EvidenceError> {
+        context.validate()?;
+        self.evidence.context = Some(Box::new(context));
+        Ok(self)
     }
 
     pub fn evidence(&self) -> &AdmissionEvidence {
@@ -67,22 +72,33 @@ impl PreparedAdmission {
         ledger: &Mutex<ProxyLedger>,
         lifecycle: &Lifecycle,
     ) -> AdmissionOutcome {
+        self.run_observed(ledger, lifecycle, None)
+    }
+    pub(super) fn run_observed(
+        self,
+        ledger: &Mutex<ProxyLedger>,
+        lifecycle: &Lifecycle,
+        progress: Option<&Progress>,
+    ) -> AdmissionOutcome {
         let evidence = self.evidence;
-        let result = with_durable_ledger(ledger, |store| {
+        let result = with_durable_ledger_observed(ledger, progress, |store| {
             // This check follows acquisition of the outer ledger lock. An inner
             // shard/SQLite wait may still cross cutoff: retain that late Prepared
             // result, never authorize or dispatch here.
             if !lifecycle.is_running() {
                 return Ok(None);
             }
-            let admission = if self.correlated {
-                store.reserve_correlated_durable(
+            mark(progress, Stage::ReserveCall);
+            let admission = if let Some(context) = &evidence.context {
+                store.reserve_paired_contextual_durable_observed(
                     &evidence.scope,
                     evidence.ceiling,
                     time::OffsetDateTime::now_utc(),
                     evidence.ttl,
                     evidence.retained_limit,
                     &evidence.request_id,
+                    context,
+                    progress.map(|progress| &progress.admission),
                 )
             } else {
                 store.reserve_prepared_durable(

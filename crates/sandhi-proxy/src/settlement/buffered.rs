@@ -1,4 +1,4 @@
-//! Opt-in buffered HTTP ownership and bounded recovery.
+//! Durable HTTP execution ownership and bounded recovery.
 use crate::ProxyState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +8,12 @@ pub struct Config {
     capacity: usize,
     accounting_wait: Duration,
     transport_timeout: Duration,
+}
+impl Default for Config {
+    fn default() -> Self {
+        Self::new(64, Duration::from_secs(2), Duration::from_secs(120))
+            .expect("static durable accounting bounds")
+    }
 }
 impl Config {
     pub fn new(
@@ -37,12 +43,15 @@ pub fn enable(state: &Arc<ProxyState>, config: Config) -> Result<(), &'static st
         config.accounting_wait,
         config.transport_timeout,
     )?;
-    super::with_durable_ledger(&state.ledger, |ledger| ledger.validate_tracked_durable())
-        .map_err(|_| "tracked accounting requires an available single file-backed ledger")?;
+    let native_references=super::with_durable_ledger(&state.ledger, |ledger| {
+        ledger.open_native_reference_store().map_err(|_|sandhi_store::ledger::evidence::EvidenceError::UnsupportedTrackedLedger)
+    }).map_err(|_|"durable execution requires native reference storage on its original single file-backed ledger")?;
     state
         .buffered_accounting
         .set(Arc::new(Buffered {
-            jobs: Jobs::for_proxy(state, config.capacity),
+            native_references: Arc::new(native_references),
+            native_reference_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            jobs: Jobs::for_proxy(state, config.capacity, config.accounting_wait),
             config,
             recovery: Mutex::new(Recovery::default()),
         }))
@@ -56,10 +65,11 @@ use super::{
 };
 use crate::{
     codec::IngressDialect, complete_response, dialect_label, ingress_error, metrics,
-    transparent_complete_response, transparent_stream_response, AdmissionPermit, RequestAccounting,
+    stream_response, transparent_complete_response, transparent_stream_response, AdmissionPermit,
+    RequestAccounting,
 };
 use axum::{body::Bytes, http::StatusCode, response::Response};
-use sandhi_core::{ChatRequestV1, Policy};
+use sandhi_core::ChatRequestV1;
 use sandhi_providers::ProviderHandle;
 use sandhi_store::ledger::evidence::{RecoveryCursor, RecoveryState, ScopeCursor};
 use std::sync::Mutex;
@@ -68,6 +78,8 @@ pub(crate) struct Accounting {
     pub obligation: Obligation,
     pub execution: AuthorizedExecution,
     pub wait: Duration,
+    pub cache_read_weight_bp: u32,
+    pub attempts: super::attempts::Observer,
 }
 #[derive(Default)]
 struct Recovery {
@@ -79,9 +91,50 @@ struct Recovery {
     unresolved: usize,
 }
 pub(crate) struct Buffered {
+    native_references: Arc<sandhi_store::references::ReferenceStore>,
+    native_reference_slots: Arc<tokio::sync::Semaphore>,
     config: Config,
     jobs: Jobs,
     recovery: Mutex<Recovery>,
+}
+
+pub(crate) fn reference_authority(
+    state: &ProxyState,
+) -> Option<(
+    Arc<sandhi_store::references::ReferenceStore>,
+    Arc<tokio::sync::Semaphore>,
+)> {
+    state.buffered_accounting.get().map(|owner| {
+        (
+            owner.native_references.clone(),
+            owner.native_reference_slots.clone(),
+        )
+    })
+}
+
+/// Proof work shares one conservative absolute request budget selected before
+/// authorization; frames and storage retries cannot extend source/delivery bounds.
+pub(crate) fn proof_deadline(
+    state: &ProxyState,
+    started: std::time::Instant,
+    buffered: Option<Duration>,
+    streaming: Option<crate::deadlines::StreamLimits>,
+    wants_stream: bool,
+) -> Result<std::time::Instant, &'static str> {
+    let owner = state
+        .buffered_accounting
+        .get()
+        .ok_or("durable execution owner unavailable")?;
+    let transport = if wants_stream {
+        streaming
+            .ok_or("bounded streaming policy required")?
+            .dispatch_duration()
+    } else {
+        buffered.unwrap_or(owner.config.transport_timeout)
+    };
+    started
+        .checked_add(transport + owner.config.accounting_wait * 3)
+        .ok_or("invalid proof deadline")
 }
 
 pub fn retained(state: &ProxyState) -> usize {
@@ -101,6 +154,16 @@ pub(crate) fn accounting_error(dialect: IngressDialect, request_id: &str) -> Res
         "x-sandhi-request-id",
         request_id.parse().expect("generated identity"),
     );
+    no_automatic_retry(response)
+}
+
+/// OpenAI/Anthropic SDKs consult this header before their status-based retry
+/// policy. JSON advice alone cannot prevent a second, possibly billed request.
+pub(crate) fn no_automatic_retry(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        "x-should-retry",
+        axum::http::HeaderValue::from_static("false"),
+    );
     response
 }
 
@@ -109,6 +172,7 @@ pub(crate) async fn handle(
     state: Arc<ProxyState>,
     owner: Arc<Buffered>,
     provider: ProviderHandle,
+    selection: super::Selection,
     request: ChatRequestV1,
     body: Bytes,
     dialect: IngressDialect,
@@ -116,25 +180,62 @@ pub(crate) async fn handle(
     wants_stream: bool,
     transparent_eligible: bool,
     scope: String,
-    policy: Policy,
     ceiling: u64,
     _effective_max: u64,
     input_len: usize,
+    upstream_scope: String,
     configured_deadline: Option<Duration>,
     streaming_limits: Option<crate::deadlines::StreamLimits>,
 ) -> Response {
-    if (wants_stream
-        && (streaming_limits.is_none()
-            || !transparent_eligible
-            || !matches!(dialect, IngressDialect::OpenAi)))
-        || !matches!(dialect, IngressDialect::OpenAi | IngressDialect::Anthropic)
+    let plaintext = matches!(
+        dialect,
+        IngressDialect::Completions | IngressDialect::Embeddings
+    );
+    // Both leases are admitted together after validation. A refusal here owns no
+    // reservation, and no unknown dispatch can later be released by an RAII back leg.
+    if (wants_stream && (streaming_limits.is_none() || !provider.supports_owned_streaming()))
+        || !matches!(
+            dialect,
+            IngressDialect::OpenAi
+                | IngressDialect::Anthropic
+                | IngressDialect::Responses
+                | IngressDialect::Gemini
+                | IngressDialect::Completions
+                | IngressDialect::Embeddings
+        )
         || !provider.supports_owned_buffered()
-        || policy != Policy::Block
         || request.metadata.idempotency_key.is_some()
         || request.max_output_tokens.is_none()
     {
         return ingress_error(dialect, StatusCode::BAD_REQUEST,
-            "tracked accounting requires buffered chat or transparent OpenAI Chat streaming with a configured streaming deadline, a retry-free built-in OpenAI-compatible provider, Block policy, explicit output limit and no idempotency key");
+            "durable execution requires a qualified retry-free backend, synchronous operation, bounded streaming, explicit or operator-default output limit, and no idempotency key; plaintext operations require native OpenAI transport");
+    }
+    let preflight = if plaintext {
+        if provider.family() != sandhi_providers::ProviderFamily::OpenAiCompat
+            || !transparent_eligible
+            || provider.raw_forwarder().is_none()
+            || !provider.permits_model(&request.model)
+            || (wants_stream
+                && provider.source_usage_convention()
+                    != Ok(sandhi_core::UsageConventionV1::ChatStandard))
+        {
+            Err(sandhi_providers::ProviderError::InvalidRequest(
+                "plaintext operation requires a qualified native OpenAI transport".into(),
+            ))
+        } else {
+            provider.preflight_request(&request)
+        }
+    } else if wants_stream {
+        provider.preflight_owned_streaming(&request)
+    } else {
+        provider.preflight_owned_buffered(&request)
+    };
+    if preflight.is_err() {
+        return ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "tracked operation failed backend preflight",
+        );
     }
     let transport = if wants_stream {
         streaming_limits
@@ -151,6 +252,29 @@ pub(crate) async fn handle(
         );
     }
     let transparent = transparent_eligible;
+    let context = match selection.freeze(
+        &state,
+        &provider,
+        &request,
+        super::context::Surface {
+            dialect,
+            streaming: wants_stream,
+            transparent,
+        },
+        &upstream_scope,
+    ) {
+        Ok(context) => context,
+        Err(message) => return ingress_error(dialect, StatusCode::BAD_REQUEST, message),
+    };
+    // Selection telemetry is independent of admission, dispatch and settlement evidence.
+    tracing::debug!(
+        provider = provider.slug(),
+        model = %request.model,
+        plane = if transparent { "transparent" } else { "translation" },
+        stream = wants_stream,
+        "plane selected"
+    );
+    let cache_read_weight_bp = context.accounting_policy.cache_read_weight.basis_points();
     let mut accounting = RequestAccounting::new(
         state.clone(),
         scope.clone(),
@@ -165,6 +289,7 @@ pub(crate) async fn handle(
         },
     );
     accounting.input_len = input_len;
+    accounting.routing = selection.routing;
     if wants_stream {
         accounting.stream_body_lifetime = Some(
             streaming_limits
@@ -197,19 +322,30 @@ pub(crate) async fn handle(
             100_000,
         )
         .expect("validated generated admission")
-        .correlated();
+        .with_context(context)
+        .expect("validated frozen execution context");
         let Ok(ticket) = obligation.admit(prepared) else {
             return accounting_error(dialect, &task_id);
         };
+        let wait_started = std::time::Instant::now();
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
+            ticket.warn_timeout(&task_id, wait, wait_started);
             return accounting_error(dialect, &task_id);
         }
         let pending = match ticket.take() {
             Some(AdmissionOutcome::Prepared(pending)) => pending,
             Some(AdmissionOutcome::Denied { .. }) => {
-                return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted")
+                state.metrics.record_denied("block");
+                return ingress_error(dialect, StatusCode::TOO_MANY_REQUESTS, "budget exhausted");
             }
-            _ => return accounting_error(dialect, &task_id),
+            outcome => {
+                let reason = match outcome {
+                    Some(AdmissionOutcome::Failed { failure, .. }) => failure.diagnostic_code(),
+                    _ => "missing_or_interrupted_result",
+                };
+                tracing::warn!(request_id = %task_id, reason, "tracked admission unresolved");
+                return accounting_error(dialect, &task_id);
+            }
         };
         let ticket = match obligation.submit(Work::Authorize(pending)) {
             Ok(ticket) => ticket,
@@ -217,19 +353,34 @@ pub(crate) async fn handle(
                 // Only a scheduling refusal before authorization can prove no send.
                 if let Work::Authorize(pending) = rejected.work {
                     if let Ok(ticket) = obligation.submit(Work::Close(pending)) {
+                        let wait_started = std::time::Instant::now();
                         if tokio::time::timeout(wait, ticket.wait()).await.is_ok() {
                             let _ = ticket.take();
+                        } else {
+                            ticket.warn_timeout(&task_id, "pre_dispatch_close", wait, wait_started);
                         }
                     }
                 }
                 return accounting_error(dialect, &task_id);
             }
         };
+        let wait_started = std::time::Instant::now();
         if tokio::time::timeout(wait, ticket.wait()).await.is_err() {
+            ticket.warn_timeout(&task_id, "dispatch_authorization", wait, wait_started);
             return accounting_error(dialect, &task_id);
         }
-        let Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) = ticket.take() else {
-            return accounting_error(dialect, &task_id);
+        let execution = match ticket.take() {
+            Some(Outcome::Dispatch(DispatchAttempt::Authorized(execution))) => execution,
+            outcome => {
+                let reason = match outcome {
+                    Some(Outcome::Dispatch(DispatchAttempt::Unresolved { failure, .. })) => {
+                        failure.diagnostic_code()
+                    }
+                    _ => "missing_or_uncertain_authorization",
+                };
+                tracing::warn!(request_id = %task_id, reason, "tracked dispatch authorization unresolved");
+                return accounting_error(dialect, &task_id);
+            }
         };
         // Authorizing SQLite work can cross cutoff. Do not dispatch a late permit
         // or pretend the durable MayHaveDispatched fence can be rolled back.
@@ -237,16 +388,34 @@ pub(crate) async fn handle(
             return accounting_error(dialect, &task_id);
         };
         accounting.reservation = Some(execution.intent().reservation.clone());
+        // The upstream reservation belongs to the durable execution linkage;
+        // canonical terminal settlement/recovery handles both in one transaction.
+        accounting.upstream_scope = Some(upstream_scope);
         accounting.operation = Some(operation);
+        let attempts = match super::attempts::Observer::new(&execution) {
+            Ok(attempts) => attempts,
+            Err(reason) => {
+                tracing::warn!(request_id = %task_id, reason, "tracked attempt setup unresolved");
+                return accounting_error(dialect, &task_id);
+            }
+        };
         accounting.owned = Some(Accounting {
             obligation,
             execution,
             wait,
+            cache_read_weight_bp,
+            attempts,
         });
         accounting.finalized = false;
         let full_error_detail = state.error_detail_full;
+        let gemini = (provider.family() == sandhi_providers::ProviderFamily::Gemini).then(|| {
+            crate::GeminiRoute {
+                model: request.model.clone(),
+                stream: wants_stream,
+            }
+        });
         let dispatch = async move {
-            if wants_stream {
+            if wants_stream && transparent {
                 transparent_stream_response(
                     provider,
                     body,
@@ -254,7 +423,17 @@ pub(crate) async fn handle(
                     dialect,
                     accounting,
                     full_error_detail,
-                    None,
+                    gemini,
+                    permit,
+                )
+                .await
+            } else if wants_stream {
+                stream_response(
+                    provider,
+                    request,
+                    dialect,
+                    accounting,
+                    full_error_detail,
                     permit,
                 )
                 .await
@@ -266,7 +445,7 @@ pub(crate) async fn handle(
                     dialect,
                     accounting,
                     full_error_detail,
-                    None,
+                    gemini,
                     permit,
                 )
                 .await
@@ -297,7 +476,14 @@ pub(crate) async fn handle(
     });
     let mut response = match tokio::time::timeout(transport + wait * 3, task).await {
         Ok(Ok(response)) => response,
-        _ => accounting_error(dialect, &request_id),
+        Ok(Err(error)) => {
+            tracing::warn!(request_id = %request_id, reason = "owner_task_failed", cancelled = error.is_cancelled(), panicked = error.is_panic(), "tracked response owner unresolved");
+            accounting_error(dialect, &request_id)
+        }
+        Err(_) => {
+            tracing::warn!(request_id = %request_id, reason = "owner_wait_timeout", "tracked response owner unresolved");
+            accounting_error(dialect, &request_id)
+        }
     };
     response.headers_mut().insert(
         "x-sandhi-request-id",
@@ -369,7 +555,7 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
             {
                 break;
             }
-            owner.jobs.retry_terminal(&mut cursor.retained_after);
+            owner.jobs.retry_retained(&mut cursor.retained_after);
             let result = super::with_durable_ledger(&state.ledger, |ledger| {
                 if cursor.current.is_none() {
                     let inventory = ledger.recovery_scopes_durable(cursor.scopes.as_ref(), 1)?;

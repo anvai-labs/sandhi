@@ -1,11 +1,12 @@
 //! HTTP ingress/egress codecs for the typed gateway front door.
 //!
-//! These codecs translate public OpenAI Chat Completions and Anthropic Messages documents to
-//! Sandhi's canonical chat contract. Provider-native JSON never reaches the runtime handle.
+//! These codecs project public dialects into the canonical chat contract. Decoder-owned
+//! native input remains in its family bucket for compatible, loss-aware re-encoding.
 
 use std::collections::BTreeMap;
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use base64::Engine as _;
 use sandhi_core::chat::ThinkingV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
@@ -13,6 +14,8 @@ use sandhi_core::{
     UsageV2, CHAT_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Map, Value};
+mod fidelity;
+mod responses_stream;
 
 /// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
 /// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
@@ -33,16 +36,27 @@ fn lift_openai_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
 /// Lift Gemini's `generationConfig.thinkingConfig.thinkingBudget` into the
 /// neutral `ThinkingV1` (W3d/G7). Budget 0 = disabled; a positive budget = on
 /// with a cap.
-fn lift_gemini_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
-    let budget = object
-        .get("generationConfig")?
-        .get("thinkingConfig")?
-        .get("thinkingBudget")?
-        .as_u64()?;
-    Some(ThinkingV1 {
+fn lift_gemini_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingV1>, String> {
+    let Some(config) = object
+        .get("generationConfig")
+        .and_then(|v| v.get("thinkingConfig"))
+    else {
+        return Ok(None);
+    };
+    if config.get("thinkingBudget").is_some() && config.get("thinking_budget").is_some() {
+        return Err("Gemini thinking budget aliases must not both be supplied".into());
+    }
+    let Some(budget) = config
+        .get("thinkingBudget")
+        .or_else(|| config.get("thinking_budget"))
+        .and_then(Value::as_u64)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ThinkingV1 {
         enabled: budget != 0,
         budget_tokens: (budget != 0).then_some(budget),
-    })
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +169,10 @@ impl IngressError {
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid provider request",
             ),
+            sandhi_providers::ProviderError::OutputProjection(_) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream output cannot be represented by the selected client protocol",
+            ),
             sandhi_providers::ProviderError::Auth => {
                 (axum::http::StatusCode::BAD_GATEWAY, "upstream auth failed")
             }
@@ -217,7 +235,14 @@ impl IngressError {
             }}),
         };
         use axum::response::IntoResponse;
-        (self.status, axum::Json(body)).into_response()
+        let response = (self.status, axum::Json(body)).into_response();
+        // Status-based SDK defaults otherwise retry gateway 502s even when the
+        // typed body says this is a deterministic, nonretryable refusal.
+        if self.typed.as_ref().is_some_and(|error| !error.retryable) {
+            crate::settlement::buffered::no_automatic_retry(response)
+        } else {
+            response
+        }
     }
 
     /// The dialect-neutral typed payload: the full ProviderErrorV1 when present, else the
@@ -341,10 +366,27 @@ impl IngressDialect {
 
 pub(crate) fn decode_request(
     dialect: IngressDialect,
-    body: Value,
+    mut body: Value,
     metadata: RequestMetadataV1,
 ) -> Result<(ChatRequestV1, bool), String> {
-    match dialect {
+    let cache = body
+        .as_object_mut()
+        .and_then(|object| object.remove("sandhi_cache"))
+        .map(serde_json::from_value::<sandhi_core::CacheIntentV1>)
+        .transpose()
+        .map_err(|_| "sandhi_cache must be a valid cache intent object".to_string())?;
+    if cache.is_some()
+        && matches!(
+            dialect,
+            IngressDialect::Embeddings | IngressDialect::Completions
+        )
+    {
+        return Err("sandhi_cache is supported only on chat endpoints".into());
+    }
+    if let Some(intent) = &cache {
+        intent.validate().map_err(str::to_owned)?;
+    }
+    let (mut request, stream) = match dialect {
         IngressDialect::OpenAi => decode_openai_request(body, metadata),
         IngressDialect::Embeddings | IngressDialect::Completions => {
             crate::text_endpoints::decode(dialect, body, metadata)
@@ -352,7 +394,9 @@ pub(crate) fn decode_request(
         IngressDialect::Anthropic => decode_anthropic_request(body, metadata),
         IngressDialect::Responses => decode_responses_request(body, metadata),
         IngressDialect::Gemini => decode_gemini_request(body, metadata),
-    }
+    }?;
+    request.cache_intent = cache;
+    Ok((request, stream))
 }
 
 /// Faithful decode of a Gemini `generateContent` body (TD-0010 D4b).
@@ -393,72 +437,43 @@ fn decode_gemini_request(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
 
-        // A `functionResponse` is a TOOL RESULT — its own role in the neutral contract, even
-        // though Gemini nests it inside a `user` turn.
-        let mut emitted_tool_result = false;
-        for fr in parts.iter().filter_map(|part| part.get("functionResponse")) {
+        // Split at tool results, preserving text/media on both sides in source order.
+        let mut start = 0;
+        for (index, part) in parts.iter().enumerate() {
+            let Some(fr) = part.get("functionResponse") else {
+                continue;
+            };
+            if start < index {
+                messages.push(decode_gemini_segment(content, &parts[start..index])?);
+            }
             let tool_call_id = fr
                 .get("id")
                 .or_else(|| fr.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let output = fr
-                .get("response")
-                .and_then(|r| r.get("output"))
-                .cloned()
-                .unwrap_or(Value::Null);
+            let response = fr.get("response").unwrap_or(&Value::Null);
+            // Invert our own one-field wrapper, but retain arbitrary native objects
+            // and additional fields instead of replacing them with null.
+            let output = if response
+                .as_object()
+                .is_some_and(|object| object.len() == 1 && object.contains_key("output"))
+            {
+                &response["output"]
+            } else {
+                response
+            };
             messages.push(ChatMessageV1::Tool {
                 content: MessageContent::Text(match output {
-                    Value::String(text) => text,
+                    Value::String(text) => text.clone(),
                     other => other.to_string(),
                 }),
                 tool_call_id,
             });
-            emitted_tool_result = true;
+            start = index + 1;
         }
-        if emitted_tool_result {
-            continue;
-        }
-
-        let tool_calls: Vec<ToolCallV1> = parts
-            .iter()
-            .filter_map(|part| part.get("functionCall"))
-            .map(|fc| {
-                let name = fc
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                ToolCallV1 {
-                    id: fc
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(name.as_str())
-                        .to_string(),
-                    name,
-                    arguments: fc
-                        .get("args")
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "{}".to_string()),
-                    extensions: BTreeMap::new(),
-                }
-            })
-            .collect();
-
-        let decoded = gemini_content(parts);
-        if content.get("role").and_then(Value::as_str) == Some("model") {
-            messages.push(ChatMessageV1::Assistant {
-                content: decoded,
-                name: None,
-                tool_calls,
-                refusal: None,
-            });
-        } else {
-            messages.push(ChatMessageV1::User {
-                content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
-                name: None,
-            });
+        if start < parts.len() || parts.is_empty() {
+            messages.push(decode_gemini_segment(content, &parts[start..])?);
         }
     }
 
@@ -558,11 +573,16 @@ fn decode_gemini_request(
         }
     }
     let mut extensions = BTreeMap::new();
-    if !gemini_body.is_empty() {
-        extensions.insert("gemini".to_string(), Value::Object(gemini_body));
-    }
 
-    let request = ChatRequestV1 {
+    // Retain exact input sequences alongside the existing unmodelled extras.
+    // Generation controls remain projected/merged as before.
+    for key in ["contents", "systemInstruction", "tools", "toolConfig"] {
+        if let Some(value) = object.get(key) {
+            gemini_body.insert(key.into(), value.clone());
+        }
+    }
+    extensions.insert("gemini".into(), Value::Object(gemini_body));
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.to_string(),
         // Stamped by the handler from the path segment.
         model: String::new(),
@@ -578,19 +598,89 @@ fn decode_gemini_request(
         // W3d/G7: Gemini has no effort concept; thinking rides
         // generationConfig.thinkingConfig.thinkingBudget.
         reasoning_effort: None,
-        thinking: lift_gemini_thinking(object),
+        thinking: lift_gemini_thinking(object)?,
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
         extensions,
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::GeminiGenerateContent,
+    )?;
     // Streaming is a path verb, not a body field; the handler stamps it.
     Ok((request, false))
 }
 
+fn decode_gemini_segment(content: &Value, parts: &[Value]) -> Result<ChatMessageV1, String> {
+    let decoded = gemini_content(parts)?;
+    Ok(
+        if content.get("role").and_then(Value::as_str) == Some("model") {
+            ChatMessageV1::Assistant {
+                content: decoded,
+                name: None,
+                tool_calls: parts
+                    .iter()
+                    .filter_map(|part| part.get("functionCall"))
+                    .map(|call| {
+                        let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+                        ToolCallV1 {
+                            id: call
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(name)
+                                .into(),
+                            name: name.into(),
+                            arguments: call
+                                .get("args")
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "{}".into()),
+                            extensions: BTreeMap::new(),
+                        }
+                    })
+                    .collect(),
+                refusal: None,
+            }
+        } else {
+            ChatMessageV1::User {
+                content: decoded.unwrap_or_else(|| MessageContent::Text(String::new())),
+                name: None,
+            }
+        },
+    )
+}
+
+/// ProtoJSON accepts the JSON and proto field names. Both consumers use one
+/// decision so a valid SDK image cannot be classified as unsupported media.
+fn gemini_inline_mime(inline: &Value) -> Result<&str, String> {
+    let camel = inline.get("mimeType");
+    let snake = inline.get("mime_type");
+    if camel.is_some() && snake.is_some() && camel != snake {
+        return Err("Gemini inlineData contains conflicting MIME aliases".into());
+    }
+    camel
+        .or(snake)
+        .and_then(Value::as_str)
+        .filter(|mime| {
+            let token = |value: &str| {
+                !value.is_empty()
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+                    })
+            };
+            mime.split_once('/')
+                .is_some_and(|(kind, subtype)| token(kind) && token(subtype))
+        })
+        .ok_or_else(|| "Gemini inlineData requires a valid MIME type".into())
+}
+
 /// Gemini `parts[]` → neutral content. Text-only collapses to `Text`; anything richer keeps its
 /// parts, with `inlineData` rendered as the data URI the neutral contract carries images in.
-fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
+fn gemini_content(parts: &[Value]) -> Result<Option<MessageContent>, String> {
     let mut collected: Vec<ContentPart> = Vec::new();
     for part in parts {
         if let Some(text) = part.get("text").and_then(Value::as_str) {
@@ -598,21 +688,33 @@ fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
                 text: text.to_string(),
             });
         } else if let Some(inline) = part.get("inlineData") {
-            let mime = inline
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .unwrap_or("application/octet-stream");
+            let mime = gemini_inline_mime(inline)?.to_ascii_lowercase();
             let data = inline
                 .get("data")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
+                .filter(|data| !data.is_empty())
+                .ok_or_else(|| "Gemini inlineData requires base64 bytes".to_string())?;
+            use base64::engine::general_purpose::{
+                STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+            };
+            let urlsafe = data.bytes().any(|byte| matches!(byte, b'-' | b'_'));
+            let engine = match (urlsafe, data.len() % 4 == 0) {
+                (false, true) => &STANDARD,
+                (false, false) => &STANDARD_NO_PAD,
+                (true, true) => &URL_SAFE,
+                (true, false) => &URL_SAFE_NO_PAD,
+            };
+            let bytes = engine
+                .decode(data)
+                .map_err(|_| "Gemini inlineData has invalid base64 bytes".to_string())?;
+            let data = STANDARD.encode(bytes);
             collected.push(ContentPart::ImageUrl {
                 image_url: format!("data:{mime};base64,{data}"),
                 detail: None,
             });
         }
     }
-    match collected.len() {
+    Ok(match collected.len() {
         0 => None,
         _ if collected
             .iter()
@@ -629,7 +731,7 @@ fn gemini_content(parts: &[Value]) -> Option<MessageContent> {
             Some(MessageContent::Text(text))
         }
         _ => Some(MessageContent::Parts(collected)),
-    }
+    })
 }
 
 /// Concatenate the `text` parts of a Gemini `parts[]` array.
@@ -648,8 +750,20 @@ fn gemini_parts_text(parts: Option<&Value>) -> Option<String> {
 /// Needed only on the CROSS-FAMILY path: a Gemini client talking to a Gemini upstream gets the
 /// upstream's own bytes back verbatim (D4a). When the upstream is another family, the client
 /// still expects Gemini's shape, so this is the mirror of the adapter's response parser.
-fn encode_gemini_response(response: &ChatResponseV1) -> Value {
+fn object_tool_arguments(arguments: &str) -> Result<Value, &'static str> {
+    let value = sandhi_core::policy::strict_json(arguments.as_bytes())
+        .map_err(|_| "invalid or incomplete tool arguments cannot be translated to an object")?;
+    if !value.is_object() {
+        return Err("tool arguments must be an explicit JSON object");
+    }
+    Ok(value)
+}
+
+fn encode_gemini_response(response: &ChatResponseV1) -> Result<Value, &'static str> {
     let mut parts: Vec<Value> = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        parts.push(json!({"text":reasoning,"thought":true}));
+    }
     if let Some(content) = &response.output.content {
         match content {
             MessageContent::Text(text) if !text.is_empty() => parts.push(json!({ "text": text })),
@@ -668,7 +782,7 @@ fn encode_gemini_response(response: &ChatResponseV1) -> Value {
             "name": call.name,
             "id": call.id,
             // Gemini carries arguments as an OBJECT, not the JSON string the OpenAI family uses.
-            "args": serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null),
+            "args": object_tool_arguments(&call.arguments)?,
         }}));
     }
 
@@ -679,11 +793,11 @@ fn encode_gemini_response(response: &ChatResponseV1) -> Value {
     if let Some(reason) = response.finish_reason {
         candidate["finishReason"] = json!(gemini_finish_reason(reason));
     }
-    json!({
+    Ok(json!({
         "candidates": [candidate],
         "usageMetadata": gemini_usage(&response.usage),
         "modelVersion": response.model,
-    })
+    }))
 }
 
 /// Neutral finish reason → Gemini's enum name.
@@ -724,7 +838,7 @@ fn gemini_usage(usage: &UsageV2) -> Value {
 ///
 /// Gemini has no per-event envelope: every chunk is a whole `GenerateContentResponse` carrying a
 /// delta, so a text delta and a finish become separate chunks of the same shape. Events with no
-/// Gemini representation (reasoning/refusal deltas, tool-call scaffolding) emit nothing rather
+/// Gemini representation (tool-call scaffolding) emit nothing rather
 /// than inventing a frame the client would mis-parse.
 fn encode_gemini_stream_event(
     event: &ChatStreamEventV1,
@@ -735,9 +849,23 @@ fn encode_gemini_stream_event(
             None,
             json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta}]},"index":0}]}),
         )],
+        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
+            None,
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":delta,"thought":true}]},"index":0}]}),
+        )],
         // Gemini SSE surfaces failures as an `{"error": ...}` data frame, not a
         // dropped stream — previously this fell into the silent catch-all.
-        ChatStreamEventV1::Error { error } => vec![(None, json!({"error": error}))],
+        ChatStreamEventV1::Error { error } => {
+            let status = error
+                .http_status
+                .and_then(|s| StatusCode::from_u16(s).ok())
+                .filter(|s| s.is_client_error() || s.is_server_error())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            vec![(
+                None,
+                json!({"error":{"code":status.as_u16(),"message":error.message,"status":google_status(status)}}),
+            )]
+        }
         ChatStreamEventV1::Finish { reason } => {
             let mut chunk = json!({"candidates":[{
                 "content": {"role": "model", "parts": []},
@@ -815,15 +943,17 @@ fn decode_sandhi_extensions(body: &mut Value) -> Result<Vec<(String, Value)>, St
 /// inside message content parses to a nested position and leaves the bytes
 /// untouched, and non-JSON or non-object bodies pass through unchanged.
 pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
-    const RESERVED: &[u8] = b"sandhi_extensions";
+    const RESERVED: &[&[u8]] = &[b"sandhi_extensions", b"sandhi_cache"];
     // Fast path: the literal bytes are absent AND no JSON unicode escape is
     // present, so no spelling of the reserved key can exist — stay byte-exact
     // without a parse. Any non-literal spelling of an ASCII key requires at
     // least one `\uXXXX` escape, so checking for `\u` is a necessary condition
     // (bodies carrying escaped non-ASCII text simply pay one parse).
-    let mentions_reserved = body.windows(RESERVED.len()).any(|w| w == RESERVED);
+    let mentions_reserved = RESERVED
+        .iter()
+        .any(|key| body.windows(key.len()).any(|window| window == *key));
     let mentions_escape = body.windows(2).any(|w| w == b"\\u");
-    if body.len() < RESERVED.len() || !(mentions_reserved || mentions_escape) {
+    if !(mentions_reserved || mentions_escape) {
         return body;
     }
     let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
@@ -832,7 +962,9 @@ pub(crate) fn strip_reserved_passthrough(body: bytes::Bytes) -> bytes::Bytes {
     let Some(object) = value.as_object_mut() else {
         return body;
     };
-    if object.remove("sandhi_extensions").is_some() {
+    let removed_extensions = object.remove("sandhi_extensions").is_some();
+    let removed_cache = object.remove("sandhi_cache").is_some();
+    if removed_extensions || removed_cache {
         return bytes::Bytes::from(serde_json::to_vec(&value).expect("re-serializing parsed JSON"));
     }
     body
@@ -886,7 +1018,7 @@ pub(crate) fn decode_openai_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model,
         messages,
@@ -909,6 +1041,10 @@ pub(crate) fn decode_openai_request(
         reasoning_effort: optional_string(object, "reasoning_effort")?,
         thinking: lift_openai_thinking(object),
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: {
             let mut extensions = BTreeMap::from([("openai".into(), body.clone())]);
             for (family, bucket) in passthrough {
@@ -917,6 +1053,10 @@ pub(crate) fn decode_openai_request(
             extensions
         },
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+    )?;
     request.validate()?;
     Ok((
         request,
@@ -1138,7 +1278,7 @@ fn decode_anthropic_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model: required_string(object, "model")?,
         messages,
@@ -1158,8 +1298,16 @@ fn decode_anthropic_request(
         reasoning_effort: None,
         thinking: lift_openai_thinking(object),
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
+    fidelity::capture(
+        &mut request,
+        sandhi_core::EndpointFamilyV1::AnthropicMessages,
+    )?;
     request.validate()?;
     Ok((
         request,
@@ -1388,6 +1536,12 @@ fn decode_responses_request(
         .map(|values| {
             values
                 .iter()
+                .filter(|value| {
+                    value
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_none_or(|kind| kind == "function")
+                })
                 .map(|value| {
                     let name = value
                         .get("name")
@@ -1412,7 +1566,7 @@ fn decode_responses_request(
         })
         .transpose()?
         .unwrap_or_default();
-    let request = ChatRequestV1 {
+    let mut request = ChatRequestV1 {
         schema_version: CHAT_SCHEMA_VERSION_V1.into(),
         model: required_string(object, "model")?,
         messages,
@@ -1439,8 +1593,13 @@ fn decode_responses_request(
             .map(str::to_owned),
         thinking: None,
         include_native_response: true,
+        include_native_stream: false,
+        native_input: None,
+        cache_intent: None,
+        compiled_cache: None,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
+    fidelity::capture(&mut request, sandhi_core::EndpointFamilyV1::OpenaiResponses)?;
     request.validate()?;
     Ok((
         request,
@@ -1455,7 +1614,15 @@ fn decode_responses_input_item(
     item: &Value,
     messages: &mut Vec<ChatMessageV1>,
 ) -> Result<(), String> {
-    let kind = item.get("type").and_then(Value::as_str).unwrap_or("");
+    // EasyInputMessage omits `type`; a role-bearing item is still a message.
+    // Keep explicitly typed native items on their existing dispatch path.
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or_else(|| {
+        if item.get("role").is_some() {
+            "message"
+        } else {
+            ""
+        }
+    });
     match kind {
         "message" => messages.push(decode_responses_message_item(item)?),
         "function_call" => {
@@ -1500,8 +1667,8 @@ fn decode_responses_input_item(
                 tool_call_id: call_id.into(),
             });
         }
-        // `reasoning` items carry encrypted/summary-only reasoning state that has no canonical
-        // representation; unknown item types are forward-compatible noise. Both are skipped.
+        // The portable projection omits opaque/unknown items. Codec-owned native
+        // input preserves their exact order; the fidelity gate refuses incompatible targets.
         _ => {}
     }
     Ok(())
@@ -1521,34 +1688,68 @@ fn decode_responses_message_item(item: &Value) -> Result<ChatMessageV1, String> 
             .cloned()
             .ok_or_else(|| "Responses message content must be a string or array".to_string())?
     };
-    let mut text = String::new();
+    let mut content_parts = Vec::new();
     let mut refusal = String::new();
     for part in &parts {
         match part.get("type").and_then(Value::as_str) {
             Some("input_text") | Some("output_text") | Some("text") => {
-                text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""))
+                content_parts.push(ContentPart::Text {
+                    text: part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                });
             }
             Some("refusal") => {
                 refusal.push_str(part.get("refusal").and_then(Value::as_str).unwrap_or(""))
             }
+            Some("input_image") => {
+                if let Some(url) = part.get("image_url").and_then(Value::as_str) {
+                    content_parts.push(ContentPart::ImageUrl {
+                        image_url: url.into(),
+                        detail: part
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    });
+                }
+                // Provider file IDs are retained in native input and marked
+                // resource-bound by the fidelity gate, never treated as URLs.
+            }
+            Some("input_file") => content_parts.push(ContentPart::File {
+                file_id: part
+                    .get("file_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                file_data: part
+                    .get("file_data")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                filename: part
+                    .get("filename")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            }),
             _ => {}
         }
     }
+    let content = content_from_parts(content_parts);
     match role.as_str() {
         "developer" => Ok(ChatMessageV1::Developer {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "system" => Ok(ChatMessageV1::System {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "user" => Ok(ChatMessageV1::User {
-            content: MessageContent::Text(text),
+            content: content.unwrap_or_else(|| MessageContent::Text(String::new())),
             name: None,
         }),
         "assistant" => Ok(ChatMessageV1::Assistant {
-            content: (!text.is_empty()).then_some(MessageContent::Text(text)),
+            content,
             name: None,
             tool_calls: Vec::new(),
             refusal: (!refusal.is_empty()).then_some(refusal),
@@ -1590,15 +1791,63 @@ fn responses_response_format(format: &Value) -> Result<Value, String> {
     }
 }
 
-pub(crate) fn encode_response(dialect: IngressDialect, response: &ChatResponseV1) -> Value {
-    match dialect {
+#[cfg(test)]
+pub(crate) fn encode_response(
+    dialect: IngressDialect,
+    response: &ChatResponseV1,
+) -> Result<Value, &'static str> {
+    encode_response_with_emission(dialect, response).map(|(body, _)| body)
+}
+
+pub(crate) fn encode_response_with_emission(
+    dialect: IngressDialect,
+    response: &ChatResponseV1,
+) -> Result<(Value, bool), &'static str> {
+    // These bodies are decoder-owned provider responses, not request extras.
+    // Compatible buffered egress must preserve signed/opaque state and unknown
+    // native output parts when admission required typed request execution.
+    let bucket = match dialect {
+        IngressDialect::OpenAi => Some(("openai", "choices")),
+        IngressDialect::Anthropic => Some(("anthropic", "content")),
+        IngressDialect::Responses => Some(("openai_responses", "output")),
+        IngressDialect::Gemini => Some(("gemini", "candidates")),
+        _ => None,
+    };
+    if let Some(native) = bucket.and_then(|(bucket, field)| {
+        response
+            .extensions
+            .get(bucket)
+            .filter(|value| value.get(field).is_some_and(Value::is_array))
+    }) {
+        return Ok((native.clone(), true));
+    }
+    if response.output.content.as_ref().is_some_and(|content|matches!(content,
+        MessageContent::Parts(parts) if parts.iter().any(|part|!matches!(part,ContentPart::Text{..})))) {
+        return Err("buffered output media requires compatible native delivery");
+    }
+    if dialect == IngressDialect::Anthropic
+        && response.finish_reason == Some(FinishReasonV1::ContentFilter)
+    {
+        return Err("buffered filtering semantics require a compatible client protocol");
+    }
+    if matches!(dialect, IngressDialect::Anthropic | IngressDialect::Gemini)
+        && response
+            .output
+            .refusal
+            .as_ref()
+            .is_some_and(|text| !text.is_empty())
+    {
+        return Err("buffered refusal semantics require a compatible client protocol");
+    }
+    let body = match dialect {
         IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
-            encode_openai_response(response)
+            Ok(encode_openai_response(response))
         }
         IngressDialect::Anthropic => encode_anthropic_response(response),
-        IngressDialect::Responses => encode_responses_response(response),
+        IngressDialect::Responses => Ok(encode_responses_response(response)),
         IngressDialect::Gemini => encode_gemini_response(response),
-    }
+    };
+    body.map(|body| (body, false))
 }
 
 fn encode_openai_response(response: &ChatResponseV1) -> Value {
@@ -1633,6 +1882,9 @@ fn encode_openai_response(response: &ChatResponseV1) -> Value {
     if let Some(refusal) = &response.output.refusal {
         message.insert("refusal".into(), Value::String(refusal.clone()));
     }
+    if let Some(reasoning) = buffered_reasoning(response) {
+        message.insert("reasoning_content".into(), reasoning.into());
+    }
     json!({
         "id": response.id,
         "object":"chat.completion",
@@ -1643,18 +1895,22 @@ fn encode_openai_response(response: &ChatResponseV1) -> Value {
     })
 }
 
-fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
+fn encode_anthropic_response(response: &ChatResponseV1) -> Result<Value, &'static str> {
     let mut content = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        // Presentation of materialized text only, never a provider signature.
+        content.push(json!({"type":"thinking","thinking":reasoning,"signature":""}));
+    }
     if let Some(text) = response.output.content.as_ref().map(content_text) {
         if !text.is_empty() {
             content.push(json!({"type":"text","text":text}));
         }
     }
     for call in &response.output.tool_calls {
-        let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
+        let input = object_tool_arguments(&call.arguments)?;
         content.push(json!({"type":"tool_use","id":call.id,"name":call.name,"input":input}));
     }
-    json!({
+    Ok(json!({
         "id":response.id,
         "type":"message",
         "role":"assistant",
@@ -1663,7 +1919,15 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
         "stop_reason":anthropic_finish(response.finish_reason),
         "stop_sequence":Value::Null,
         "usage":anthropic_usage(&response.usage),
-    })
+    }))
+}
+
+fn buffered_reasoning(response: &ChatResponseV1) -> Option<&str> {
+    response
+        .extensions
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
 }
 
 /// Encode the canonical response as an OpenAI Responses document — the inverse of
@@ -1672,6 +1936,10 @@ fn encode_anthropic_response(response: &ChatResponseV1) -> Value {
 /// `status` derived from the finish reason and a Responses-shaped `usage` block.
 fn encode_responses_response(response: &ChatResponseV1) -> Value {
     let mut output = Vec::new();
+    if let Some(reasoning) = buffered_reasoning(response) {
+        output.push(json!({"type":"reasoning","id":format!("reasoning_{}",response.id.as_deref().unwrap_or("buffered")),
+            "summary":[{"type":"summary_text","text":reasoning}],"status":"completed"}));
+    }
     let text = response.output.content.as_ref().map(content_text);
     let has_text = text.as_deref().is_some_and(|text| !text.is_empty());
     let has_refusal = response
@@ -1724,10 +1992,16 @@ fn responses_status(reason: Option<FinishReasonV1>) -> &'static str {
 }
 
 fn responses_usage(usage: &UsageV2) -> Value {
+    let input = usage
+        .tokens_in
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_creation_tokens);
+    let output = output_including_reasoning(usage);
     json!({
-        "input_tokens":usage.tokens_in.saturating_add(usage.cache_read_tokens).saturating_add(usage.cache_creation_tokens),
-        "output_tokens":output_including_reasoning(usage),
-        "input_tokens_details":{"cached_tokens":usage.cache_read_tokens},
+        "input_tokens":input,
+        "output_tokens":output,
+        "total_tokens":input.saturating_add(output),
+        "input_tokens_details":openai_input_details(usage),
         "output_tokens_details":{
             "reasoning_tokens":usage.reasoning_tokens.unwrap_or(0)
         }
@@ -1743,8 +2017,8 @@ fn responses_usage(usage: &UsageV2) -> Value {
 /// tolerate loosely but the spec does not. Gemini has the opposite constraint:
 /// a function call is ONE complete part per chunk (no partial frame exists), so
 /// tool calls must be buffered from start/argument-deltas and emitted complete
-/// at `ToolCallEnd`. Both live here; the OpenAI-family dialects stay stateless
-/// and delegate unchanged.
+/// at `ToolCallEnd`. Responses retains bounded, ordered output for its terminal
+/// fold. Chat Completions delegates to its stateless chunk encoder.
 pub(crate) struct StreamEventEncoder {
     dialect: IngressDialect,
     /// Next Anthropic content-block index (one space shared by prose + tools).
@@ -1755,24 +2029,12 @@ pub(crate) struct StreamEventEncoder {
     open_tools: BTreeMap<u32, usize>,
     /// Gemini buffered calls: canonical tool-call index → (id, name, args JSON).
     gemini_calls: BTreeMap<u32, (String, String, String)>,
-    /// Responses assembled output: streamed text plus buffered function calls,
-    /// in FIRST-OPEN ORDER (the `output_index` space of the final frame), folded
-    /// into the terminal `response.completed`.
-    responses_text: String,
-    responses_calls: BTreeMap<u32, (String, String, String)>,
-    responses_order: Vec<ResponsesOutputItem>,
+    responses: responses_stream::Encoder,
     /// OpenAI chunk identity (id/model from ResponseStart), stamped on every
     /// subsequent chunk — the spec requires them on all frames, and a client
     /// strict enough to require `created` requires these too.
     openai_id: Option<String>,
     openai_model: Option<String>,
-}
-
-/// One item slot in the Responses output-index space (assigned at first open,
-/// matching the terminal frame's `output` ordering).
-enum ResponsesOutputItem {
-    Text,
-    Call(u32),
 }
 
 impl StreamEventEncoder {
@@ -1783,9 +2045,7 @@ impl StreamEventEncoder {
             open_prose: None,
             open_tools: BTreeMap::new(),
             gemini_calls: BTreeMap::new(),
-            responses_text: String::new(),
-            responses_calls: BTreeMap::new(),
-            responses_order: Vec::new(),
+            responses: responses_stream::Encoder::new(),
             openai_id: None,
             openai_model: None,
         }
@@ -1795,24 +2055,42 @@ impl StreamEventEncoder {
         &mut self,
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
+    ) -> Result<Vec<(Option<&'static str>, Value)>, &'static str> {
+        if matches!(
+            self.dialect,
+            IngressDialect::Anthropic | IngressDialect::Gemini
+        ) && matches!(event, ChatStreamEventV1::RefusalDelta{delta} if !delta.is_empty())
+        {
+            return Err("streamed refusal semantics require a compatible client protocol");
+        }
+        if self.dialect == IngressDialect::Anthropic
+            && matches!(
+                event,
+                ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::ContentFilter
+                }
+            )
+        {
+            return Err("streamed filtering semantics require a compatible client protocol");
+        }
         match self.dialect {
-            IngressDialect::Anthropic => self.encode_anthropic(event, last_usage),
+            IngressDialect::Anthropic => Ok(self.encode_anthropic(event, last_usage)),
             IngressDialect::Gemini => self.encode_gemini(event, last_usage),
-            IngressDialect::Responses => self.encode_responses(event, last_usage),
-            _ => self.encode_openai(event, last_usage),
+            IngressDialect::Responses => self.responses.encode(event, last_usage),
+            _ => Ok(self.encode_openai(event, last_usage)),
         }
     }
 
-    /// Anthropic: maintain the block lifecycle. `last_usage` is unused here
-    /// (usage rides the terminal `message_delta`), matching the stateless arm.
+    /// Anthropic: maintain the block lifecycle. SDK stream accumulators read
+    /// usage on every message_delta, including the stop delta.
     fn encode_anthropic(
         &mut self,
         event: &ChatStreamEventV1,
-        _last_usage: Option<&UsageV2>,
+        last_usage: Option<&UsageV2>,
     ) -> Vec<(Option<&'static str>, Value)> {
         let mut frames: Vec<(Option<&'static str>, Value)> = Vec::new();
         match event {
+            ChatStreamEventV1::NativeFrame { .. } => {}
             ChatStreamEventV1::ResponseStart { id, model } => {
                 frames.push((
                     Some("message_start"),
@@ -1881,10 +2159,21 @@ impl StreamEventEncoder {
                     json!({"type":"content_block_stop","index":block}),
                 ));
             }
-            ChatStreamEventV1::Usage { usage } => frames.push((
-                Some("message_delta"),
-                json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
-            )),
+            ChatStreamEventV1::Usage { usage } => {
+                // Final usage arrives after source EOF. Messages deltas follow all
+                // block stops; leaving text open here breaks strict gateway clients.
+                self.close_prose_block(&mut frames);
+                for (_, block) in std::mem::take(&mut self.open_tools) {
+                    frames.push((
+                        Some("content_block_stop"),
+                        json!({"type":"content_block_stop","index":block}),
+                    ));
+                }
+                frames.push((
+                    Some("message_delta"),
+                    json!({"type":"message_delta","delta":{},"usage":anthropic_usage(usage)}),
+                ));
+            }
             ChatStreamEventV1::Finish { reason } => {
                 self.close_prose_block(&mut frames);
                 let open: Vec<usize> = self.open_tools.values().copied().collect();
@@ -1899,7 +2188,7 @@ impl StreamEventEncoder {
                     Some("message_delta"),
                     json!({"type":"message_delta","delta":{
                         "stop_reason":anthropic_finish(Some(*reason)),"stop_sequence":Value::Null
-                    }}),
+                    },"usage":last_usage.map(anthropic_usage).unwrap_or_else(||anthropic_usage(&UsageV2::default()))}),
                 ));
                 frames.push((Some("message_stop"), json!({"type":"message_stop"})));
             }
@@ -1960,149 +2249,6 @@ impl StreamEventEncoder {
         }
     }
 
-    /// Responses: accumulate the streamed output so the terminal
-    /// `response.completed` carries the FULL `output` items (the spec shape, and
-    /// what Codex-style clients re-read from the final frame) instead of an empty
-    /// list. `output_item.done` likewise carries the complete item.
-    fn encode_responses(
-        &mut self,
-        event: &ChatStreamEventV1,
-        last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
-        // The `output_index` space is assigned at first open (text lazily on its
-        // first delta, each call at its ToolCallStart) so added/delta/done
-        // frames and the terminal fold share one coherent ordering.
-        match event {
-            ChatStreamEventV1::TextDelta { delta } => {
-                let output_index = self.responses_open_text();
-                self.responses_text.push_str(delta);
-                return vec![(
-                    Some("response.output_text.delta"),
-                    json!({"type":"response.output_text.delta",
-                           "output_index":output_index,"content_index":0,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::RefusalDelta { delta } => {
-                let output_index = self.responses_open_text();
-                self.responses_text.push_str(delta);
-                return vec![(
-                    Some("response.refusal.delta"),
-                    json!({"type":"response.refusal.delta",
-                           "output_index":output_index,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallStart { index, id, name } => {
-                let output_index = self.responses_open_call(*index);
-                self.responses_calls
-                    .insert(*index, (id.clone(), name.clone(), String::new()));
-                return vec![(
-                    Some("response.output_item.added"),
-                    json!({"type":"response.output_item.added","output_index":output_index,
-                           "item":{"type":"function_call","id":id,"call_id":id,
-                                   "name":name,"arguments":"","status":"in_progress"}}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
-                if let Some(call) = self.responses_calls.get_mut(index) {
-                    call.2.push_str(delta);
-                }
-                let output_index = self.responses_index_of_call(*index);
-                return vec![(
-                    Some("response.function_call_arguments.delta"),
-                    json!({"type":"response.function_call_arguments.delta",
-                           "output_index":output_index,"delta":delta}),
-                )];
-            }
-            ChatStreamEventV1::ToolCallEnd { index } => {
-                let output_index = self.responses_index_of_call(*index);
-                if let Some((id, name, args)) = self.responses_calls.get(index) {
-                    return vec![(
-                        Some("response.output_item.done"),
-                        json!({"type":"response.output_item.done","output_index":output_index,
-                               "item":{"type":"function_call","id":id,"call_id":id,
-                                       "name":name,"arguments":args,"status":"completed"}}),
-                    )];
-                }
-            }
-            ChatStreamEventV1::Finish { reason } => {
-                let usage = last_usage
-                    .map(responses_usage)
-                    .unwrap_or_else(|| responses_usage(&UsageV2::default()));
-                // Fold in the SAME order the indices were assigned in.
-                let mut output = Vec::new();
-                for item in &self.responses_order {
-                    match item {
-                        ResponsesOutputItem::Text => {
-                            if !self.responses_text.is_empty() {
-                                output.push(json!({"type":"message","role":"assistant","content":[
-                                    {"type":"output_text","text":self.responses_text}
-                                ]}));
-                            }
-                        }
-                        ResponsesOutputItem::Call(index) => {
-                            if let Some((id, name, args)) = self.responses_calls.get(index) {
-                                output.push(json!({
-                                    "type":"function_call","id":id,"call_id":id,
-                                    "name":name,"arguments":args,"status":"completed"
-                                }));
-                            }
-                        }
-                    }
-                }
-                self.responses_order.clear();
-                let status = responses_status(Some(*reason));
-                let mut response = json!({
-                    "object":"response","status":status,"output":output,"usage":usage
-                });
-                if matches!(reason, FinishReasonV1::Length) {
-                    response["incomplete_details"] = json!({"reason":"max_output_tokens"});
-                } else if matches!(reason, FinishReasonV1::ContentFilter) {
-                    response["incomplete_details"] = json!({"reason":"content_filter"});
-                }
-                return vec![(
-                    Some("response.completed"),
-                    json!({"type":"response.completed","response":response}),
-                )];
-            }
-            _ => {}
-        }
-        encode_responses_stream_event(event, last_usage)
-    }
-
-    /// Open (or find) the text item's slot in the output-index space.
-    fn responses_open_text(&mut self) -> usize {
-        if let Some(position) = self
-            .responses_order
-            .iter()
-            .position(|item| matches!(item, ResponsesOutputItem::Text))
-        {
-            return position;
-        }
-        self.responses_order.push(ResponsesOutputItem::Text);
-        self.responses_order.len() - 1
-    }
-
-    /// Open (or find) a call item's slot in the output-index space.
-    fn responses_open_call(&mut self, canonical: u32) -> usize {
-        if let Some(position) = self.responses_order.iter().position(
-            |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
-        ) {
-            return position;
-        }
-        self.responses_order
-            .push(ResponsesOutputItem::Call(canonical));
-        self.responses_order.len() - 1
-    }
-
-    fn responses_index_of_call(&self, canonical: u32) -> usize {
-        self.responses_order
-            .iter()
-            .position(
-                |item| matches!(item, ResponsesOutputItem::Call(index) if *index == canonical),
-            )
-            .unwrap_or(canonical as usize)
-    }
-
     /// OpenAI: identical frames to the stateless encoder, plus the chunk
     /// identity (id/model captured at ResponseStart) on every subsequent
     /// chunk — the spec puts them on all frames, not only the first.
@@ -2135,9 +2281,12 @@ impl StreamEventEncoder {
         &mut self,
         event: &ChatStreamEventV1,
         last_usage: Option<&UsageV2>,
-    ) -> Vec<(Option<&'static str>, Value)> {
-        match event {
+    ) -> Result<Vec<(Option<&'static str>, Value)>, &'static str> {
+        let frames = match event {
             ChatStreamEventV1::ToolCallStart { index, id, name } => {
+                if self.gemini_calls.contains_key(index) {
+                    return Err("duplicate tool-call start cannot be translated to Gemini");
+                }
                 self.gemini_calls
                     .insert(*index, (id.clone(), name.clone(), String::new()));
                 Vec::new()
@@ -2145,12 +2294,16 @@ impl StreamEventEncoder {
             ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => {
                 if let Some(call) = self.gemini_calls.get_mut(index) {
                     call.2.push_str(delta);
+                } else {
+                    return Err(
+                        "tool arguments without a matching start cannot be translated to Gemini",
+                    );
                 }
                 Vec::new()
             }
             ChatStreamEventV1::ToolCallEnd { index } => match self.gemini_calls.remove(index) {
                 Some((id, name, args)) => {
-                    let args_value = serde_json::from_str(&args).unwrap_or(json!({}));
+                    let args_value = object_tool_arguments(&args)?;
                     vec![(
                         None,
                         json!({"candidates":[{
@@ -2161,10 +2314,15 @@ impl StreamEventEncoder {
                         }]}),
                     )]
                 }
-                None => Vec::new(),
+                None => {
+                    return Err(
+                        "tool-call end without a matching start cannot be translated to Gemini",
+                    )
+                }
             },
             other => encode_gemini_stream_event(other, last_usage),
-        }
+        };
+        Ok(frames)
     }
 }
 
@@ -2173,6 +2331,7 @@ fn encode_openai_stream_event(
     _last_usage: Option<&UsageV2>,
 ) -> Vec<(Option<&'static str>, Value)> {
     let value = match event {
+        ChatStreamEventV1::NativeFrame { .. } => return Vec::new(),
         ChatStreamEventV1::ResponseStart { id, model } => json!({
             "id":id,"object":"chat.completion.chunk","created":unix_now(),"model":model,
             "choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":Value::Null}]
@@ -2212,78 +2371,6 @@ fn openai_delta(delta: Value) -> Value {
     json!({"object":"chat.completion.chunk","created":unix_now(),"choices":[{"index":0,"delta":delta,"finish_reason":Value::Null}]})
 }
 
-/// Encode the canonical stream as OpenAI Responses SSE events — the inverse of
-/// `openai_responses_typed::decode_responses_stream`. Each event mirrors a Responses event kind
-/// the typed decoder consumes; the terminal `response.completed` folds in the last-seen usage.
-fn encode_responses_stream_event(
-    event: &ChatStreamEventV1,
-    last_usage: Option<&UsageV2>,
-) -> Vec<(Option<&'static str>, Value)> {
-    match event {
-        ChatStreamEventV1::ResponseStart { id, model } => vec![(
-            Some("response.created"),
-            json!({
-                "type":"response.created",
-                "response":{
-                    "id":id,"object":"response","status":"in_progress","model":model,"output":[]
-                }
-            }),
-        )],
-        ChatStreamEventV1::TextDelta { delta } => vec![(
-            Some("response.output_text.delta"),
-            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":delta}),
-        )],
-        ChatStreamEventV1::ReasoningDelta { delta } => vec![(
-            Some("response.reasoning_summary_text.delta"),
-            json!({"type":"response.reasoning_summary_text.delta","delta":delta}),
-        )],
-        ChatStreamEventV1::RefusalDelta { delta } => vec![(
-            Some("response.refusal.delta"),
-            json!({"type":"response.refusal.delta","delta":delta}),
-        )],
-        ChatStreamEventV1::ToolCallStart { index, id, name } => vec![(
-            Some("response.output_item.added"),
-            json!({
-                "type":"response.output_item.added","output_index":index,
-                "item":{
-                    "type":"function_call","id":id,"call_id":id,"name":name,
-                    "arguments":"","status":"in_progress"
-                }
-            }),
-        )],
-        ChatStreamEventV1::ToolCallArgumentsDelta { index, delta } => vec![(
-            Some("response.function_call_arguments.delta"),
-            json!({"type":"response.function_call_arguments.delta","output_index":index,"delta":delta}),
-        )],
-        ChatStreamEventV1::ToolCallEnd { index } => vec![(
-            Some("response.output_item.done"),
-            json!({"type":"response.output_item.done","output_index":index,
-                   "item":{"type":"function_call","status":"completed"}}),
-        )],
-        // Usage folds into the terminal `response.completed` emitted on Finish; nothing to stream.
-        ChatStreamEventV1::Usage { .. } => Vec::new(),
-        ChatStreamEventV1::Finish { reason } => {
-            let usage = last_usage
-                .map(responses_usage)
-                .unwrap_or_else(|| responses_usage(&UsageV2::default()));
-            vec![(
-                Some("response.completed"),
-                json!({
-                    "type":"response.completed",
-                    "response":{
-                        "object":"response","status":responses_status(Some(*reason)),
-                        "output":[],"usage":usage
-                    }
-                }),
-            )]
-        }
-        ChatStreamEventV1::Error { error } => vec![(
-            Some("error"),
-            json!({"type":"error","error":{"code":error.code,"message":error.message}}),
-        )],
-    }
-}
-
 fn output_including_reasoning(usage: &UsageV2) -> u64 {
     sandhi_core::billable_parts_with_reasoning(
         0,
@@ -2293,6 +2380,40 @@ fn output_including_reasoning(usage: &UsageV2) -> u64 {
         usage.reasoning_tokens.unwrap_or(0),
         usage.reasoning_included,
     )
+}
+
+fn openai_input_details(usage: &UsageV2) -> Value {
+    let mut details = json!({"cached_tokens":usage.cache_read_tokens});
+    // Preserve legacy response shapes when no writes are measured. The neutral
+    // contract has no write-field provenance, so zero cannot establish reporting.
+    if usage.cache_creation_tokens > 0 {
+        details["cache_write_tokens"] = json!(usage.cache_creation_tokens);
+    }
+    if let Some(audio) = usage.audio_input_tokens {
+        details["audio_tokens"] = json!(audio);
+    }
+    details
+}
+
+fn openai_output_details(usage: &UsageV2) -> Value {
+    let mut details = Map::new();
+    for (name, value) in [
+        ("reasoning_tokens", usage.reasoning_tokens),
+        ("audio_tokens", usage.audio_output_tokens),
+        (
+            "accepted_prediction_tokens",
+            usage.accepted_prediction_tokens,
+        ),
+        (
+            "rejected_prediction_tokens",
+            usage.rejected_prediction_tokens,
+        ),
+    ] {
+        if let Some(value) = value {
+            details.insert(name.into(), json!(value));
+        }
+    }
+    Value::Object(details)
 }
 
 fn openai_usage(usage: &UsageV2) -> Value {
@@ -2305,13 +2426,8 @@ fn openai_usage(usage: &UsageV2) -> Value {
         "prompt_tokens":prompt_tokens,
         "completion_tokens":output,
         "total_tokens":prompt_tokens.saturating_add(output),
-        "prompt_tokens_details":{"cached_tokens":usage.cache_read_tokens},
-        "completion_tokens_details":{
-            "reasoning_tokens":usage.reasoning_tokens,
-            "audio_tokens":usage.audio_output_tokens,
-            "accepted_prediction_tokens":usage.accepted_prediction_tokens,
-            "rejected_prediction_tokens":usage.rejected_prediction_tokens,
-        }
+        "prompt_tokens_details":openai_input_details(usage),
+        "completion_tokens_details":openai_output_details(usage)
     })
 }
 
@@ -2413,6 +2529,44 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn typed_nonretryable_errors_suppress_status_based_sdk_retries_in_every_dialect() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Anthropic,
+            IngressDialect::Responses,
+            IngressDialect::Gemini,
+        ] {
+            for full in [false, true] {
+                for error in [
+                    sandhi_providers::ProviderError::OutputProjection(
+                        "synthetic opaque state".into(),
+                    ),
+                    sandhi_providers::ProviderError::Auth,
+                ] {
+                    let response =
+                        IngressError::from_provider_detail(&error, "fixture", full).render(dialect);
+                    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+                    assert_eq!(response.headers()["x-should-retry"], "false");
+                    let bytes = axum::body::to_bytes(response.into_body(), 10_000)
+                        .await
+                        .unwrap();
+                    if !full {
+                        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic opaque state"));
+                    }
+                }
+            }
+            for error in [
+                sandhi_providers::ProviderError::Transport("transient".into()),
+                sandhi_providers::ProviderError::RateLimited,
+            ] {
+                let response =
+                    IngressError::from_provider_redacted(&error, "fixture").render(dialect);
+                assert!(!response.headers().contains_key("x-should-retry"));
+            }
+        }
+    }
     use sandhi_core::AssistantOutputV1;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -2489,7 +2643,7 @@ mod tests {
             },
         ];
         for event in &events {
-            frames.extend(encoder.encode(event, None));
+            frames.extend(encoder.encode(event, None).unwrap());
         }
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.unwrap()).collect();
         assert_eq!(
@@ -2573,7 +2727,13 @@ mod tests {
             },
             E::ToolCallEnd { index: 0 },
         ] {
-            out.extend(encoder.encode(&event, None).into_iter().map(|(_, v)| v));
+            out.extend(
+                encoder
+                    .encode(&event, None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, v)| v),
+            );
         }
         // Text passed through immediately; the call arrived as ONE complete part.
         assert_eq!(out.len(), 2);
@@ -2586,22 +2746,26 @@ mod tests {
         assert_eq!(call["id"], "call_1");
         assert_eq!(call["args"]["q"], 1);
 
-        let error_frames = encoder.encode(
-            &E::Error {
-                error: ProviderErrorV1 {
-                    code: "upstream".into(),
-                    message: "boom".into(),
-                    retryable: false,
-                    http_status: None,
-                    provider: None,
-                    request_id: None,
-                    details: BTreeMap::new(),
+        let error_frames = encoder
+            .encode(
+                &E::Error {
+                    error: ProviderErrorV1 {
+                        code: "upstream".into(),
+                        message: "boom".into(),
+                        retryable: false,
+                        http_status: None,
+                        provider: None,
+                        request_id: None,
+                        details: BTreeMap::new(),
+                    },
                 },
-            },
-            None,
-        );
+                None,
+            )
+            .unwrap();
         assert_eq!(error_frames.len(), 1, "errors must render, not vanish");
-        assert!(error_frames[0].1.get("error").is_some());
+        assert_eq!(error_frames[0].1["error"]["code"], 502);
+        assert_eq!(error_frames[0].1["error"]["message"], "boom");
+        assert!(error_frames[0].1["error"]["status"].is_string());
     }
 
     #[test]
@@ -2642,11 +2806,14 @@ mod tests {
             },
         ];
         for event in &events {
-            frames.extend(encoder.encode(event, Some(&UsageV2::default())));
+            frames.extend(encoder.encode(event, Some(&UsageV2::default())).unwrap());
         }
         let added = frames
             .iter()
-            .find(|(name, _)| *name == Some("response.output_item.added"))
+            .find(|(name, value)| {
+                *name == Some("response.output_item.added")
+                    && value["item"]["type"] == "function_call"
+            })
             .map(|(_, value)| value.clone())
             .expect("output_item.added frame");
         // Text opened first (index 0), so the call lives at output_index 1 —
@@ -2654,7 +2821,10 @@ mod tests {
         assert_eq!(added["output_index"], 1);
         let done_item = frames
             .iter()
-            .find(|(name, _)| *name == Some("response.output_item.done"))
+            .find(|(name, value)| {
+                *name == Some("response.output_item.done")
+                    && value["item"]["type"] == "function_call"
+            })
             .map(|(_, value)| value.clone())
             .expect("output_item.done frame");
         assert_eq!(done_item["output_index"], added["output_index"]);
@@ -2917,16 +3087,48 @@ mod tests {
 
     #[test]
     fn gemini_ingress_lifts_thinking_budget() {
-        let (request, _) = decode_gemini_request(
-            json!({
-                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
-            }),
-            RequestMetadataV1::default(),
-        )
-        .unwrap();
-        let thinking = request.thinking.expect("thinking lifted");
-        assert!(!thinking.enabled); // budget 0 = disabled
+        for key in ["thinkingBudget", "thinking_budget"] {
+            let (request, _) = decode_gemini_request(
+                json!({
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"thinkingConfig": {key: 0}}
+                }),
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            let thinking = request.thinking.expect("thinking lifted");
+            assert!(!thinking.enabled); // budget 0 = disabled
+        }
+        assert!(decode_gemini_request(json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0,"thinking_budget":1}}}),RequestMetadataV1::default()).unwrap_err().contains("aliases"));
+    }
+
+    #[test]
+    fn gemini_unrepresented_thinking_controls_stay_native_instead_of_disappearing() {
+        for config in [
+            json!({"thinkingBudget":-1}),
+            json!({"thinking_budget":-1}),
+            json!({"thinkingBudget":0,"includeThoughts":true}),
+            json!({"thinkingLevel":"high"}),
+        ] {
+            let (request, _) = decode_gemini_request(
+                json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+                "generationConfig":{"maxOutputTokens":64,"thinkingConfig":config}}),
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            assert!(request
+                .native_input
+                .as_ref()
+                .unwrap()
+                .nonportable_features
+                .contains(&sandhi_core::NativeInputFeatureV1::NativeControl));
+            assert!(request
+                .native_input_for(sandhi_core::EndpointFamilyV1::AnthropicMessages)
+                .is_err());
+            assert!(request
+                .native_input_for(sandhi_core::EndpointFamilyV1::GeminiGenerateContent)
+                .is_ok());
+        }
     }
 
     #[test]
@@ -3061,11 +3263,11 @@ mod tests {
             extensions: BTreeMap::new(),
         };
         assert_eq!(
-            encode_response(IngressDialect::OpenAi, &response)["usage"]["prompt_tokens"],
+            encode_response(IngressDialect::OpenAi, &response).unwrap()["usage"]["prompt_tokens"],
             10
         );
         assert_eq!(
-            encode_response(IngressDialect::Anthropic, &response)["usage"]
+            encode_response(IngressDialect::Anthropic, &response).unwrap()["usage"]
                 ["cache_read_input_tokens"],
             4
         );
@@ -3131,6 +3333,83 @@ mod tests {
     }
 
     #[test]
+    fn responses_shorthand_history_survives_translation() {
+        for stream in [false, true] {
+            let shorthand = json!({
+                "model":"gpt-test","stream":stream,"max_output_tokens":64,
+                "input":[
+                    {"role":"system","content":"be precise"},
+                    {"role":"developer","content":"preserve history"},
+                    {"role":"user","content":"first question"},
+                    {"role":"assistant","content":[{"type":"output_text","text":"first answer"}]},
+                    {"role":"user","content":[{"type":"input_text","text":"next question"}]}
+                ]
+            });
+            let mut explicit = shorthand.clone();
+            for item in explicit["input"].as_array_mut().unwrap() {
+                item["type"] = json!("message");
+            }
+            let (request, wants_stream) = decode_request(
+                IngressDialect::Responses,
+                shorthand,
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            let (expected, _) = decode_request(
+                IngressDialect::Responses,
+                explicit,
+                RequestMetadataV1::default(),
+            )
+            .unwrap();
+            assert_eq!(wants_stream, stream);
+            assert_eq!(request.messages, expected.messages);
+            let wire = sandhi_providers::typed::encode_openai_request(&request).unwrap();
+            assert_eq!(wire["messages"].as_array().unwrap().len(), 5);
+            assert_eq!(wire["messages"][2]["content"], "first question");
+            assert_eq!(wire["messages"][4]["content"], "next question");
+        }
+    }
+
+    #[test]
+    fn translated_cache_write_usage_round_trips_without_double_counting() {
+        let usage = UsageV2 {
+            tokens_in: 10,
+            tokens_out: 20,
+            cache_read_tokens: 60,
+            cache_creation_tokens: 30,
+            ..UsageV2::default()
+        };
+        for (wire, parse) in [
+            (
+                openai_usage(&usage),
+                sandhi_core::parse_openai_usage as fn(&Value) -> Option<sandhi_core::ParsedUsage>,
+            ),
+            (
+                responses_usage(&usage),
+                sandhi_core::parse_openai_responses_usage
+                    as fn(&Value) -> Option<sandhi_core::ParsedUsage>,
+            ),
+        ] {
+            let parsed = parse(&json!({"usage":wire})).unwrap();
+            assert_eq!(parsed.tokens_in, 10);
+            assert_eq!(parsed.cache_read_tokens, 60);
+            assert_eq!(parsed.cache_creation_tokens, 30);
+            assert_eq!(sandhi_core::billable(&parsed.into()), 120);
+        }
+        // Existing payloads without measured writes retain their previous shape.
+        for wire in [
+            openai_usage(&UsageV2::default()),
+            responses_usage(&UsageV2::default()),
+        ] {
+            let details = wire
+                .get("prompt_tokens_details")
+                .or_else(|| wire.get("input_tokens_details"))
+                .unwrap();
+            assert!(details.get("cache_write_tokens").is_none());
+        }
+    }
+
+    #[test]
     fn responses_egress_shapes_message_function_call_and_usage() {
         let response = ChatResponseV1 {
             schema_version: CHAT_SCHEMA_VERSION_V1.into(),
@@ -3156,7 +3435,7 @@ mod tests {
             },
             extensions: BTreeMap::new(),
         };
-        let body = encode_response(IngressDialect::Responses, &response);
+        let body = encode_response(IngressDialect::Responses, &response).unwrap();
         assert_eq!(body["object"], "response");
         assert_eq!(body["id"], "resp_1");
         assert_eq!(body["status"], "completed");
@@ -3191,82 +3470,90 @@ mod tests {
             usage: UsageV2::default(),
             extensions: BTreeMap::new(),
         };
-        let body = encode_response(IngressDialect::Responses, &response);
+        let body = encode_response(IngressDialect::Responses, &response).unwrap();
         assert_eq!(body["status"], "incomplete");
         assert_eq!(body["incomplete_details"]["reason"], "max_output_tokens");
     }
 
     #[test]
     fn responses_stream_events_fold_terminal_usage_into_completed() {
-        // Start → created; deltas → named delta events; usage folds into the completed frame.
-        let start = encode_responses_stream_event(
-            &ChatStreamEventV1::ResponseStart {
-                id: Some("resp_1".into()),
-                model: "gpt-test".into(),
-            },
-            None,
-        );
+        let mut encoder = StreamEventEncoder::new(IngressDialect::Responses);
+        let start = encoder
+            .encode(
+                &ChatStreamEventV1::ResponseStart {
+                    id: Some("resp_1".into()),
+                    model: "gpt-test".into(),
+                },
+                None,
+            )
+            .unwrap();
         assert_eq!(start[0].0, Some("response.created"));
         assert_eq!(start[0].1["response"]["model"], "gpt-test");
-
-        let delta = encode_responses_stream_event(
-            &ChatStreamEventV1::TextDelta { delta: "hi".into() },
-            None,
-        );
-        assert_eq!(delta[0].0, Some("response.output_text.delta"));
-        assert_eq!(delta[0].1["delta"], "hi");
-
+        let delta = encoder
+            .encode(&ChatStreamEventV1::TextDelta { delta: "hi".into() }, None)
+            .unwrap();
+        assert!(delta
+            .iter()
+            .any(|(kind, value)| *kind == Some("response.output_text.delta")
+                && value["delta"] == "hi"));
         let usage = UsageV2 {
             tokens_in: 5,
             tokens_out: 2,
             ..UsageV2::default()
         };
-        // Usage itself emits nothing; the terminal completed carries it.
-        assert!(encode_responses_stream_event(
-            &ChatStreamEventV1::Usage {
-                usage: usage.clone()
-            },
-            None,
-        )
-        .is_empty());
-
-        let finish = encode_responses_stream_event(
-            &ChatStreamEventV1::Finish {
-                reason: FinishReasonV1::Stop,
-            },
-            Some(&usage),
-        );
-        assert_eq!(finish[0].0, Some("response.completed"));
-        assert_eq!(finish[0].1["response"]["status"], "completed");
-        assert_eq!(finish[0].1["response"]["usage"]["input_tokens"], 5);
-        assert_eq!(finish[0].1["response"]["usage"]["output_tokens"], 2);
+        assert!(encoder
+            .encode(
+                &ChatStreamEventV1::Usage {
+                    usage: usage.clone()
+                },
+                None
+            )
+            .unwrap()
+            .is_empty());
+        let finish = encoder
+            .encode(
+                &ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::Stop,
+                },
+                Some(&usage),
+            )
+            .unwrap();
+        let (kind, terminal) = finish.last().unwrap();
+        assert_eq!(*kind, Some("response.completed"));
+        assert_eq!(terminal["response"]["status"], "completed");
+        assert_eq!(terminal["response"]["usage"]["input_tokens"], 5);
+        assert_eq!(terminal["response"]["usage"]["output_tokens"], 2);
+        assert_eq!(terminal["response"]["usage"]["total_tokens"], 7);
     }
 
     #[test]
-    fn responses_stream_events_shape_tool_call_lifecycle() {
-        let start = encode_responses_stream_event(
-            &ChatStreamEventV1::ToolCallStart {
-                index: 0,
-                id: "call_1".into(),
-                name: "weather".into(),
-            },
-            None,
-        );
-        assert_eq!(start[0].0, Some("response.output_item.added"));
-        assert_eq!(start[0].1["item"]["type"], "function_call");
-        assert_eq!(start[0].1["item"]["call_id"], "call_1");
-
-        let args = encode_responses_stream_event(
-            &ChatStreamEventV1::ToolCallArgumentsDelta {
-                index: 0,
-                delta: "{\"x\":".into(),
-            },
-            None,
-        );
-        assert_eq!(args[0].0, Some("response.function_call_arguments.delta"));
-
-        let end = encode_responses_stream_event(&ChatStreamEventV1::ToolCallEnd { index: 0 }, None);
-        assert_eq!(end[0].0, Some("response.output_item.done"));
+    fn streamed_refusal_and_filter_semantics_are_preserved_or_explicitly_refused() {
+        for dialect in [
+            IngressDialect::OpenAi,
+            IngressDialect::Responses,
+            IngressDialect::Anthropic,
+            IngressDialect::Gemini,
+        ] {
+            let mut encoder = StreamEventEncoder::new(dialect);
+            let refusal = encoder.encode(
+                &ChatStreamEventV1::RefusalDelta {
+                    delta: "declined".into(),
+                },
+                None,
+            );
+            assert_eq!(
+                refusal.is_ok(),
+                matches!(dialect, IngressDialect::OpenAi | IngressDialect::Responses)
+            );
+            let mut encoder = StreamEventEncoder::new(dialect);
+            let terminal = encoder.encode(
+                &ChatStreamEventV1::Finish {
+                    reason: FinishReasonV1::ContentFilter,
+                },
+                None,
+            );
+            assert_eq!(terminal.is_ok(), dialect != IngressDialect::Anthropic);
+        }
     }
 }
 
@@ -3386,6 +3673,40 @@ mod gemini_codec_tests {
     }
 
     #[test]
+    fn gemini_inline_sdk_mime_alias_and_urlsafe_bytes_are_portable() {
+        let body = json!({"contents":[{"role":"user","parts":[
+            {"inlineData":{"mime_type":"image/png","data":"-_8"}}
+        ]}]});
+        let (request, _) = decode_gemini_request(body, metadata()).unwrap();
+        let ChatMessageV1::User {
+            content: MessageContent::Parts(parts),
+            ..
+        } = &request.messages[0]
+        else {
+            panic!("inline image must retain its content part");
+        };
+        assert!(matches!(&parts[0], ContentPart::ImageUrl { image_url, .. }
+            if image_url == "data:image/png;base64,+/8="));
+        assert!(request
+            .native_input_for(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions)
+            .is_ok());
+    }
+
+    #[test]
+    fn gemini_inline_conflicting_mime_and_invalid_bytes_refuse() {
+        for inline in [
+            json!({"mimeType":"image/png","mime_type":"audio/wav","data":"AA=="}),
+            json!({"mimeType":4,"data":"AA=="}),
+            json!({"mimeType":"image/png","data":"invalid?"}),
+            json!({"mimeType":"image/png","data":4}),
+            json!({"mime_type":"image//png","data":"AA=="}),
+        ] {
+            let body = json!({"contents":[{"role":"user","parts":[{"inlineData":inline}]}]});
+            assert!(decode_gemini_request(body, metadata()).is_err(), "{inline}");
+        }
+    }
+
+    #[test]
     fn unmodelled_gemini_fields_are_preserved_not_dropped() {
         let body = json!({
             "contents": [{"role":"user","parts":[{"text":"hi"}]}],
@@ -3463,7 +3784,7 @@ mod gemini_codec_tests {
             },
             extensions: BTreeMap::new(),
         };
-        let encoded = encode_response(IngressDialect::Gemini, &response);
+        let encoded = encode_response(IngressDialect::Gemini, &response).unwrap();
 
         assert_eq!(
             encoded["candidates"][0]["content"]["parts"][0]["text"],

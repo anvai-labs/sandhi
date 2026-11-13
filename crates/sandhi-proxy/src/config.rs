@@ -42,6 +42,11 @@ pub struct SandhiFileConfig {
     pub tls: Option<TlsEntry>,
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
+    /// Non-secret explicit endpoints referring to exact stored credentials.
+    #[serde(default)]
+    pub backends: Vec<sandhi_store::BackendDefinition>,
+    #[serde(default)]
+    pub routes: Vec<sandhi_store::routes::RouteDefinition>,
     #[serde(default)]
     pub budgets: Vec<BudgetEntry>,
     #[serde(default)]
@@ -254,6 +259,22 @@ mod tests {
         assert_eq!(cfg.budgets[0].limit_tokens, 1_000_000);
         assert_eq!(cfg.alerts[0].threshold_pct, 90);
         assert_eq!(cfg.vkeys[0].subject.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn declarative_budgets_accept_an_upstream_back_leg_scope() {
+        // ADR-0015: `upstream:{provider}` is ordinary scope data — the declarative `budgets`
+        // section carries it with no special-casing (apply flows through the same
+        // `SetBudgetRequest` path as the operator API).
+        let json = r#"{
+            "budgets": [{"scope":"upstream:inferflux","limit_tokens":250000,"window":"monthly","policy":"warn"}]
+        }"#;
+        let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.budgets.len(), 1);
+        assert_eq!(cfg.budgets[0].scope, "upstream:inferflux");
+        assert_eq!(cfg.budgets[0].limit_tokens, 250_000);
+        assert_eq!(cfg.budgets[0].window.as_deref(), Some("monthly"));
+        assert_eq!(cfg.budgets[0].policy.as_deref(), Some("warn"));
     }
 
     #[test]

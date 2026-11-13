@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from source_provenance import freeze_cargo_build
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # What the mock upstream expects the proxy to present. A test asserts the client's virtual key
@@ -120,6 +122,13 @@ def _openai_chat_body(streaming: bool) -> str:
             "created": 1,
             "model": "gpt-mock",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "gpt-mock",
+            "choices": [],
             "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
         },
     ]
@@ -158,7 +167,12 @@ def _anthropic_messages_body(streaming: bool) -> str:
                     "content": [],
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 11, "output_tokens": 0},
+                    "usage": {
+                        "input_tokens": 11,
+                        "output_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 4,
+                    },
                 },
             },
         ),
@@ -270,36 +284,44 @@ def upstream():
 
 
 @pytest.fixture(scope="session")
-def proxy_binary() -> Path:
-    """The real `sandhi-proxy` binary. Built here so a local run needs no separate step."""
-    subprocess.run(
-        ["cargo", "build", "-p", "sandhi-proxy", "--bin", "sandhi-proxy"],
-        cwd=REPO_ROOT,
-        check=True,
+def proxy_binary(tmp_path_factory) -> Path:
+    """Build once and freeze the Cargo-reported session executable."""
+    snapshots = freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bin", "sandhi-proxy"],
+        [("sandhi-proxy", "bin")],
+        tmp_path_factory.mktemp("proxy-binary"),
     )
-    for candidate in (
-        REPO_ROOT / "target" / "debug" / "sandhi-proxy",
-        REPO_ROOT / "target" / "release" / "sandhi-proxy",
-    ):
-        if candidate.exists():
-            return candidate
-    raise AssertionError("sandhi-proxy binary not found after cargo build")
+    return snapshots["sandhi-proxy"]
 
 
 @pytest.fixture(scope="session")
-def proxy(proxy_binary: Path, upstream: MockUpstream):
+def cli_binary(tmp_path_factory) -> Path:
+    snapshots = freeze_cargo_build(
+        REPO_ROOT,
+        ["cargo", "build", "--locked", "-p", "sandhi-proxy", "--bin", "sandhi"],
+        [("sandhi", "bin")],
+        tmp_path_factory.mktemp("cli-binary"),
+    )
+    return snapshots["sandhi"]
+
+
+@pytest.fixture(scope="session")
+def proxy(proxy_binary: Path, upstream: MockUpstream, tmp_path_factory):
     """A live proxy whose upstreams point at the mock, exactly as an operator would configure it."""
     port = _free_port()
-    env = {
-        **os.environ,
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("SANDHI_", "SENTINELPASS_"))}
+    env.update({
         "SANDHI_AUTH_MODE": "tokens", "SANDHI_BIND": f"127.0.0.1:{port}",
+        "SANDHI_STORE": str(tmp_path_factory.mktemp("proxy-store") / "usage.db"),
         "SANDHI_OPENAI_KEY": REAL_OPENAI_KEY,
         "SANDHI_OPENAI_BASE": upstream.base_url,
         "SANDHI_ANTHROPIC_KEY": REAL_ANTHROPIC_KEY,
         "SANDHI_ANTHROPIC_BASE": upstream.base_url,
         "SANDHI_GEMINI_KEY": REAL_GEMINI_KEY,
         "SANDHI_GEMINI_BASE": upstream.base_url,
-    }
+    })
     proc = subprocess.Popen(
         [str(proxy_binary)],
         cwd=REPO_ROOT,

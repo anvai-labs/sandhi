@@ -1,6 +1,7 @@
 //! TD-0031 client-credentials grant: integration tests over the axum app (no network).
 //! Mirrors tests/operator.rs harness: in-memory stores, wiremock upstream, oneshot requests.
 
+mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use sandhi_core::{KeyStore, Sink};
 use sandhi_proxy::client_credentials::{ClientCredentialEntry, ClientCredentialRegistry};
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyState};
 use sandhi_store::{SqliteStore, VaultStore, VirtualKeyStore};
 
 const TOKEN: &str = "admin-secret";
@@ -59,9 +60,9 @@ fn state_with_registry(registry: Option<ClientCredentialRegistry>) -> Arc<ProxyS
     let vault = Arc::new(VaultStore::in_memory().unwrap());
     let vkeys = Arc::new(VirtualKeyStore::in_memory().unwrap());
     let sink: Arc<dyn Sink> = store.clone();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),
@@ -383,6 +384,26 @@ fn registry_rejects_empty_and_blank_models() {
     let mut blank = entry();
     blank.models = vec!["".into(), "  ".into()];
     assert!(ClientCredentialRegistry::load(&registry_file(&[blank])).is_err());
+}
+
+#[test]
+fn registry_rejects_an_upstream_prefixed_budget_scope() {
+    // ADR-0015: `upstream:` is the gateway's reserved back-leg scope prefix — a credential
+    // scoped there would double-count the cap. Fatal at load, like every malformed entry.
+    let mut e = entry();
+    e.budget_scope = Some("upstream:openai".into());
+    let error = match ClientCredentialRegistry::load(&registry_file(&[e])) {
+        Err(error) => error,
+        Ok(_) => panic!("reserved prefix must be fatal to load"),
+    };
+    assert!(
+        error.contains("reserved 'upstream:' prefix"),
+        "error must name the reserved prefix: {error}"
+    );
+    // The same registry loads cleanly with a front-leg scope.
+    let mut ok = entry();
+    ok.budget_scope = Some("victor:mac".into());
+    assert!(ClientCredentialRegistry::load(&registry_file(&[ok])).is_ok());
 }
 
 #[test]

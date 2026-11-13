@@ -7,12 +7,26 @@
     "model"
   ],
   "properties": {
+    "cache_intent": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CacheIntentV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "extensions": {
       "type": "object",
       "additionalProperties": true
     },
     "include_native_response": {
       "description": "Whether adapters re-embed the full native provider response body under `extensions[<endpoint family>]` on the response. Defaults to true for compatibility; clients that consume only the neutral contract can opt out to shed bandwidth and coupling (G8). The `reasoning` extension is unaffected — it is decoded content, not a native body.",
+      "type": "boolean"
+    },
+    "include_native_stream": {
+      "description": "Opt in to protocol-native SSE frame events alongside canonical metering events. Default off so existing neutral stream consumers keep their event set.",
       "type": "boolean"
     },
     "max_output_tokens": {
@@ -39,6 +53,17 @@
     },
     "model": {
       "type": "string"
+    },
+    "native_input": {
+      "description": "Codec-owned native input and portable-projection consistency fence. The original input remains in the matching extensions bucket, in wire order.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NativeInputV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "reasoning_effort": {
       "description": "Reasoning effort budget (W3d/G7). OpenAI o-series/GPT-5 and Moonshot kimi-k3 take it as a top-level `reasoning_effort`; the Responses codec maps it to `reasoning.effort`. Promoted from `extensions[\"openai\"]` so it is portable across families instead of visible only to the openai encoder. Vocabulary is the OpenAI one (`low`/`medium`/`high`); other encoders that lack an effort concept ignore it.",
@@ -104,6 +129,49 @@
     }
   },
   "definitions": {
+    "CacheIntentV1": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "lifetime": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CacheLifetimeV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/CacheModeV1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CacheLifetimeV1": {
+      "type": "string",
+      "enum": [
+        "5m",
+        "1h",
+        "30m",
+        "12h",
+        "in_memory",
+        "24h"
+      ]
+    },
+    "CacheModeV1": {
+      "type": "string",
+      "enum": [
+        "preserve_native",
+        "auto",
+        "auto_stable_prefix",
+        "auto_conversation_prefix",
+        "suppress_gateway"
+      ]
+    },
     "ChatMessageV1": {
       "oneOf": [
         {
@@ -367,6 +435,19 @@
         }
       ]
     },
+    "EndpointFamilyV1": {
+      "type": "string",
+      "enum": [
+        "openai_chat_completions",
+        "openai_responses",
+        "anthropic_messages",
+        "gemini_generate_content",
+        "cohere_chat",
+        "ollama_chat",
+        "bedrock_converse",
+        "host_callback"
+      ]
+    },
     "MessageContent": {
       "anyOf": [
         {
@@ -379,6 +460,38 @@
           }
         }
       ]
+    },
+    "NativeInputFeatureV1": {
+      "type": "string",
+      "enum": [
+        "opaque_state",
+        "resource_reference",
+        "unsupported_content",
+        "native_control"
+      ]
+    },
+    "NativeInputV1": {
+      "type": "object",
+      "required": [
+        "endpoint_family",
+        "projection_sha256"
+      ],
+      "properties": {
+        "endpoint_family": {
+          "$ref": "#/definitions/EndpointFamilyV1"
+        },
+        "nonportable_features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NativeInputFeatureV1"
+          }
+        },
+        "projection_sha256": {
+          "description": "SHA-256 of native input fields, portable messages/tools/choice and feature flags. Excludes resolved model, output bounds and authenticated attribution.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "RequestMetadataV1": {
       "type": "object",

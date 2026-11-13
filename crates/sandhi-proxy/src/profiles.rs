@@ -73,7 +73,7 @@ pub(crate) async fn profile(State(state): State<Arc<ProxyState>>, headers: Heade
 
     // Gateway mode needs a routable credential; local mode is defaults-only by definition.
     if record.mode == "gateway" {
-        match mint_profile_virtual_key(&state, &subject, &group, &record) {
+        match mint_profile_virtual_key(&state, &subject, &group, &record).await {
             Ok(secret) => payload["credentials"] = json!({ "virtual_key": secret }),
             Err(response) => return response,
         }
@@ -85,7 +85,7 @@ pub(crate) async fn profile(State(state): State<Arc<ProxyState>>, headers: Heade
 /// same store mint + live-key rehydration path `POST /admin/keys/share` uses. The plaintext
 /// secret leaves this function exactly once (into the response body) and is never persisted.
 #[allow(clippy::result_large_err)] // axum::Response is intentionally large; idiomatic shape.
-fn mint_profile_virtual_key(
+async fn mint_profile_virtual_key(
     state: &ProxyState,
     subject: &str,
     group: &str,
@@ -122,7 +122,8 @@ fn mint_profile_virtual_key(
                     .any(|e| e.status == "active" && e.credential_id() == upstream)
             })
             .unwrap_or(false);
-    if !upstream_resolvable {
+    let logical = crate::routing::active(state, upstream).await;
+    if !upstream_resolvable && !logical {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
             &format!("profile upstream '{upstream}' is not available on this gateway"),

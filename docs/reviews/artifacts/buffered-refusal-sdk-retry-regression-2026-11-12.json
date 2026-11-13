@@ -1,0 +1,24 @@
+{
+  "scope": "synthetic OpenAI SDK to Messages backend; legacy accounting; no live inference or credentials",
+  "baseline_commit": "4e4f19f0b9f6f5ec9e1597dd1c41ac7bc887d57f",
+  "baseline": {
+    "client_protocol": "openai_chat_completions",
+    "backend_protocol": "anthropic_messages",
+    "source_output": "nonportable signed thinking",
+    "sdk_retry_policy": "installed OpenAI SDK defaults",
+    "client_http_status": 502,
+    "actual_origin_calls": 3,
+    "cause": "Deterministic portable validation was classified as retryable transport failure and lacked the SDK retry-suppression header."
+  },
+  "fix_contract": {
+    "error_code": "output_projection_error",
+    "retryable": false,
+    "http_status": 502,
+    "x-should-retry": "false",
+    "resilience": "never retry this category even with explicit retries enabled",
+    "sdk_matrix": "nine non-native source/client pairs, four source families and OpenAI Chat/Responses plus Anthropic clients",
+    "actual_origin_calls_per_case": 1,
+    "legacy_durable_accounting_added": false,
+    "pre_header_connection_retry_guarantee": false
+  }
+}

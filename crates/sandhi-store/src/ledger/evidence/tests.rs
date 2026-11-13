@@ -276,7 +276,7 @@ fn terminal_missing_settled_invalid_and_lossy_input_are_rejected() {
         .conn
         .execute(
             "UPDATE budget_reservation SET actual = 7, settled = 1 WHERE id = ?1",
-            [intent.reservation.id],
+            [intent.reservation.id as i64],
         )
         .unwrap();
     assert!(matches!(
@@ -462,7 +462,7 @@ fn atomic_receipt_replay_and_conflict() {
         .conn
         .query_row(
             "SELECT settled_at FROM budget_reservation WHERE id = ?1",
-            [id],
+            [id as i64],
             |row| row.get(0),
         )
         .unwrap();
@@ -1471,7 +1471,7 @@ fn recovery_pages_are_scoped_read_only_and_bounded_across_reopen() {
         .conn
         .execute(
             "UPDATE budget_reservation SET scope = 'other' WHERE id = ?1",
-            [foreign.reservation.id],
+            [foreign.reservation.id as i64],
         )
         .unwrap();
     let second = tracked(&mut ledger);
@@ -1828,7 +1828,7 @@ fn prepared_closure_is_durable_without_provider_usage_or_receipt() {
         .claim_settlements_durable(10, OffsetDateTime::now_utc(), 30)
         .unwrap()
         .is_empty());
-    assert_eq!(ledger.conn.query_row("SELECT SUM(actual), SUM(CASE WHEN settled=0 THEN ceiling ELSE 0 END) FROM budget_reservation", [], |r| Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?))).unwrap(), (0,0));
+    assert_eq!(ledger.conn.query_row("SELECT SUM(actual), SUM(CASE WHEN settled=0 THEN ceiling ELSE 0 END) FROM budget_reservation", [], |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,i64>(1)? as u64))).unwrap(), (0,0));
 }
 
 #[test]
@@ -1885,7 +1885,7 @@ fn dispatch_authorization_survives_lost_permit_and_retains_liability() {
             .query_row(
                 "SELECT ceiling FROM budget_reservation WHERE settled=0",
                 [],
-                |r| r.get::<_, u64>(0)
+                |r| Ok(r.get::<_, i64>(0)? as u64)
             )
             .unwrap(),
         100

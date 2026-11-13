@@ -32,7 +32,8 @@ pub enum CredentialScheme {
     ApiKey,
     /// OAuth bearer token (refresh handled out of band).
     Bearer,
-    /// OAuth/ADC (refresh-token exchange handled by the typed provider runtime).
+    /// Delegated credential requiring an implemented endpoint lease profile.
+    /// Current gateway renewal is owned outside the provider runtime.
     Oauth,
 }
 
@@ -66,6 +67,9 @@ pub struct VaultEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     pub created_at: String,
+    /// Monotonic local metadata generation. Registration/rotation advances it;
+    /// an unchanged reference is not proof of unchanged account authority.
+    pub generation: u64,
     /// `active` / `revoked`.
     pub status: String,
 }
@@ -87,6 +91,14 @@ impl VaultEntry {
             format!("{head}…{tail}")
         }
     }
+}
+
+fn read_generation(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(7)?;
+    if value <= 0 {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(7, value));
+    }
+    Ok(value as u64)
 }
 
 /// The secret-only backend. Implementations store/retrieve the raw credential under
@@ -671,6 +683,7 @@ impl VaultStore {
                 user_agent TEXT,
                 created_at TEXT NOT NULL,
                 status     TEXT NOT NULL DEFAULT 'active',
+                generation INTEGER NOT NULL DEFAULT 1 CHECK(typeof(generation) = 'integer' AND generation > 0),
                 PRIMARY KEY (provider, label)
             );",
         )?;
@@ -678,6 +691,13 @@ impl VaultStore {
         // overrides existed. SQLite has no ADD COLUMN IF NOT EXISTS — attempt and
         // ignore the duplicate-column error so init stays idempotent.
         let _ = conn.execute("ALTER TABLE vault ADD COLUMN user_agent TEXT", []);
+        let mut columns = conn.prepare("PRAGMA table_info(vault)")?;
+        let names = columns
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !names.iter().any(|name| name == "generation") {
+            conn.execute("ALTER TABLE vault ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK(typeof(generation) = 'integer' AND generation > 0)", [])?;
+        }
         Ok(())
     }
 
@@ -710,8 +730,11 @@ impl VaultStore {
         validate_reference(provider, label)?;
         let conn = self.conn.lock().expect("vault conn poisoned");
         conn.execute(
-            "INSERT OR REPLACE INTO vault (provider, label, scheme, base_url, user_agent, created_at, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
+            "INSERT INTO vault (provider, label, scheme, base_url, user_agent, created_at, status, generation) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1) \
+             ON CONFLICT(provider, label) DO UPDATE SET scheme=excluded.scheme, \
+             base_url=excluded.base_url, user_agent=excluded.user_agent, created_at=excluded.created_at, \
+             status='active', generation=vault.generation+1",
             params![
                 provider,
                 label,
@@ -742,12 +765,29 @@ impl VaultStore {
         }
     }
 
+    /// Exact non-secret metadata, including the durable local generation.
+    pub fn metadata_entry(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<Option<VaultEntry>, VaultError> {
+        validate_reference(provider, label)?;
+        let conn = self.conn.lock().expect("vault conn poisoned");
+        conn.query_row("SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation FROM vault WHERE provider=?1 AND label=?2",
+            params![provider,label], |row| Ok(VaultEntry {
+                provider: row.get(0)?, label: row.get(1)?,
+                scheme: CredentialScheme::from_db(row.get::<_,String>(2)?.as_str()),
+                base_url: row.get(3)?, user_agent: row.get(4)?, created_at: row.get(5)?,
+                status: row.get(6)?, generation: read_generation(row)?,
+            })).optional().map_err(|error| VaultError::Backend(format!("sqlite vault metadata: {error}")))
+    }
+
     /// Masked metadata list (never the secret), all labels.
     pub fn list(&self) -> Result<Vec<VaultEntry>, VaultError> {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, user_agent, created_at, status \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation \
                  FROM vault ORDER BY provider, label",
             )
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
@@ -761,6 +801,7 @@ impl VaultStore {
                     user_agent: r.get(4)?,
                     created_at: r.get(5)?,
                     status: r.get(6)?,
+                    generation: read_generation(r)?,
                 })
             })
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
@@ -810,7 +851,7 @@ impl VaultStore {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, user_agent, created_at, status \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation \
                  FROM vault WHERE provider = ?1 AND status = 'active' \
                  ORDER BY created_at LIMIT 1",
             )
@@ -824,6 +865,7 @@ impl VaultStore {
                 user_agent: r.get(4)?,
                 created_at: r.get(5)?,
                 status: r.get(6)?,
+                generation: read_generation(r)?,
             })
         })
         .optional()
@@ -880,6 +922,97 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_metadata_generation_migrates_and_never_reuses_a_revoked_generation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE vault(provider TEXT NOT NULL,label TEXT NOT NULL,scheme TEXT NOT NULL,base_url TEXT,user_agent TEXT,created_at TEXT NOT NULL,status TEXT NOT NULL,PRIMARY KEY(provider,label)); INSERT INTO vault VALUES('openai','fixture','api_key',NULL,NULL,'fixture','active');").unwrap();
+        VaultStore::init(&conn).unwrap();
+        let vault = VaultStore {
+            conn: Mutex::new(conn),
+            backend: Box::new(InMemoryVault::new()),
+        };
+        assert_eq!(
+            vault
+                .metadata_entry("openai", "fixture")
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+        vault
+            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .unwrap();
+        assert_eq!(vault.list().unwrap()[0].generation, 2);
+        vault.revoke("openai", "fixture").unwrap();
+        vault
+            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .unwrap();
+        assert_eq!(
+            vault
+                .metadata_entry("openai", "fixture")
+                .unwrap()
+                .unwrap()
+                .generation,
+            3
+        );
+        VaultStore::init(&vault.conn.lock().unwrap()).unwrap();
+        assert_eq!(vault.list().unwrap()[0].generation, 3);
+        assert!(
+            vault.get("openai", "fixture").unwrap().is_none(),
+            "metadata registration does not mutate secrets"
+        );
+        vault
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE vault SET generation=9223372036854775807", [])
+            .unwrap();
+        assert!(vault
+            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .is_err());
+        assert_eq!(vault.list().unwrap()[0].generation, i64::MAX as u64);
+    }
+
+    #[test]
+    fn observed_credential_generation_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.db");
+        let open = || {
+            VaultStore::with_backend(path.to_str().unwrap(), Box::new(InMemoryVault::new()))
+                .unwrap()
+        };
+        let vault = open();
+        for (secret, generation) in [("fixture-original", 1), ("fixture-rotated", 2)] {
+            vault
+                .set(
+                    "openai",
+                    "fixture",
+                    CredentialScheme::ApiKey,
+                    None,
+                    None,
+                    secret,
+                )
+                .unwrap();
+            assert_eq!(
+                vault
+                    .metadata_entry("openai", "fixture")
+                    .unwrap()
+                    .unwrap()
+                    .generation,
+                generation
+            );
+        }
+        drop(vault);
+        assert_eq!(
+            open()
+                .metadata_entry("openai", "fixture")
+                .unwrap()
+                .unwrap()
+                .generation,
+            2
+        );
+    }
 
     #[test]
     fn new_references_reject_broker_normalization_collisions() {

@@ -1,0 +1,113 @@
+{
+  "evidence_kind": "shared_buffered_source_qualification",
+  "source_parent": "9bc7a3ef570e4e32d0159de604366b932effb29c",
+  "sha256": {
+    "wheel": "08cd41e9b3f8964d5e888983a327d2004f84015d60e8f25e418c7b686185f1d1",
+    "node_addon": "77ef00ede0085d99e7ab75fb791746b3a49e3a2f99fa5fba96dd0a4ca4787f28",
+    "rust_workspace": "eabf6e27d0f88d495199b43ecfdefc353f49e1089699b08aeaf7f4a65d1ac7c0",
+    "python_binding": "80bfadd5de22f9128357d5a3046f8eb7e16abd2b86467abb98d784b0b17f5a03",
+    "node_binding": "a60e8a87e1daeaf4c37af8a9b04cbfc71da479886463ac26342bdcf743ac6e6b",
+    "focused_vendor_sdk": "4b3b102ea11c144c57da4ea73d6a0674e7a98953db2890e6f39fc05b9438e64e",
+    "consumer": "319c31a6be4c0d819b26ecf20c151bb6e285426ab9af2e5a9f62825aa8946d2b",
+    "clippy_default": "106ea4b8a2684c5bd88874076378d9f13391212a943a7c7f9d7b2baf1aaa8fe7",
+    "clippy_features": "b2b8fca650539df61735939989ce93a210c99e4042be7ad9c9074989359fbf7d",
+    "independent_buffered_matrix": "602596806a685d77289923f93d4a95d8361882171d67634f8e9e5271520a6058",
+    "independent_native_status": "582ce63bc14b2c4ccaa780b6df621121753d4c3e7a6dab1f13642f81fae2c3ea",
+    "independent_codex_status": "0f5431679542d7f0a197d2e2b922a63fd85d39df5a811075faf8a2f88a7b32a6"
+  },
+  "validation": {
+    "rust": {
+      "passed": 1228,
+      "ignored": 6,
+      "suites": 52
+    },
+    "python": {
+      "passed": 271,
+      "fault_handler": true
+    },
+    "node": {
+      "passed": 69
+    },
+    "focused_vendor_sdk": {
+      "passed": 45,
+      "seconds": 63.4
+    },
+    "victor_provider_and_selected_resilience": {
+      "passed": 1916,
+      "skipped": 5,
+      "seconds": 28.68
+    },
+    "clippy": [
+      "workspace_all_targets_default",
+      "workspace_all_targets_onnx_sentinelpass"
+    ],
+    "independent_buffered_matrix": {
+      "passed": 164,
+      "seconds": 3.7,
+      "scope": "isolated final-wheel buffered/refusal tests, not exact-tip attestation"
+    }
+  },
+  "earlier_live_buffered": {
+    "evidence_kind": "live_direct_buffered_ffi_profiles",
+    "source_parent": "9bc7a3ef570e4e32d0159de604366b932effb29c",
+    "wheel_sha256": "6a5ea855d6892b40dccb902278c34b3bf8188ee36e52dc6901cc8ae49f73e81a",
+    "cells": [
+      {
+        "protocol": "chat_completions",
+        "endpoint_profile": "openai_terminal_chunk_usage",
+        "model": "glm-4.6",
+        "max_retries": 0,
+        "result": "pass",
+        "text_present": true,
+        "usage": {
+          "tokens_in": 16,
+          "tokens_out": 3,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0,
+          "reasoning_tokens": 2,
+          "reasoning_included": true,
+          "attempts": 1,
+          "completeness": "final",
+          "cache_read_observation": {
+            "status": "reported",
+            "source": "origin_usage"
+          }
+        }
+      },
+      {
+        "protocol": "anthropic_messages",
+        "endpoint_profile": "anthropic_implicit_cache",
+        "model": "glm-4.6",
+        "max_retries": 0,
+        "result": "pass",
+        "text_present": true,
+        "usage": {
+          "tokens_in": 16,
+          "tokens_out": 3,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0,
+          "reasoning_tokens": null,
+          "reasoning_included": true,
+          "attempts": 1,
+          "completeness": "final",
+          "cache_read_observation": {
+            "status": "reported",
+            "source": "origin_usage"
+          }
+        }
+      }
+    ],
+    "limits": [
+      "Two small direct buffered calls; no gateway or receipt joins.",
+      "No cache hit/lifecycle, savings, subscription or platform qualification.",
+      "External credential in memory only; raw responses, headers and error bodies excluded."
+    ]
+  },
+  "limits": [
+    "Final synthetic suites do not erase or diagnose retained full-SDK shutdown and Python native-exit failures.",
+    "Two live calls pin an earlier wheel, not this final package. No gateway cache lifecycle or receipt/savings/subscription qualification.",
+    "Victor remains local/unmerged and Sandhi0.17.0/Victor0.29.0 are unpublished prepared targets.",
+    "Independent exact-commit review is required separately; this artifact is test evidence only."
+  ],
+  "consumer_commit": "98143f41c51186ff810fc427a97ee7fc76236cfa"
+}

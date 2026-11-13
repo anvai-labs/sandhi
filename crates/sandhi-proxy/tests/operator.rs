@@ -5,6 +5,7 @@
 //! `/v1/*` → attributed + budget-enforced → revoke rejects. No live API keys; upstreams are
 //! wiremock mocks. No dollars anywhere (measure-vs-price boundary).
 
+mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -38,9 +39,9 @@ fn admin_state() -> Arc<ProxyState> {
     // The sink IS the durable store, exactly as the proxy wires it in production, so emitted
     // usage events are queryable through the admin usage API.
     let sink: Arc<dyn Sink> = store.clone();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),
@@ -78,6 +79,43 @@ async fn body_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// Accounting capability follows the validated execution owner, never telemetry storage.
+#[tokio::test]
+async fn accounting_capability_requires_the_initialized_durable_owner() {
+    for (durable, usage_store) in [(true, false), (false, true)] {
+        let store = usage_store.then(|| Arc::new(SqliteStore::in_memory().unwrap()));
+        let ledger = if durable {
+            support::Ledger::new()
+        } else {
+            ProxyLedger::in_memory().into()
+        };
+        let mut state = support::state(
+            KeyStore::new(),
+            ledger,
+            Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
+            HashMap::new(),
+            store,
+        );
+        state.admin_token = Some(TOKEN.into());
+        let app = build_app(Arc::new(state));
+        let response = app
+            .oneshot(req("GET", "/admin/version", Some(TOKEN), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["capabilities"]["durable_ledger"], durable);
+        assert_eq!(
+            body["capabilities"]["execution_accounting"],
+            if durable {
+                "paired_durable_v1"
+            } else {
+                "unavailable"
+            }
+        );
+    }
+}
+
 // --- Admin auth -------------------------------------------------------------
 
 #[tokio::test]
@@ -108,9 +146,9 @@ async fn admin_routes_require_the_admin_token() {
 #[tokio::test]
 async fn admin_disabled_when_no_token_configured() {
     let store = Arc::new(SqliteStore::in_memory().unwrap());
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         Some(store),
@@ -233,6 +271,55 @@ async fn mint_key(
         v["virtual_key"].as_str().unwrap().to_string(),
         v["id"].as_str().unwrap().to_string(),
     )
+}
+
+/// ADR-0015: the `upstream:` scope prefix is gateway-managed (the back-leg cap). A virtual key
+/// whose `budget_scope` used it would hold two leases on the same scope per call and settle the
+/// same actual twice — exhausting the cap at half — so minting rejects it.
+#[tokio::test]
+async fn share_rejects_an_upstream_prefixed_budget_scope() {
+    let app = build_app(admin_state());
+    add_upstream(&app, "anthropic", "https://api.anthropic.com", "sk-real").await;
+    for scope in ["upstream:openai", "upstream:anthropic", " upstream:openai"] {
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/admin/keys/share",
+                Some(TOKEN),
+                Some(json!({
+                    "upstream": "anthropic:default",
+                    "subject": "alice",
+                    "group": "platform",
+                    "budget_scope": scope,
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "scope: {scope:?}");
+        let body = body_json(r).await;
+        assert!(
+            body.to_string().contains("reserved 'upstream:' prefix"),
+            "error must name the reserved prefix: {body}"
+        );
+    }
+    // A legitimate front-leg scope still mints.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/keys/share",
+            Some(TOKEN),
+            Some(json!({
+                "upstream": "anthropic:default",
+                "subject": "alice",
+                "group": "platform",
+                "budget_scope": "group:platform",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -540,6 +627,90 @@ async fn budget_set_list_usage_and_enforcement() {
     assert_eq!(usage["remaining"], 20);
 }
 
+/// ADR-0015: an `upstream:{provider}` back-leg scope is ordinary scope data — it round-trips
+/// `POST /admin/budget` → the durable budgets table → startup rehydration → usage reads with
+/// zero special-casing.
+#[tokio::test]
+async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let sink: Arc<dyn Sink> = store.clone();
+    // Durable ledger: only it persists budgets, so only it can prove rehydration.
+    let mut state = support::state(
+        KeyStore::new(),
+        ProxyLedger::durable(":memory:", 1).unwrap(),
+        sink,
+        HashMap::new(),
+        Some(store),
+    );
+    state.admin_token = Some(TOKEN.into());
+    let state = Arc::new(state);
+    let app = build_app(state.clone());
+
+    // Set a monthly Block cap on the provider scope.
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "upstream:inferflux",
+                "limit_tokens": 5000,
+                "window": "monthly",
+                "policy": "block"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+
+    // It lists like any other scope.
+    let r = app
+        .clone()
+        .oneshot(req("GET", "/admin/budget", Some(TOKEN), None))
+        .await
+        .unwrap();
+    let list = body_json(r).await;
+    let budget = list["budgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["scope"] == "upstream:inferflux")
+        .expect("upstream scope listed")
+        .clone();
+    assert_eq!(budget["limit_tokens"], 5000);
+    assert_eq!(budget["window"], "monthly");
+    assert_eq!(budget["policy"], "block");
+
+    // Seeded spend reads back through the usage endpoint.
+    record_spend(&mut state.ledger.lock().unwrap(), "upstream:inferflux", 120);
+    let r = app
+        .clone()
+        .oneshot(req(
+            "GET",
+            "/admin/budget/usage?scope=upstream:inferflux",
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    let usage = body_json(r).await;
+    assert_eq!(usage["spent"], 120);
+    assert_eq!(usage["limit_tokens"], 5000);
+    assert_eq!(usage["remaining"], 4880);
+
+    // Restart rehydration (a fresh map, the way startup rebuilds it) carries the spec.
+    let budgets = std::sync::Mutex::new(HashMap::new());
+    sandhi_proxy::rehydrate_budgets(&state.ledger.lock().unwrap(), &budgets);
+    let rehydrated = budgets.lock().unwrap();
+    let spec = rehydrated
+        .get("upstream:inferflux")
+        .expect("upstream scope rehydrated");
+    assert_eq!(spec.limit_tokens, 5000);
+    assert_eq!(spec.window, "monthly");
+    assert_eq!(spec.policy, "block");
+}
+
 #[tokio::test]
 async fn usage_aggregates_by_dimension_and_since() {
     let state = admin_state();
@@ -671,9 +842,9 @@ async fn run_cost_tree_endpoint_serves_the_run_tree() {
 #[tokio::test]
 async fn run_cost_tree_endpoint_requires_a_store() {
     // Admin token configured but no durable store → 503, mirroring /admin/usage.
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(sandhi_core::InMemorySink::new()),
         HashMap::new(),
         None,
@@ -1169,9 +1340,9 @@ async fn dashboard_usage_endpoint_now_includes_by_model() {
 #[tokio::test]
 async fn dashboard_endpoints_404_when_store_unconfigured() {
     // A bare ProxyState (no vault/vkeys/alerts/store) mirrors a proxy started without SANDHI_STORE.
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()) as Arc<dyn Sink>,
         HashMap::new(),
         None,
@@ -1273,9 +1444,9 @@ async fn dashboard_stays_open_without_admin_token() {
     // No admin token configured → nothing to present; single-node dev trust (unchanged).
     let store = Arc::new(SqliteStore::in_memory().unwrap());
     let sink: Arc<dyn Sink> = store.clone();
-    let state = ProxyState::new(
+    let state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         sink,
         HashMap::new(),
         Some(store),

@@ -1,13 +1,22 @@
 //! Bounded trusted built-in policy evaluation + mandatory durable admission receipt.
 use sandhi_core::policy::{Decision, Disposition, Engine, Identity, InputFormat};
 use sandhi_store::policy::PolicyAuditStore;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::Semaphore;
 
 pub struct PolicyGate {
     engine: Arc<Engine>,
     audit: Arc<PolicyAuditStore>,
     slots: Arc<Semaphore>,
+    /// Test seam: raises the wall-clock budget to at least this duration.
+    /// [`PolicyGate::new`] keeps the document deadline authoritative; tests on
+    /// shared CI runners use a generous floor so a scheduling stall cannot flip
+    /// a verdict the test is not asserting. The deadline itself is exercised by
+    /// `saturated_gate_and_late_extension_cannot_admit` through `new`.
+    deadline_floor: Duration,
 }
 pub struct Admission {
     pub decision: Decision,
@@ -16,11 +25,25 @@ pub struct Admission {
 #[derive(Debug)]
 pub struct Unavailable;
 impl PolicyGate {
+    pub(crate) fn revision(&self) -> u64 {
+        self.engine.configuration().revision
+    }
     pub fn new(engine: Engine, audit: Arc<PolicyAuditStore>) -> Self {
+        Self::with_deadline_floor(engine, audit, Duration::ZERO)
+    }
+    /// Builds a gate whose evaluation budget is at least `floor` (the document
+    /// `deadline_ms` still applies when it is larger). Test-only in spirit:
+    /// production always constructs through [`PolicyGate::new`].
+    pub fn with_deadline_floor(
+        engine: Engine,
+        audit: Arc<PolicyAuditStore>,
+        floor: Duration,
+    ) -> Self {
         Self {
             engine: Arc::new(engine),
             audit,
             slots: Arc::new(Semaphore::new(4)),
+            deadline_floor: floor,
         }
     }
     pub fn status(&self) -> Result<serde_json::Value, Unavailable> {
@@ -75,7 +98,7 @@ impl PolicyGate {
         format: Option<InputFormat>,
     ) -> Result<Admission, Unavailable> {
         let start = Instant::now();
-        let deadline = start + self.engine.timeout();
+        let deadline = start + self.engine.timeout().max(self.deadline_floor);
         let permit = self
             .slots
             .clone()
@@ -179,5 +202,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("timed-out worker did not release its slot");
+    }
+
+    /// The deadline floor stretches the wall-clock budget past the document's
+    /// `deadline_ms`: a slow evaluator that a 1 ms document deadline always
+    /// denies admits under a generous floor. This is what keeps the ingress
+    /// verdict tests (which assert forward/block, not timing) hermetic on
+    /// loaded CI runners.
+    #[tokio::test]
+    async fn deadline_floor_stretches_the_evaluation_budget() {
+        struct Slow;
+        impl Evaluator for Slow {
+            fn evaluate(&self, _: &Inspection, _: Instant) -> Result<bool, EvaluationError> {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(false)
+            }
+        }
+        let mut registry = Registry::default();
+        registry
+            .register("test.slow.v1", |_| Ok(Box::new(Slow)))
+            .unwrap();
+        let document = json!({"schema_version":"1","revision":1,"deadline_ms":1,
+            "max_body_bytes":65536,"rules":[{"id":"slow","effect":"block",
+                "evaluator":{"kind":"registered","name":"test.slow.v1","configuration":{}}}]});
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let body = bytes::Bytes::from_static(br#"{"model":"test","messages":[]}"#);
+        let tight_dir = tempfile::tempdir().unwrap();
+        let stretched_dir = tempfile::tempdir().unwrap();
+        let audit = |dir: &std::path::Path| {
+            Arc::new(PolicyAuditStore::open(&dir.join("audit.db"), 10).unwrap())
+        };
+        // Without the floor the 1 ms document deadline is always missed.
+        let tight = PolicyGate::new(
+            Engine::from_slice_with_registry(&bytes, &registry).unwrap(),
+            audit(tight_dir.path()),
+        );
+        assert!(tight
+            .check(
+                body.clone(),
+                Identity::default(),
+                "key".into(),
+                "openai".into(),
+                "test".into(),
+                true
+            )
+            .await
+            .is_err());
+        // With the floor the same 50 ms evaluator completes inside the budget.
+        let stretched = PolicyGate::with_deadline_floor(
+            Engine::from_slice_with_registry(&bytes, &registry).unwrap(),
+            audit(stretched_dir.path()),
+            Duration::from_secs(5),
+        );
+        assert!(stretched
+            .check(
+                body,
+                Identity::default(),
+                "key".into(),
+                "openai".into(),
+                "test".into(),
+                true
+            )
+            .await
+            .is_ok());
     }
 }

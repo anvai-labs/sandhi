@@ -231,6 +231,10 @@ pub(crate) async fn version_capabilities(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
+    // The owner is installed only after validating the supplied single file-backed
+    // ledger. A usage store alone proves neither execution ownership nor topology.
+    // This is a configured contract fact, not a live database-health probe.
+    let execution_accounting = state.buffered_accounting.get().is_some();
     let body = serde_json::json!({
         "wire_contract_version": sandhi_core::UsageEvent::SCHEMA_VERSION,
         "chat_contract_version": sandhi_core::CHAT_SCHEMA_VERSION_V1,
@@ -239,8 +243,12 @@ pub(crate) async fn version_capabilities(
         "capabilities": {
             // The two-plane proxy is structural (ADR-0004 D1), not optional.
             "transparent_plane": true,
-            // Durable + crash-safe when SANDHI_STORE is set; volatile otherwise.
-            "durable_ledger": state.store.is_some(),
+            "durable_ledger": execution_accounting,
+            "execution_accounting": if execution_accounting {
+                "paired_durable_v1"
+            } else {
+                "unavailable"
+            },
             "alerts": state.alerts.is_some(),
             "admin_api": state.oidc.is_some() || state.admin_token.is_some(),
             // TD-0012: per-vkey token bucket, in-memory (N replicas multiply it).
@@ -357,6 +365,43 @@ pub fn build_provider_handle(
     scheme: CredentialScheme,
     user_agent: Option<&str>,
 ) -> Option<ProviderHandle> {
+    build_provider_handle_with_endpoint(
+        runtime, provider, base_url, secret, scheme, user_agent, None,
+    )
+}
+
+/// Build an explicitly bound endpoint without provider-name protocol inference.
+/// This is a runtime factory seam; it does not register credentials or authorize routes.
+pub fn build_provider_handle_for_endpoint(
+    runtime: &ProviderRuntime,
+    provider: &str,
+    base_url: Option<&str>,
+    secret: &str,
+    scheme: CredentialScheme,
+    user_agent: Option<&str>,
+    endpoint: crate::backend::BackendEndpoint,
+) -> Option<ProviderHandle> {
+    build_provider_handle_with_endpoint(
+        runtime,
+        provider,
+        base_url,
+        secret,
+        scheme,
+        user_agent,
+        Some(endpoint),
+    )
+}
+
+fn build_provider_handle_with_endpoint(
+    runtime: &ProviderRuntime,
+    provider: &str,
+    base_url: Option<&str>,
+    secret: &str,
+    scheme: CredentialScheme,
+    user_agent: Option<&str>,
+    endpoint: Option<crate::backend::BackendEndpoint>,
+) -> Option<ProviderHandle> {
+    let endpoint = crate::backend::resolve(provider, scheme, endpoint)?;
     // A per-endpoint UA rides the static header set; unset keeps the shared
     // client default (`sandhi/<version>`).
     let mut static_headers = HeaderMap::new();
@@ -370,7 +415,7 @@ pub fn build_provider_handle(
             }
         }
     }
-    if provider == "openai" && scheme == CredentialScheme::Oauth {
+    if endpoint.profile == crate::backend::BackendProfile::ChatGptCodex {
         // This is an expiring access-token lease, never an API key or refresh token.
         // The login owner refreshes its grant; the gateway owns dispatch and expiry.
         #[derive(Deserialize)]
@@ -415,22 +460,39 @@ pub fn build_provider_handle(
                 .with_credential_expiry(lease.expires_at),
         );
     }
-    let family = ProviderFamily::for_slug(provider);
+    let family = endpoint.family;
     let base = base_url
         .map(str::to_string)
         .unwrap_or_else(|| default_base_url(provider, family));
-    match family {
+    let handle = match family {
         ProviderFamily::Anthropic => {
             let auth = match scheme {
                 CredentialScheme::Bearer => AnthropicAuthScheme::Bearer,
                 _ => AnthropicAuthScheme::ApiKey,
             };
-            Some(runtime.anthropic(base, secret, auth, static_headers, None, None, None, None))
+            Some(runtime.anthropic_with_usage_profile(
+                base,
+                secret,
+                auth,
+                static_headers,
+                None,
+                None,
+                None,
+                None,
+                if endpoint.profile == crate::backend::BackendProfile::AnthropicImplicitCache {
+                    sandhi_core::usage::AnthropicUsageProfile::ImplicitCache
+                } else {
+                    sandhi_core::usage::AnthropicUsageProfile::SeparateCacheWrites
+                },
+            ))
         }
         ProviderFamily::Gemini => Some(runtime.gemini(
             base,
             secret,
-            GeminiAuthScheme::ApiKey,
+            match scheme {
+                CredentialScheme::Bearer => GeminiAuthScheme::Bearer,
+                _ => GeminiAuthScheme::ApiKey,
+            },
             static_headers.clone(),
             None,
             None,
@@ -443,7 +505,7 @@ pub fn build_provider_handle(
         ProviderFamily::Ollama => {
             Some(runtime.ollama(base, secret, static_headers.clone(), None, None, None, None))
         }
-        ProviderFamily::OpenAiCompat => Some(runtime.openai_compat(
+        ProviderFamily::OpenAiCompat => Some(runtime.openai_compat_with_stream_usage_profile(
             provider,
             base,
             secret,
@@ -452,6 +514,11 @@ pub fn build_provider_handle(
             None,
             None,
             None,
+            if endpoint.profile == crate::backend::BackendProfile::OpenaiTerminalChunkUsage {
+                sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
+            } else {
+                sandhi_core::usage::OpenAiStreamUsageProfile::Standard
+            },
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,
@@ -463,7 +530,8 @@ pub fn build_provider_handle(
             None,
             None,
         )),
-    }
+    }?;
+    handle.with_provider_identity(provider).ok()
 }
 
 fn default_base_url(provider: &str, family: ProviderFamily) -> String {
@@ -475,7 +543,7 @@ fn default_base_url(provider: &str, family: ProviderFamily) -> String {
     family.default_base_url().to_string()
 }
 
-fn parse_scheme(s: Option<&str>) -> Result<CredentialScheme, &'static str> {
+pub(crate) fn parse_scheme(s: Option<&str>) -> Result<CredentialScheme, &'static str> {
     match s.map(str::to_ascii_lowercase).as_deref() {
         None | Some("api_key" | "api-key") => Ok(CredentialScheme::ApiKey),
         Some("bearer") => Ok(CredentialScheme::Bearer),
@@ -491,6 +559,7 @@ pub(crate) fn vault_entry_response(e: &VaultEntry) -> Value {
         "scheme": e.scheme,
         "base_url": e.base_url,
         "created_at": e.created_at,
+        "generation": e.generation,
         "status": e.status,
         "credential_id": e.credential_id(),
         // NB: the raw secret lives only in the Vault backend — never serialized here.
@@ -517,7 +586,7 @@ pub(crate) fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
 // --- Handlers ----------------------------------------------------------------
 
 /// Only canonical error text crosses the admin boundary; broker errors may contain secret material.
-fn vault_failure(error: VaultError, write: bool) -> Response {
+pub(crate) fn vault_failure(error: VaultError, write: bool) -> Response {
     let reconcile = write && matches!(error, VaultError::Timeout | VaultError::Backend(_));
     let (status, code, message) = match error {
         VaultError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "vault_busy", "Credential operation busy; not admitted"),
@@ -666,12 +735,32 @@ async fn register_credential(
             Ok(id) => id,
             Err(e) => return vault_failure(e, write),
         };
-        if let Some(handle) = handle {
-            state
-                .providers
-                .lock()
-                .expect("providers poisoned")
-                .insert(cred_id.clone(), handle);
+        let entry = match vault.metadata_entry(&req.provider, label) {
+            Ok(Some(entry)) => entry,
+            result => {
+                // The mutation already committed. Disable runtime dependents if
+                // the canonical generation cannot be read; never publish a guessed one.
+                let _ = crate::backend::publish_credential(&state, &cred_id, None, None, None);
+                return match result {
+                    Err(error) => vault_failure(error, write),
+                    _ => err(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "credential committed; metadata unavailable; reconcile before retry",
+                    ),
+                };
+            }
+        };
+        if crate::backend::publish_credential(&state, &cred_id, handle, Some(&entry), Some(&secret))
+            .is_err()
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({"error":"credential committed; dependent backend refresh failed",
+                "metadata_committed":true,"credential_id":cred_id,"reconcile_before_retry":true}),
+                ),
+            )
+                .into_response();
         }
         // Failure to read after commit must not turn a persisted mutation into a success-shaped
         // empty inventory. Preserve its identity so an operator can reconcile without rewriting.
@@ -747,11 +836,13 @@ pub(crate) async fn revoke_key(
         let _permit = permit;
         match vault.revoke_with_status(&provider, &label) {
             Ok((revoked, deletion)) => {
-                state
-                    .providers
-                    .lock()
-                    .expect("providers poisoned")
-                    .remove(&format!("{provider}:{label}"));
+                let _ = crate::backend::publish_credential(
+                    &state,
+                    &format!("{provider}:{label}"),
+                    None,
+                    None,
+                    None,
+                );
                 Json(json!({ "revoked": revoked, "secret_deletion": deletion,
                     "broker_grant_revoked": false, "provider_key_revoked": false }))
                 .into_response()
@@ -783,13 +874,33 @@ pub(crate) async fn share_key(
             "virtual-key store not configured (set SANDHI_STORE)",
         );
     };
+    // ADR-0015: `upstream:` is the gateway's own back-leg scope prefix. A virtual key pointing
+    // its budget scope there would hold TWO leases on the same scope per call and settle the
+    // same actual into it twice — exhausting the cap at half its configured limit. Rejected at
+    // minting; the declarative vkeys section never carries a budget scope at all.
+    if let Some(scope) = req
+        .budget_scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| s.starts_with("upstream:"))
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-key (ADR-0015)"
+            ),
+        );
+    }
     // The upstream credential must resolve (provider handle registered or vault entry active).
     let upstream = req.upstream.clone();
-    if !state
+    let registered = state
         .providers
         .lock()
         .expect("providers poisoned")
-        .contains_key(&upstream)
+        .contains_key(&upstream);
+    let logical = crate::routing::active(&state, &upstream).await;
+    if !registered
+        && !logical
         && state
             .vault
             .as_ref()
@@ -1667,6 +1778,14 @@ pub(crate) async fn config_preview(
         Ok(c) => c,
         Err(r) => return r,
     };
+    let existing_backends = match crate::backend::preflight_config(&state, &cfg).await {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
+    let existing_routes = match crate::routing::preflight_config(&state, &cfg).await {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
 
     let existing_vault: Vec<Value> = state
         .vault
@@ -1712,6 +1831,16 @@ pub(crate) async fn config_preview(
             json!({ "credential_id": id, "base_url": p.base_url, "action": action })
         })
         .collect();
+    let backends_plan:Vec<Value> = cfg.backends.iter().map(|definition| {
+        let existing = existing_backends.iter().find(|record| record.definition.id == definition.id);
+        let action = match existing {
+            None => "create",
+            Some(record) if record.status == "active" && record.definition == *definition => "satisfied",
+            Some(_) => "update",
+        };
+        json!({"id":definition.id,"credential_ref":definition.credential_ref,"endpoint":definition.endpoint,
+            "revision":existing.map(|record|record.revision),"action":action})
+    }).collect();
     let budgets_plan: Vec<Value> = cfg
         .budgets
         .iter()
@@ -1767,6 +1896,12 @@ pub(crate) async fn config_preview(
     let mut payload = json!({
         "path": state.config_path.as_ref().map(|p| p.display().to_string()),
         "providers": providers_plan,
+        "backends": backends_plan,
+        "routes": cfg.routes.iter().map(|definition| {
+            let existing=existing_routes.iter().find(|record|record.definition.id==definition.id);
+            json!({"id":definition.id,"upstream_ref":definition.route_ref(),"revision":existing.map(|record|record.revision),
+                "action":match existing {None=>"create",Some(record) if record.status=="active" && record.definition==*definition=>"satisfied",Some(_)=>"update"}})
+        }).collect::<Vec<_>>(),
         "budgets": budgets_plan,
         "alerts": alerts_plan,
         "vkeys": vkeys_plan,
@@ -1820,6 +1955,14 @@ pub(crate) async fn config_apply(
         Ok(c) => c,
         Err(r) => return r,
     };
+    let existing_backends = match crate::backend::preflight_config(&state, &cfg).await {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
+    let existing_routes = match crate::routing::preflight_config(&state, &cfg).await {
+        Ok(records) => records,
+        Err(response) => return response,
+    };
     let getenv = |k: &str| std::env::var(k).ok();
 
     // Reject malformed budget/alert intent before touching any backend, including the vault.
@@ -1857,6 +2000,8 @@ pub(crate) async fn config_apply(
     }
     let mut failures = Vec::new();
     let mut providers_applied = Vec::new();
+    let mut failed_provider_refs = std::collections::HashSet::new();
+    let mut failed_backend_refs = std::collections::HashSet::new();
     for p in &cfg.providers {
         let secret = crate::config::resolve_secret(&p.secret_env, getenv);
         let req = admin::AddKeyRequest {
@@ -1871,6 +2016,11 @@ pub(crate) async fn config_apply(
         if resp.status().is_success() {
             providers_applied.push(json!({ "provider": p.provider, "label": p.label }));
         } else {
+            failed_provider_refs.insert(format!(
+                "{}:{}",
+                p.provider,
+                p.label.as_deref().unwrap_or("default")
+            ));
             failures.push(
                 config_component_failure(
                     json!({"component": "provider", "provider": p.provider,
@@ -1882,6 +2032,79 @@ pub(crate) async fn config_apply(
         }
     }
 
+    let mut backends_applied = Vec::new();
+    for definition in &cfg.backends {
+        if failed_provider_refs.contains(&definition.credential_ref) {
+            failed_backend_refs.insert(definition.route_ref());
+            failures.push(json!({"component":"backend","id":definition.id,"error":"credential dependency failed; backend not applied"}));
+            continue;
+        }
+        let expected_revision = existing_backends
+            .iter()
+            .find(|record| record.definition.id == definition.id)
+            .map(|record| record.revision);
+        let response = crate::backend::register(
+            State(state.clone()),
+            headers.clone(),
+            Json(crate::backend::RegisterBackendRequest {
+                definition: definition.clone(),
+                expected_revision,
+            }),
+        )
+        .await;
+        if response.status().is_success() {
+            backends_applied
+                .push(json!({"id":definition.id,"upstream_ref":definition.route_ref()}));
+        } else {
+            failed_backend_refs.insert(definition.route_ref());
+            failures.push(
+                config_component_failure(
+                    json!({"component":"backend","id":definition.id,
+                "error":"backend apply failed"}),
+                    response,
+                )
+                .await,
+            );
+        }
+    }
+
+    let mut routes_applied = Vec::new();
+    for definition in &cfg.routes {
+        if definition
+            .models
+            .iter()
+            .flat_map(|model| &model.targets)
+            .any(|target| failed_backend_refs.contains(&format!("backend/{}", target.backend)))
+        {
+            failed_backend_refs.insert(definition.route_ref());
+            failures.push(json!({"component":"route","id":definition.id,"error":"backend dependency failed; route not applied"}));
+            continue;
+        }
+        let response = crate::routing::register(
+            State(state.clone()),
+            headers.clone(),
+            Json(crate::routing::Register {
+                definition: definition.clone(),
+                expected_revision: existing_routes
+                    .iter()
+                    .find(|record| record.definition.id == definition.id)
+                    .map(|record| record.revision),
+            }),
+        )
+        .await;
+        if response.status().is_success() {
+            routes_applied.push(json!({"id":definition.id,"upstream_ref":definition.route_ref()}));
+        } else {
+            failed_backend_refs.insert(definition.route_ref());
+            failures.push(
+                config_component_failure(
+                    json!({"component":"route","id":definition.id,"error":"route apply failed"}),
+                    response,
+                )
+                .await,
+            );
+        }
+    }
     let mut alerts_created = Vec::new();
     let mut alerts_skipped = Vec::new();
 
@@ -1937,6 +2160,10 @@ pub(crate) async fn config_apply(
     let mut vkeys_minted = Vec::new();
     let mut vkeys_skipped = Vec::new();
     for v in &cfg.vkeys {
+        if failed_backend_refs.contains(&v.upstream) {
+            failures.push(json!({"component":"vkey","upstream":v.upstream,"error":"backend dependency failed; no key minted"}));
+            continue;
+        }
         let existing = match state.vkeys.as_ref().map(|s| s.list()).transpose() {
             Ok(Some(records)) => records,
             result => {
@@ -1992,6 +2219,15 @@ pub(crate) async fn config_apply(
     let mut profiles_applied = Vec::new();
     let mut profiles_skipped = Vec::new();
     for p in &cfg.profiles {
+        if p.effective_mode() == "gateway"
+            && p.upstream
+                .as_ref()
+                .is_some_and(|upstream| failed_backend_refs.contains(upstream))
+        {
+            failures.push(json!({"component":"profile","group":p.group,
+                "error":"backend dependency failed; profile not applied"}));
+            continue;
+        }
         let Some(store) = state.profiles.clone() else {
             failures.push(json!({"component": "profile", "group": p.group,
                 "error": "profile store not configured (set SANDHI_STORE)"}));
@@ -2037,6 +2273,8 @@ pub(crate) async fn config_apply(
         "ok": complete,
         "failures": failures,
         "providers": { "applied": providers_applied },
+        "backends": { "applied": backends_applied },
+        "routes": { "applied": routes_applied },
         "budgets": { "applied": budgets_applied },
         "alerts": { "created": alerts_created, "skipped": alerts_skipped },
         "vkeys": { "minted": vkeys_minted, "skipped": vkeys_skipped },

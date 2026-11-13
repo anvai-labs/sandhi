@@ -13,11 +13,22 @@ mistaken for shipped behavior.
 | What can I run today? | The root [README](../README.md) and [proxy operator guide](operator/proxy-guide.adoc) |
 | How do users, groups and long-running clients authenticate? | [Identity and agent credentials](operator/identity-groups.md) (feature candidate; live migration pending) |
 | How is prompt egress inspected? | [Policy MVP](operator/policy-evaluation.md) (candidate); [evaluator backends and Python/MLflow](operator/python-ml-evaluators.md) (Python, optional ONNX and remote-service candidates); [resource-limited container profile](../templates/python-evaluator/DEPLOYMENT.md) |
+| How does Sandhi improve repeated-context efficiency? | [Visual cache routing and token guide](product/cache-aware-routing.md): marker placement, fresh/read/write accounting, cost boundaries and the complementary ONNX egress mechanism |
+| What has been tested with live provider caching? | [Z.AI qualification](reviews/zai-router-live-2026-11-11.md): 24 final protocol/mode cells and 48 cache calls; retained defects/timeouts and remaining gates |
+| Has tracked routing been tested with live caching? | [Tracked buffered Z.AI matrix](reviews/zai-router-tracked-buffered-2026-11-11.md): 24 successful logical-route calls joined to usage, attempt evidence and paired receipts; earlier failures retained |
 | How do I rehearse recovery safely? | [Isolated single-node recovery drill](operator/recovery-drill.md); no automatic production restore guarantee |
 | What is the supported architecture and scope? | Accepted records in [`adr/`](adr/) |
 | What is complete or still open? | This index and the status line at the top of each record in [`td/`](td/) |
+| What is needed for multi-backend routing and cache management? | [Active goal and delivery gates (TD-0034)](td/TD-0034-protocol-neutral-router-cache-accounting.md); [baseline inventory and first fixes](reviews/router-cache-inventory-2026-11-11.md); implemented routing/source contracts are distinct from release/deployment and broader external-resource lifecycle gates |
+| How do I operate the dashboard? | [Operator console](operator/dashboard.md): navigable workspaces, routing inventory, token reuse and bounded usage evidence |
+| How do I configure backends and logical models? | [Backend operator guide](operator/backends.md); fixed and logical routes, compatible affinity, cache declarations and credential references |
+| How do embedded clients select compatible endpoint usage conventions? | [Shared endpoint profiles](adr/0039-shared-embedded-endpoint-profiles.md) and [explicit gateway peer](adr/0041-explicit-gateway-peer-contract.md): client dialect, source convention and one server cache compiler |
+| What store and execution contract does HTTP require? | [Mandatory durable owner](adr/0043-mandatory-durable-http-execution.md) and [0.17.0 upgrade](releases/v0.17.0.md): original file/shard1, removed flag, paired holds and shared serving lifecycle |
+| What authorizes native continuation? | [Source-issued native ownership](adr/0044-native-reference-ownership.md) and [backend operator guide](operator/backends.md#native-reference-ownership): same-ledger proof, original deadlines and no caller-ID adoption |
+| How do buffered calls preserve source accounting and tool fields? | [Shared buffered qualification](adr/0040-shared-buffered-source-qualification.md): ordinary/accounted source semantics, terminal-only Codex aggregation and deterministic refusal |
+| Does the routing goal include native Gemini clients? | Yes; [Gemini inventory and fidelity gaps](reviews/gemini-router-cache-inventory-2026-11-11.md) and the four-ingress matrix in TD-0034 |
 | What is the public data contract? | Rust types in `sandhi-core`; generated JSON Schemas in [`../schemas/`](../schemas/) |
-| What changed in a release? | [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
+| What changed in a release? | [0.17.0 migration and qualification](releases/v0.17.0.md), [0.15.0 release evidence](releases/v0.15.0.md), [0.14.0 release and adoption gates](releases/v0.14.0.md), [0.13.0 release](releases/v0.13.0.md), [0.12.0 release evidence](releases/v0.12.0.md), [CHANGELOG](../CHANGELOG.md) and [release guide](../RELEASING.md) |
 | How do sibling repositories integrate? | [`upstream/`](upstream/) snapshots; these are non-normative and may be historical |
 | What product evolution is proposed and how is it tracked? | [TD-0026 delivery plan](td/TD-0026-gateway-product-evolution.md), [product specification](product/gateway-vision-and-requirements.md), and [2026-09-04 review](reviews/gateway-review-2026-09-04.md); proposals, not shipped claims |
 | What evidence gates the M1 checkpoint? | [Workload and acceptance](product/m1-acceptance.md); UA01 accepts engineering evidence for this release and defers hands-on usability until before production |
@@ -39,8 +50,10 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
   and Gemini. Cohere and Ollama are available as upstream codecs but do not have proxy ingress
   dialects.
 - Eligible same-family proxy calls use the transparent metering plane; cross-family calls use the
-  neutral chat contract and may lose explicitly provider-specific extensions. A hard-capped chat call
-  with no explicit output limit uses translation to inject a bound. Plaintext completions
+  neutral chat contract, preserving representable content and refusing meaningful native state
+  or controls that cannot be faithfully projected. No silent extension loss is permitted. A chat call without an explicit
+  output limit uses canonical encoding to inject the operator-owned default under
+  both Block and Warn policies. Plaintext completions
   instead receive an explicit max_tokens=16 default and remain on their native route.
 - The listener is deliberately HTTP/1.1-only. It supports plain HTTP for loopback/trusted hops and
   opt-in TLS termination. HTTP/2, HTTP/3, raw TCP forwarding, and WebSocket sessions are not shipped.
@@ -50,9 +63,11 @@ Sandhi is an L7 AI usage gateway and provider-transport library, not a general L
   policy remain downstream.
 - Budget admission uses estimates, not strict total-token bounds. Reasoning inclusion is explicit
   in contract minor 7; see [metering semantics, compatibility and guarantees](product/metering-and-budget-guarantees.md).
-- W05a provides an opt-in store primitive for atomic settlement receipts and delivery claims;
-  the opt-in [HTTP accounting mode](operator/buffered-accounting.md) now uses canonical terminal settlement. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
-  for the remaining transport, recovery, export and consumer-review gates.
+- The current [HTTP execution contract](operator/buffered-accounting.md) requires
+  the original single file-backed paired owner for every generation operation. See [attempt accounting and evidence](product/attempt-accounting-and-evidence.md)
+  for historical phase evidence. Current serving/recovery and upgrade requirements are in
+  [0.17.0](releases/v0.17.0.md), ADR-0043 and ADR-0044; unsupported external lifecycle work
+  remains separate.
 
 The rationale and the evidence gate for changing this scope live in
 [ADR-0006](adr/0006-layer-boundary-and-protocol-scope.md). The HTTP/1-only listener decision is
@@ -66,7 +81,7 @@ facades from the same set.
 
 | Contract | Purpose |
 |---|---|
-| [`usage-event.v1`](../schemas/usage-event.v1.schema.json) | One attributed model-call observation; tracked-mode events do not prove committed settlement |
+| [`usage-event.v1`](../schemas/usage-event.v1.schema.json) | One attributed model-call observation; observations do not prove committed settlement |
 | [`usage.v2`](../schemas/usage.v2.schema.json) | Neutral token/cache/reasoning measurement embedded in chat contracts |
 | [`usage-aggregate.v1`](../schemas/usage-aggregate.v1.schema.json) | Shared aggregate shape used by core, store, proxy, and bindings |
 | [`run-cost-tree.v1`](../schemas/run-cost-tree.v1.schema.json) | Per-run/per-step usage rollup |
@@ -88,12 +103,32 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | ADR | Decision |
 |---|---|
 | [0001](adr/0001-sandhi-architecture-and-wire-contract.md) | Layered Rust core, bindings, proxy, and neutral wire contract |
+| [0016](adr/0016-explicit-backend-endpoint-binding.md) | Explicit endpoint family/profile factory seam |
+| [0017](adr/0017-backend-registry-lifecycle.md) | Non-secret backend registry, revision-conditional lifecycle and credential-dependent reconstruction |
+| [0018](adr/0018-ordered-native-input-and-projection.md) | Codec-owned ordered input, projection consistency and compatible buffered native output |
+| [0019](adr/0019-native-stream-attachments.md) | Default-off native SSE attachments and bounded Codex terminal-response aggregation; canonical accounting remains authoritative |
+| [0020](adr/0020-cache-intent-compilation.md) | Explicit cache intent, declared backend/model controls and scoped keys; no invented backend capability |
+| [0021](adr/0021-logical-routing-and-compatible-affinity.md) | Authorized logical models, deterministic selection and durable compatible affinity; no automatic inference replay |
+| [0022](adr/0022-durable-execution-context.md) | Atomic admitted backend/cache/policy context with original-weight fencing; historical absent context stays absent |
+| [0023](adr/0023-paired-budget-settlement.md) | Atomic paired admission/settlement and conservative unknown liability through expiry/restart |
+| [0024](adr/0024-durable-physical-attempt-evidence.md) | Persisted single-attempt identity and atomic source transport/usage evidence |
+| [0025](adr/0025-qualified-buffered-protocol-accounting.md) | Qualified buffered four-dialect matrix and explicit compatible source usage profiles |
+| [0026](adr/0026-qualified-responses-stream-accounting.md) | Bounded source-qualified Responses streaming, partial progress and original token evidence |
+| [0027](adr/0027-qualified-codex-buffered-accounting.md) | Constrained Codex SSE aggregation, original deadlines and source usage independent of delivery |
+| [0028](adr/0028-qualified-translated-stream-accounting.md) | Qualified native/portable streaming with source-owned paired accounting and bounded projection |
+| [0029](adr/0029-explicit-terminal-chat-usage-profile.md) | Explicit terminal-choice Chat usage convention; strict standard qualifier and binding fences retained |
+| [0039](adr/0039-shared-embedded-endpoint-profiles.md) | Shared embedded endpoint factory/profiles; gateway peers use an independent declared client dialect |
+| [0040](adr/0040-shared-buffered-source-qualification.md) | Shared strict buffered source usage and portable/native fidelity; no measured zero from absence |
+| [0041](adr/0041-explicit-gateway-peer-contract.md) | Explicit immediate peer role, server-owned emitted counts convention and one cache compiler |
+| [0042](adr/0042-provider-identity-and-budget-namespace.md) | Diagnostic labels separate from immutable persisted budget namespace; old caps/spend/holds/pins preserved |
+| [0043](adr/0043-mandatory-durable-http-execution.md) | Required original single-file HTTP owner, defaults, paired liability and ledger-free FFI boundary |
+| [0044](adr/0044-native-reference-ownership.md) | Same-ledger source-issued native proof, original request/shutdown bounds and no implicit external adoption |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |
 | [0005](adr/0005-enforcement-correctness-reservation-ledger-observe-enforce-split.md) | Lease-based atomic enforcement and observe/enforce separation |
 | [0006](adr/0006-layer-boundary-and-protocol-scope.md) | Stay L7 unless a measured admission gate is cleared |
-| [0007](adr/0007-embedding-modality-admission.md) | Embeddings are not admitted on current evidence |
+| [0007](adr/0007-embedding-modality-admission.md) | Historical negative admission; current native OpenAI-compatible Embeddings follows ADR-0043 and the governed text guide |
 | [0008](adr/0008-inferflux-admission-and-session-affinity.md) | OpenAI-compatible catalog admission and session-affinity facts |
 | [0009](adr/0009-http1-only-listener.md) | No h2c sniffing; cleartext listener is HTTP/1 only |
 | [0010](adr/0010-cache-read-reporting-availability.md) | Accepted: additive cache-read observation and same-population reporting coverage |
@@ -101,16 +136,21 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0012](adr/0012-databricks-model-serving-provider.md) | Databricks Model Serving admitted as an OpenAI-compatible provider |
 | [0013](adr/0013-native-extensions-passthrough-and-auto-cache-control.md) | Guarded `sandhi_extensions` ingress passthrough; auto `cache_control` on the Anthropic translation path |
 | [0014](adr/0014-dialect-parity-counting-and-streaming-fidelity.md) | Token-count endpoints; stateful Anthropic/Gemini/Responses stream encoders; OpenAI `created`; translated-traffic route labels |
+| [0015](adr/0015-upstream-budgets-back-leg-caps.md) | Historical upstream-cap seam; immutable stored upstream_budget_scope now preserves authority independently of labels |
 
 ## Technical-design status
 
-Status was reconciled with `develop` on 2026-09-17 for the active TD-0026/0027 delivery checkpoints.
+This dated phase inventory was reconciled with `develop` on 2026-09-17 for TD-0026/0027.
+For current 0.17.0 activation and migration, use [ADR-0043](adr/0043-mandatory-durable-http-execution.md),
+[ADR-0044](adr/0044-native-reference-ownership.md) and the [release checklist](releases/v0.17.0.md);
+older phase descriptions do not enable removed serving modes.
 “Complete” means the TD's required scope is
 shipped; a deliberately transferred or optional follow-up is named in the TD instead of keeping it
 perpetually open.
 
 | TD | State | Remaining scope |
 |---|---|---|
+| [0034](td/TD-0034-protocol-neutral-router-cache-accounting.md) | Active goal | Explicit backend/operator lifecycle, loss-aware conversation/cache handling, authorized routing/affinity and uniform execution accounting; source/live qualification tracked separately |
 | [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate |

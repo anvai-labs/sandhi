@@ -6,6 +6,7 @@ Every database, key and upstream in this suite is disposable synthetic test data
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -121,11 +122,11 @@ def gated_provider():
 @pytest.fixture
 def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
     @contextmanager
-    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64, tracked=False):
+    def launch(*, tls=False, grace=5, quiesce=1800, max_connections=64, explicit_deadlines=False):
         port = _free_port()
         database = tmp_path / "shutdown.db"
         config = {"providers": [], "vkeys": [], "budgets": [], "alerts": []}
-        if tracked:
+        if explicit_deadlines:
             config["streaming_deadlines"] = STREAMING_DEADLINES
         if tls:
             fixtures = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls"
@@ -149,14 +150,19 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
             "SANDHI_SHUTDOWN_GRACE_SECS": str(grace),
             "SANDHI_SHUTDOWN_QUIESCE_MS": str(quiesce),
         })
-        if tracked:
-            env["SANDHI_BUFFERED_ACCOUNTING"] = "tracked"
         base = f"{'https' if tls else 'http'}://127.0.0.1:{port}"
         # A file avoids stderr pipe backpressure contaminating the deadline test.
         with (tmp_path / "shutdown.stderr").open("wb") as log:
+            provenance = json.loads((proxy_binary.parent / "provenance.json").read_text())
+            launch_hash = hashlib.sha256(proxy_binary.read_bytes()).hexdigest()
+            assert launch_hash == provenance["binary_sha256"], "session binary changed before launch"
             process = subprocess.Popen([str(proxy_binary)], env=env, cwd=REPO_ROOT,
                                        stdout=subprocess.DEVNULL, stderr=log)
             try:
+                (tmp_path / "launch-provenance.json").write_text(json.dumps({
+                    **provenance, "pid": process.pid, "launch_binary_sha256": launch_hash,
+                    "launched_at_ns": time.time_ns(),
+                }, indent=2) + "\n")
                 verify = ssl.create_default_context(cafile=config["tls"]["cert"]) if tls else True
                 with httpx.Client(base_url=base, verify=verify, timeout=2) as client:
                     deadline = time.monotonic() + 15
@@ -285,7 +291,12 @@ def test_inflight_sse_finishes_but_queued_request_cannot_dispatch_after_sigterm(
                 assert_draining(result["response"])
         assert process.wait(timeout=6) == 0
         assert len(gated_provider.requests) == 1
-        assert evidence_counts(database) == (1, 1)
+        # One usage event; one front (group:) and one back (upstream:) lease per
+        # call, ADR-0015 D5.
+        assert evidence_counts(database) == (1, 2)
+        with sqlite3.connect(database, timeout=1) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM budget_reservation WHERE settled=0").fetchone() == (0,), "both legs settle"
 
 
 def test_body_started_before_cutoff_cannot_dispatch_when_completed_after_cutoff(
@@ -390,7 +401,7 @@ def test_tracked_binary_correlation_and_shutdown(
     gated_provider.release.set()
     certificate = REPO_ROOT / "crates/sandhi-proxy/tests/fixtures/tls/localhost-cert.pem"
     verify = ssl.create_default_context(cafile=certificate) if tls else True
-    with shutdown_gateway(tracked=True, tls=tls) as (process, base, database, _port):
+    with shutdown_gateway(explicit_deadlines=True, tls=tls) as (process, base, database, _port):
         with httpx.Client(base_url=base, timeout=5, verify=verify) as client:
             with client.stream("POST", "/v1/chat/completions", headers=CLIENT,
                                json={**BODY, "max_tokens": 10, "stream": streaming}) as response:
@@ -415,4 +426,13 @@ def test_tracked_binary_correlation_and_shutdown(
                 "SELECT charged_tokens FROM budget_settlement_outbox"
             ).fetchall()
             assert receipts == ([] if missing_usage else [(14,)])
+            # New tracked admission links both legs. Missing usage retains both;
+            # qualified usage commits both in the original receipt transaction.
+            assert connection.execute(
+                "SELECT actual, settled FROM budget_reservation WHERE scope LIKE 'upstream:%'"
+            ).fetchall() == [(0, 0) if missing_usage else (14, 1)]
+            assert connection.execute(
+                "SELECT DISTINCT actual, settled FROM budget_reservation"
+            ).fetchall() == [(0, 0) if missing_usage else (14, 1)]
+            assert connection.execute("SELECT count(*) FROM budget_execution_back_leg").fetchone() == (1,)
         assert len(gated_provider.requests) == 1

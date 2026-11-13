@@ -340,6 +340,22 @@ impl From<StreamingDeadlines> for StreamingFile {
         policy.0
     }
 }
+impl Default for StreamingDeadlines {
+    fn default() -> Self {
+        StreamingFile {
+            ceiling_ms: 240_000,
+            default: StreamLimits {
+                setup_ms: 30_000,
+                idle_ms: 90_000,
+                body_ms: 180_000,
+            },
+            endpoints: BTreeMap::new(),
+        }
+        .try_into()
+        .expect("static canonical streaming limits")
+    }
+}
+
 impl StreamingDeadlines {
     pub fn validate_endpoints(&self, known: impl Fn(&str) -> bool) -> Result<(), String> {
         for reference in self.0.endpoints.keys() {

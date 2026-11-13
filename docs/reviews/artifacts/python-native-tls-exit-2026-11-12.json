@@ -1,0 +1,366 @@
+{
+  "evidence_kind": "unresolved_native_python_tls_child_exit",
+  "source_parent": "9bc7a3ef570e4e32d0159de604366b932effb29c",
+  "python": "3.12.2",
+  "wheel_sha256": {
+    "m5t": "e9d39f602ec3916ac3c0aa63e8499af146a0ac1afcb40cec1b919864e372f211",
+    "m5v": "6a5ea855d6892b40dccb902278c34b3bf8188ee36e52dc6901cc8ae49f73e81a"
+  },
+  "log_sha256": {
+    "sandhi-m5v-python-final.log": "bb2e30789006c9516e63657007d50350873d43d9076cbbe9738e30fee6717ca9",
+    "sandhi-m5v-python-final-diagnostic.log": "6d94b414d7007462a5243eec368a3db804382973f252016401bd2871128fce7b",
+    "sandhi-m5v-python-ca-diagnostic.log": "0beb23056c6be9803838014c8d557ef119f6992cc04bfcdb09c5026c586d4887"
+  },
+  "failed_run": {
+    "passed": 146,
+    "failed": 1,
+    "test": "test_private_ca_preserves_chain_and_hostname_checks[True-127.0.0.1-transport_error]",
+    "child_returncode": -11,
+    "child_stdout": "transport_error",
+    "child_stderr": "",
+    "meaning": "Expected hostname rejection was reported, then child terminated with SIGSEGV. No native stack captured."
+  },
+  "diagnostic_runs": {
+    "focused_private_ca": {
+      "passed": 3,
+      "fault_handler": true
+    },
+    "complete_binding_suite": {
+      "passed": 147,
+      "fault_handler": true
+    },
+    "debugger_subprocesses": [
+      {
+        "variant": "m5t",
+        "ordinal": 0,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 1,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 2,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 0,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 1,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 2,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      }
+    ],
+    "plain_subprocesses": [
+      {
+        "variant": "m5t",
+        "ordinal": 0,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 1,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 2,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 3,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 4,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 5,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 6,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 7,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 8,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 9,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 10,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 11,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 12,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 13,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 14,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 15,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 16,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 17,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 18,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5t",
+        "ordinal": 19,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 0,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 1,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 2,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 3,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 4,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 5,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 6,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 7,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 8,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 9,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 10,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 11,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 12,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 13,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 14,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 15,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 16,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 17,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 18,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      },
+      {
+        "variant": "m5v",
+        "ordinal": 19,
+        "exit": 0,
+        "signal_observed": false,
+        "expected_tls_error": true
+      }
+    ]
+  },
+  "limits": [
+    "The same current candidate wheel was used for the failed and later passing complete binding runs; fault tracing differs.",
+    "No crash recurred under the debugger or bounded comparison; no stack/root cause or attribution to the buffered delta is established.",
+    "The earlier wheel is a comparison control, not proof that it is immune.",
+    "Only a generated localhost CA and synthetic-invalid credential were used; no vendor inference or OS trust mutation."
+  ],
+  "disposition": "Retain the failed run as an open native-process reliability/merge gate. Do not ignore signal exits or add shutdown sleeps to make the test green."
+}

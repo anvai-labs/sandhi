@@ -154,6 +154,22 @@ impl Config {
                 {
                     return Err("inference grants need an unambiguous name, upstream and nonempty model allowlist".into());
                 }
+                // ADR-0015: `upstream:` is the gateway's reserved back-leg scope prefix. A grant
+                // pointing its budget scope there would mint keys holding two leases on the same
+                // scope per call and settling the same actual into it twice — exhausting the cap
+                // at half. Config-authored scopes flow into both the live OIDC-derived key and
+                // the durable subject-key mint, so this must fail at startup, not at request
+                // time.
+                if let Some(scope) = g
+                    .budget_scope
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| s.starts_with("upstream:"))
+                {
+                    return Err(format!(
+                        "grant '{name}' budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-grant (ADR-0015)"
+                    ));
+                }
             }
         }
         Ok(())

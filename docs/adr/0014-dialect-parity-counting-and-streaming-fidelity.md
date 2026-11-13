@@ -62,6 +62,13 @@ response stream):
   and `response.output_item.done` carries the complete item — what Codex-class
   clients re-read.
 
+The OpenAI Chat upstream decoder retains `finish_reason` until trailing usage
+has been decoded. It publishes the neutral Finish at `[DONE]` (without waiting
+for HTTP EOF), or after flushing a clean EOF tail for compatible transports.
+This keeps final usage ahead of translated Responses/Anthropic terminal
+envelopes. A transport error before completion does not publish the retained
+successful Finish.
+
 Same-family (transparent-plane) routes remain byte-exact and untouched.
 
 ## D3. OpenAI Chat Completions: `created` on completions and chunks
