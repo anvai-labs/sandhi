@@ -19,7 +19,21 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.17.0] — 2026-11-13
+## [0.17.1] — Release candidate
+
+- Correct the isolated binary smoke to supply a private ordinary-file durable
+  ledger and an empty credential store. CI runs the actual built binaries through
+  the same smoke before long tests, preserving auth, identity and shutdown checks.
+- Reject meaningful Chat stream data after final source totals while retaining the
+  original partial observation; harmless identical total repetitions remain
+  idempotent. No inference retry, replay or fabricated counts are introduced.
+- Preserve the immutable, unpublished `v0.17.0` tag. Its missing-store smoke fixture
+  prevented all registry writes; the corrected version requires a new reviewed
+  promotion, green exact-main CI and all-target artifact verification.
+- Coordinate Victor's exact dependency with `sandhi-gateway==0.17.1` and verify the
+  published binding before consumer adoption. Publication remains pending.
+
+## [0.17.0] — Unpublished source tag, 2026-11-13
 
 ### Upgrade and compatibility
 
@@ -1792,7 +1806,9 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/anvai-labs/sandhi/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/anvai-labs/sandhi/compare/v0.16.2...v0.17.0
 [0.16.2]: https://github.com/anvai-labs/sandhi/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/anvai-labs/sandhi/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/anvai-labs/sandhi/compare/v0.15.0...v0.16.0

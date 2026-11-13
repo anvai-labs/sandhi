@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke native release binaries without providers, credentials, or durable state.
+"""Smoke native release binaries without providers or credentials, using a disposable private ledger.
 
 Run with --binary-dir PATH on Linux/macOS. This checks `sandhi --help`, actual
 /healthz and /readyz responses from sandhi-proxy, and a zero-exit SIGTERM shutdown.
@@ -34,8 +34,9 @@ class SmokeFailure(Exception):
 
 def isolated_environment(directory, port):
     # Deliberate allowlist, NOT an inherited environment with selected keys removed.
-    # HOME, loader hooks, proxy variables, provider keys and vault/telemetry settings
-    # are absent. No store means the proxy never initializes a vault backend.
+    # HOME, loader hooks, proxy variables, provider keys and telemetry settings
+    # are absent. The mandatory ledger and empty read-only credential backend
+    # belong only to this invocation; never consult a user keyring or daemon.
     return {
         "PATH": os.defpath,
         "LANG": "C",
@@ -44,6 +45,9 @@ def isolated_environment(directory, port):
         "XDG_CONFIG_HOME": str(directory / "config"),
         "XDG_CACHE_HOME": str(directory / "cache"),
         "SANDHI_CONFIG": str(directory / "empty.json"),
+        "SANDHI_STORE": str(directory / "ledger.db"),
+        "SANDHI_VAULT_BACKEND": "credstore",
+        "SANDHI_CREDENTIALS_DIR": str(directory / "credentials"),
         "SANDHI_AUTH_MODE": "tokens",
         "SANDHI_BIND": f"127.0.0.1:{port}",
         "SANDHI_LOG": "off",
@@ -192,6 +196,8 @@ def run_smoke(binary_directory, startup_timeout=15, shutdown_timeout=8, expected
     with tempfile.TemporaryDirectory(prefix="sandhi-binary-smoke-") as temporary:
         isolated = Path(temporary)
         (isolated / "empty.json").write_text("{}\n", encoding="utf-8")
+        (isolated / "ledger.db").touch(mode=0o600, exist_ok=False)
+        (isolated / "credentials").mkdir(mode=0o700)
         environment = isolated_environment(isolated, 0)
         versions = [check_version(binary, isolated, environment) for binary in binaries]
         expected = expected_version or versions[0]
@@ -234,7 +240,7 @@ def main(argv=None):
         # Never print child output, paths, caller environment, or OS exception text.
         print("FAIL: binary smoke OS/process operation failed", file=sys.stderr)
         return 1
-    print("PASS: both binary versions + HTTP package identity; sandhi --help; proxy /healthz + /readyz; zero-exit graceful SIGTERM (isolated volatile mode)")
+    print("PASS: both binary versions + HTTP package identity; sandhi --help; proxy /healthz + /readyz; zero-exit graceful SIGTERM (isolated disposable durable store)")
     return 0
 
 

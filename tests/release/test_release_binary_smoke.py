@@ -24,14 +24,20 @@ class BinarySmokeTests(unittest.TestCase):
         inherited = {"SANDHI_STORE": "/personal/vault.db", "SANDHI_OPENAI_KEY": "secret",
                      "HOME": "/personal", "HTTP_PROXY": "secret", "HTTPS_PROXY": "secret",
                      "LD_PRELOAD": "/evil.so", "DYLD_INSERT_LIBRARIES": "/evil.dylib",
-                     "SANDHI_OTEL_EXPORT": "otlp", "PATH": "/untrusted", "GH_TOKEN": "secret"}
+                     "SANDHI_OTEL_EXPORT": "otlp", "PATH": "/untrusted", "GH_TOKEN": "secret",
+                     "SANDHI_VAULT_BACKEND": "sentinelpass", "SANDHI_CREDENTIALS_DIR": "/personal/credentials"}
         with patch.dict(os.environ, inherited, clear=True):
             environment = smoke.isolated_environment(Path("/isolated"), 1234)
         for key in inherited:
             if key == "PATH": self.assertEqual(environment[key], os.defpath)
+            elif key in ("SANDHI_STORE", "SANDHI_VAULT_BACKEND", "SANDHI_CREDENTIALS_DIR"):
+                self.assertNotEqual(environment[key], inherited[key])
             else: self.assertNotIn(key, environment)
         self.assertEqual(environment["SANDHI_BIND"], "127.0.0.1:1234")
         self.assertEqual(environment["SANDHI_CONFIG"], "/isolated/empty.json")
+        self.assertEqual(environment["SANDHI_STORE"], "/isolated/ledger.db")
+        self.assertEqual(environment["SANDHI_VAULT_BACKEND"], "credstore")
+        self.assertEqual(environment["SANDHI_CREDENTIALS_DIR"], "/isolated/credentials")
         self.assertNotIn("secret", str(environment))
 
     def test_subprocess_launch_has_no_shell_or_inherited_streams(self):
@@ -169,6 +175,17 @@ class BinarySmokeTests(unittest.TestCase):
             def help_check(binary, directory, environment):
                 self.assertEqual((directory / "empty.json").read_text(), "{}\n")
                 self.assertNotEqual(directory, Path(binary_dir))
+                store = Path(environment["SANDHI_STORE"])
+                credentials = Path(environment["SANDHI_CREDENTIALS_DIR"])
+                self.assertEqual(store.parent, directory)
+                self.assertTrue(store.is_file())
+                self.assertFalse(store.is_symlink())
+                self.assertEqual(store.read_bytes(), b"")
+                self.assertEqual(store.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(credentials.parent, directory)
+                self.assertTrue(credentials.is_dir())
+                self.assertEqual(list(credentials.iterdir()), [])
+                self.assertEqual(credentials.stat().st_mode & 0o777, 0o700)
             def cleanup(child):
                 self.assertIs(child, process)
                 self.assertTrue(spawn.call_args.args[2].is_dir())
