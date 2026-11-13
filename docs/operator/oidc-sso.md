@@ -206,15 +206,15 @@ sequenceDiagram
     I-->>S: Active, intended resource, current subject authority
     S->>M: One physical attempt
     M-->>S: Read-tool call and source usage
-    S-->>V: Tool call; paired receipt settles 14 tokens
-    V->>V: Execute read tool; retain successful tool result
+    S-->>V: Tool call with paired receipt settling 14 tokens
+    V->>V: Execute read tool and retain successful tool result
     V->>I: Acquire rotated resource token
     V->>S: Request 2: tool-result conversation
     S->>I: Introspect again as Sandhi client
     I-->>S: Current authority
     S->>M: One physical attempt
     M-->>S: Final answer and source usage
-    S-->>V: Answer; paired receipt settles 14 tokens
+    S-->>V: Answer with paired receipt settling 14 tokens
     O->>I: Revoke local login / authority
     V->>S: Attempt with revoked token
     S->>I: Introspect current authority
@@ -255,11 +255,16 @@ Six refusal controls covered UserInfo-purpose tokens, ID tokens, the wrong
 resource, private token-file expiry, signed-token expiry and logout/revocation.
 The demonstrated two successful calls made two physical model attempts.
 
-This acceptance used a local Sandhi audience candidate, the supported local IDM
-registration candidate and a Victor source candidate with **SDK 0.17.0**. It is
-**not published-wheel qualification for 0.17.1**, an execution of the final combined
-0.18.0 source, or proof of a deployed identity integration. IDM remote-base alignment and fresh qualification before PR/CI, final combined-source
-acceptance, and published-wheel consumer adoption remain separate gates in the
+The final local acceptance repeated this flow with the **official published SDK
+0.17.1**, the reviewed combined **Sandhi 0.18.0 source candidate**, and the IDM
+registration candidate aligned to its actual remote baseline. All three acceptance
+tests passed, including actual wire/receipt joins, successful tool execution and
+six refusal controls. Native module and server binary hashes bind the run to those
+artifacts; a reported version alone is not provenance. The earlier SDK 0.17.0
+candidate evidence remains historical. Separate published-0.17.1 gateway checks
+also passed eight Agent/tool-loop cases; that released server does not gain the
+candidate audience feature. Reviewed consumer adoption, hosted CI and deployment
+remain separate gates in the
 [progress ledger](../reviews/post-0.17.0-pr-train.md#three-project-identity-co-design).
 The public `id.anvaiops.dev` discovery still lacks required introspection metadata;
 the [live-host compatibility gap](#anvaiops-development-idm-discovery-checked-integration-not-qualified)
