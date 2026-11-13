@@ -118,6 +118,7 @@ nav:
   - Project:
       - Version 0.17.1 candidate: releases/v0.17.1.md
       - Version 0.17.0 unpublished checkpoint: releases/v0.17.0.md
+      - Development PR progress: reviews/post-0.17.0-pr-train.md
       - Version 0.14.0: releases/v0.14.0.md
       - Version 0.13.0: releases/v0.13.0.md
       - Version 0.12.0: releases/v0.12.0.md
