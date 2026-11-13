@@ -10,11 +10,27 @@ Remote HTTP services now have a separate [template and adapter](../../templates/
 
 Build the proxy with `--features policy-onnx`. This optional feature requires
 Rust 1.88 or newer; validation used Rust 1.95. The workspace's default feature
-does not include ONNX. The pinned ort 2.0.0-rc.13 wrapper uses API 26, with
+does not include ONNX. The pinned ort 2.0.0-rc.15 wrapper uses API 26, with
 automatic runtime downloads and default execution-provider features disabled.
 The operator supplies an approved ONNX Runtime >=1.26 shared library by absolute
 path and SHA-256. Validation used ONNX Runtime 1.26.0 on macOS arm64. Other
 platforms/runtime builds require their own acceptance.
+
+The adapter creates and retains one environment at approved runtime setup and
+creates each CPU session at model deployment, reusing it for scoring. ORT rc.15
+requires an explicit environment; an already configured foreign environment still
+fails closed. No environment or session is created per inference request.
+
+The manifest authenticates the configured files, not an arbitrary preloaded
+process image. Trusted embedders must initialize this adapter **before any other
+ORT API use** and keep operator-pinned files immutable. Both rc.13 and rc.15 can
+silently reuse a library loaded by a bare external `init_from` without environment
+commit/build; their public API exposes no loaded-library path/hash proof. The
+standalone proxy has no other ORT caller. This dependency update preserves the
+existing configured-environment refusal; it does not claim to fix the pre-existing
+external-preload limitation or add a second loader. See the upstream
+[environment implementation](https://github.com/pykeio/ort/blob/v2.0.0-rc.15/src/environment.rs)
+and [dynamic loader](https://github.com/pykeio/ort/blob/v2.0.0-rc.15/src/lib.rs).
 
 The ONNX dependency is proxy-only. Neither sandhi-core nor the Python/Node
 client bindings gains a native runtime dependency. Model inference is inside

@@ -73,13 +73,28 @@ fn embedded_onnx_parity_and_unsupported_preprocessing_fail_closed() {
 #[ignore = "requires pinned runtime and generated SANDHI_ONNX_TEST_MANIFEST"]
 fn embedded_onnx_rejects_tampered_model_and_deadlines() {
     let m = manifest();
-    for field in ["model_sha256", "preprocessing_sha256"] {
+    for field in ["model_sha256", "preprocessing_sha256", "runtime_sha256"] {
         let mut bad: Value = serde_json::from_slice(&m).unwrap();
-        bad["models"][0][field] = json!("0".repeat(64));
+        if field == "runtime_sha256" {
+            bad[field] = json!("0".repeat(64));
+        } else {
+            bad["models"][0][field] = json!("0".repeat(64));
+        }
         assert!(
             register_models(&mut Registry::default(), &serde_json::to_vec(&bad).unwrap()).is_err()
         );
     }
+    // Same bytes/hash at another path cannot replace an established runtime owner.
+    let mut alternate: Value = serde_json::from_slice(&m).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let copy = directory.path().join("other-runtime.so");
+    std::fs::copy(alternate["runtime_library"].as_str().unwrap(), &copy).unwrap();
+    alternate["runtime_library"] = json!(copy);
+    assert!(register_models(
+        &mut Registry::default(),
+        &serde_json::to_vec(&alternate).unwrap()
+    )
+    .is_err());
     let e = engine(&m);
     let body = br#"{"model":"test","messages":[{"role":"user","content":"weather"}]}"#;
     assert_eq!(
