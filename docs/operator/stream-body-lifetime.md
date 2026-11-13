@@ -3,9 +3,12 @@
 Rust embedders can opt into `ProxyState.stream_body_lifetime` using
 `StreamBodyLifetime::new(Duration)`. Standalone operators can use the complete
 [streaming route policy](streaming-deadlines.md) in `SANDHI_CONFIG`; it overrides
-the library body-only value for the authorized route. The default is
-`None`: streams remain pull-driven with the same wire bytes and finalization
-ordering. No deployed gateway limit changes through this increment.
+the library body-only value for the authorized route. The Rust body-only option
+defaults to `None`. The current standalone candidate selects a bounded complete
+route policy even without an explicit config section: setup 30 seconds, idle
+90 seconds, body 180 seconds and ceiling 240 seconds. These source defaults can
+be overridden by the operator; they are not a readout of a deployed process.
+Native provider FFI remains independent of the proxy ledger.
 
 The opt-in owner starts when the gateway receives successful upstream headers.
 It drives the existing transparent or translated usage parser independently of

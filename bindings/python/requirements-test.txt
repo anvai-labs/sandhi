@@ -1,0 +1,4 @@
+# Shared by native bindings, SDK conformance, release guards and glue coverage.
+# pytest 9.0.3 fixes GHSA-6w46-j5rx-g56g; qualify this pinned pair together.
+pytest==9.2.0
+pytest-asyncio==1.5.0

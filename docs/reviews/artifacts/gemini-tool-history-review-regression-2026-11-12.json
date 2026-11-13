@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "independent-synthetic-three-request-wire-reproduction",
+  "rejectedCommit": "fe782e3e222a37ca62d1422d9a349faa09f38ed5",
+  "baseCommit": "4443ed8544404d1fdd944e596141ac615f3f23d9",
+  "severity": "P1",
+  "before": {
+    "ingress": "openai_chat_completions",
+    "backend": "gemini_generate_content",
+    "delivery": "streaming",
+    "actualRequests": 3,
+    "firstTool": {"id": "gemini_call_0", "name": "alpha"},
+    "secondTool": {"id": "gemini_call_0", "name": "beta"},
+    "thirdRequestEarlierResult": {
+      "id": "gemini_call_0",
+      "name": "beta",
+      "response": {"output": "alpha-result"}
+    }
+  },
+  "cause": "Generated IDs repeat between responses and a full-history last-wins lookup relabels earlier results.",
+  "fix": [
+    "Response-specific 128-bit random namespace for omitted IDs across all Gemini delivery paths",
+    "Preserve supplied IDs",
+    "Resolve and consume only preceding unanswered calls",
+    "Refuse future, consumed and duplicate-outstanding references",
+    "Stream-wide legacy tool indices and consistent tool completion"
+  ],
+  "sourceRegression": "tool_results_resolve_against_preceding_calls_when_ids_repeat_between_turns",
+  "sdkRegression": "tests/sdk-conformance/test_gemini_tool_loops.py",
+  "sdkCasesPassed": 16,
+  "syntheticPhysicalRequests": 48,
+  "caseDimensions": {
+    "clientDialects": 4,
+    "deliveryModes": 2,
+    "idConventions": ["omitted", "supplied-and-reused-after-result"]
+  },
+  "verifiedEachCase": [
+    "Third actual request retains alpha-result under alpha and beta-result under beta",
+    "Generated IDs differ between responses; supplied IDs remain exact",
+    "Three settlement receipts and six settled leases"
+  ],
+  "liveProviderRequests": 0,
+  "containsCredentialsOrProviderContent": false,
+  "publicationGate": "Independent exact-commit re-review of the fix tree"
+}

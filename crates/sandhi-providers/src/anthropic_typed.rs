@@ -3,22 +3,29 @@
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
+#[cfg(test)]
+use sandhi_core::UsageCompleteness;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
-    UsageCompleteness, UsageV2,
+    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1, UsageV2,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+pub(crate) mod qualified;
 
 pub(crate) struct TypedAnthropic {
     raw: Arc<dyn Provider>,
+    usage_profile: sandhi_core::usage::AnthropicUsageProfile,
 }
 
 impl TypedAnthropic {
-    pub(crate) fn new(raw: Arc<dyn Provider>) -> Self {
-        Self { raw }
+    pub(crate) fn new(
+        raw: Arc<dyn Provider>,
+        usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> Self {
+        Self { raw, usage_profile }
     }
 
     async fn complete_inner(
@@ -26,9 +33,9 @@ impl TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-    ) -> Result<ChatResponseV1, ProviderError> {
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_anthropic_request(&request)?;
+        let body = self.execution_request(&request)?;
         let response = self
             .raw
             .complete(provider_request_observed(
@@ -37,14 +44,29 @@ impl TypedAnthropic {
                 call_headers,
                 attempt_context,
             ))
-            .await?;
-        let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)?;
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        let qualified = crate::buffered_completion::qualify(
+            &response,
+            sandhi_core::EndpointFamilyV1::AnthropicMessages,
+            self.usage_profile,
+        );
+        if !request.include_native_response {
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::AnthropicMessages,
+                &response.body,
+            )?;
+        }
+        let mut decoded = decode_anthropic_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
         if !request.include_native_response {
             decoded.extensions.remove("anthropic");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        Ok(decoded)
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualified,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -54,22 +76,51 @@ impl TypedAnthropic {
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let body = encode_anthropic_request(&request)?;
-        let raw = self
+        let source = self
             .raw
-            .stream(provider_request_observed(
-                &request,
-                body,
-                call_headers,
-                attempt_context,
-            ))
-            .await?;
-        Ok(decode_anthropic_stream(raw, request.model))
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    encode_anthropic_request_for_peer(&request, self.raw.peer_role())?,
+                    call_headers,
+                    attempt_context,
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        Ok(crate::qualified_stream::decode(
+            qualified::decode(source.stream, request.model, request.include_native_stream),
+            source.observation,
+        ))
     }
 }
 
 #[async_trait]
 impl ChatProvider for TypedAnthropic {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, headers, Some(context)).await
+    }
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        encode_anthropic_request_for_peer(request, self.raw.peer_role())
+    }
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.execution_request(request).map(|_| ())
+    }
+    fn allows_cache_synthesis(&self) -> bool {
+        true
+    }
+    fn supports_native_stream(&self) -> bool {
+        true
+    }
     fn slug(&self) -> &str {
         "anthropic"
     }
@@ -79,7 +130,27 @@ impl ChatProvider for TypedAnthropic {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
+        self.complete_inner(request, call_headers, None)
+            .await
+            .and_then(crate::QualifiedCompletion::into_response)
+    }
+
+    async fn complete_qualified(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.complete_inner(request, call_headers, None).await
+    }
+
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, Some(context))
+            .await
     }
 
     async fn stream(
@@ -98,6 +169,7 @@ impl ChatProvider for TypedAnthropic {
     ) -> Result<ChatResponseV1, ProviderError> {
         self.complete_inner(request, call_headers, Some(attempt_context))
             .await
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -112,7 +184,28 @@ impl ChatProvider for TypedAnthropic {
 }
 
 pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    encode_anthropic_request_for_peer(request, sandhi_core::PeerRoleV1::Provider)
+}
+fn encode_anthropic_request_for_peer(
+    request: &ChatRequestV1,
+    role: sandhi_core::PeerRoleV1,
+) -> Result<Value, ProviderError> {
+    crate::cache_policy::encode_for_peer(
+        request,
+        sandhi_core::EndpointFamilyV1::AnthropicMessages,
+        role,
+        encode_anthropic_request_base,
+    )
+}
+
+pub(crate) fn encode_anthropic_request_base(
+    request: &ChatRequestV1,
+) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    let native = request
+        .native_input_for(sandhi_core::EndpointFamilyV1::AnthropicMessages)
+        .map_err(ProviderError::InvalidRequest)?
+        .is_some();
     let mut body = request
         .extensions
         .get("anthropic")
@@ -131,10 +224,12 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
     // uncached). A client-supplied bucket — including the empty object —
     // suppresses this and keeps marker placement client-owned (empty = the
     // documented opt-out).
-    let auto_cache_control = !request.extensions.contains_key("anthropic");
+    let auto_cache_control = request.cache_intent.is_none()
+        && request.compiled_cache.is_none()
+        && !request.extensions.contains_key("anthropic");
     let mut system = Vec::new();
     let mut messages = Vec::new();
-    for message in &request.messages {
+    for message in request.messages.iter().filter(|_| !native) {
         match message {
             ChatMessageV1::Developer { content, .. } | ChatMessageV1::System { content, .. } => {
                 system.push(json!({"type":"text", "text":text_only(content)?}));
@@ -185,7 +280,9 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         }
     }
     body.insert("model".into(), Value::String(request.model.clone()));
-    body.insert("messages".into(), Value::Array(messages));
+    if !native {
+        body.insert("messages".into(), Value::Array(messages));
+    }
     if !system.is_empty() {
         if let Some(native_system) = native_system {
             for (index, block) in system.iter_mut().enumerate() {
@@ -226,7 +323,7 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
     if let Some(stop) = &request.stop {
         body.insert("stop_sequences".into(), json!(stop));
     }
-    if !request.tools.is_empty() {
+    if !native && !request.tools.is_empty() {
         let mut tools: Vec<Value> = request
             .tools
             .iter()
@@ -257,7 +354,7 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
         }
         body.insert("tools".into(), Value::Array(tools));
     }
-    if let Some(choice) = &request.tool_choice {
+    if let Some(choice) = request.tool_choice.as_ref().filter(|_| !native) {
         match choice {
             ToolChoiceV1::Mode(ToolChoiceMode::None) => {
                 body.remove("tools");
@@ -275,8 +372,19 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
     }
     // W3d/G7: Anthropic extended thinking is `{type: enabled, budget_tokens}`.
     // Typed field wins over an extensions-carried duplicate (inserted after
-    // the extensions clone). `reasoning_effort` has no Anthropic analogue —
-    // explicitly ignored (consumer-decision row).
+    // the extensions clone). Effort `none` is an explicit no-thinking request;
+    // other effort levels retain their existing consumer decision.
+    let no_reasoning = request.reasoning_effort.as_deref() == Some("none");
+    if no_reasoning
+        && request
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.enabled)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "reasoning effort none conflicts with enabled thinking".into(),
+        ));
+    }
     if let Some(thinking) = &request.thinking {
         if thinking.enabled {
             let mut obj = serde_json::Map::new();
@@ -286,8 +394,10 @@ pub fn encode_anthropic_request(request: &ChatRequestV1) -> Result<Value, Provid
             }
             body.insert("thinking".into(), Value::Object(obj));
         } else {
-            body.remove("thinking");
+            body.insert("thinking".into(), json!({"type":"disabled"}));
         }
+    } else if no_reasoning {
+        body.insert("thinking".into(), json!({"type":"disabled"}));
     }
     Ok(Value::Object(body))
 }
@@ -359,19 +469,15 @@ pub fn decode_anthropic_response(
                 reasoning.push_str(block.get("thinking").and_then(Value::as_str).unwrap_or(""))
             }
             Some("tool_use") => tool_calls.push(ToolCallV1 {
-                id: block.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                name: block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .into(),
-                arguments: serde_json::to_string(block.get("input").unwrap_or(&Value::Null))
-                    .map_err(|error| ProviderError::Transport(error.to_string()))?,
+                id: crate::buffered_fidelity::id(block, "id")?.into(),
+                name: crate::buffered_fidelity::id(block, "name")?.into(),
+                arguments: crate::buffered_completion::object_arguments(block.get("input"), false)?,
                 extensions: BTreeMap::new(),
             }),
             _ => {}
         }
     }
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let mut extensions = BTreeMap::from([("anthropic".into(), body.clone())]);
     if !reasoning.is_empty() {
         extensions.insert("reasoning".into(), Value::String(reasoning));
@@ -407,155 +513,37 @@ fn decode_stop_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
+#[cfg(test)]
 fn decode_anthropic_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_anthropic_stream_inner)
-}
-
-fn decode_anthropic_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
-    use futures_util::StreamExt;
-    let stream = async_stream::try_stream! {
-        // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
-        // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
-        let mut started = false;
-        let mut open_tools = BTreeSet::<u32>::new();
-        let mut emitted_usage = false;
-        // The last running total published, so progress is emitted on change rather than per chunk.
-        let mut last_running: Option<crate::ParsedUsage> = None;
-        // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
-        // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
-        // this same loop body, so per-chunk event ordering is preserved exactly and the body is
-        // not duplicated. `raw.next()` returning None terminates; a false flush breaks out.
-        let mut tail_pending = false;
-        let mut chunks_ended = false;
-        while !chunks_ended || tail_pending {
-            let chunk = if chunks_ended {
-                tail_pending = false;
-                crate::StreamChunk {
-                    cache_read_observation: None,
-                    data: bytes::Bytes::new(),
-                    usage: None,
-                    usage_running: None,
-                    attempts: 1,
-                    terminal: false,
-                }
-            } else {
-                match raw.next().await {
-                    Some(chunk) => chunk?,
-                    None => {
-                        chunks_ended = true;
-                        tail_pending = splitter.flush_newline();
-                        continue;
-                    }
-                }
-            };
-            let attempts = chunk.attempts;
-            // Unconditional: the synthetic tail chunk arrives with empty data and must still
-            // drain the flushed remainder; draining after no new bytes is a no-op scan.
-            // (The terminal usage-only chunk is likewise empty and previously skipped this.)
-            {
-                splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
-                    match value.get("type").and_then(Value::as_str) {
-                        Some("message_start") if !started => {
-                            let message = value.get("message").unwrap_or(&Value::Null);
-                            yield ChatStreamEventV1::ResponseStart {
-                                id: message.get("id").and_then(Value::as_str).map(str::to_owned),
-                                model: message.get("model").and_then(Value::as_str)
-                                    .unwrap_or(&requested_model).to_owned(),
-                            };
-                            started = true;
-                        }
-                        Some("content_block_start") => {
-                            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            let block = value.get("content_block").unwrap_or(&Value::Null);
-                            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                                open_tools.insert(index);
-                                yield ChatStreamEventV1::ToolCallStart {
-                                    index,
-                                    id: block.get("id").and_then(Value::as_str).unwrap_or("").into(),
-                                    name: block.get("name").and_then(Value::as_str).unwrap_or("").into(),
-                                };
-                            }
-                        }
-                        Some("content_block_delta") => {
-                            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            let delta = value.get("delta").unwrap_or(&Value::Null);
-                            match delta.get("type").and_then(Value::as_str) {
-                                Some("text_delta") => yield ChatStreamEventV1::TextDelta {
-                                    delta: delta.get("text").and_then(Value::as_str).unwrap_or("").into()
-                                },
-                                Some("thinking_delta") => yield ChatStreamEventV1::ReasoningDelta {
-                                    delta: delta.get("thinking").and_then(Value::as_str).unwrap_or("").into()
-                                },
-                                Some("input_json_delta") => yield ChatStreamEventV1::ToolCallArgumentsDelta {
-                                    index,
-                                    delta: delta.get("partial_json").and_then(Value::as_str).unwrap_or("").into()
-                                },
-                                _ => {}
-                            }
-                        }
-                        Some("content_block_stop") => {
-                            let index = value.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            if open_tools.remove(&index) {
-                                yield ChatStreamEventV1::ToolCallEnd { index };
-                            }
-                        }
-                        Some("message_delta") => {
-                            if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                                yield ChatStreamEventV1::Finish { reason: decode_stop_reason(reason) };
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
-                // line boundary at all, which no real provider does. The raw plane drops the
-                // pending line and keeps streaming — its bytes were already forwarded, so
-                // only usage suffers. A typed decoder emits decoded CONTENT, so dropping
-                // silently would corrupt the response with no signal. Fail loudly instead;
-                // mid-stream errors are never retried.
-                if splitter.over_budget() {
-                    Err(ProviderError::Transport(format!(
-                        "upstream stream exceeded {} bytes with no line boundary",
-                        crate::MAX_STREAM_LINE_BYTES
-                    )))?;
-                }
-            }
-            if let Some(usage) = chunk.usage {
-                if !emitted_usage {
-                    let mut usage: UsageV2 = usage.into();
-                    usage.completeness = UsageCompleteness::Final;
-                    usage.attempts = attempts;
-                    usage.outcome = Some("success".into());
-                    yield ChatStreamEventV1::Usage { usage };
-                    emitted_usage = true;
-                }
-            } else if chunk.usage_running.is_some() && chunk.usage_running != last_running {
-                // Anthropic is an `Incremental` family (TD-0013 D1): `message_start` carries input
-                // and the full cache split before any content, and `message_delta` carries
-                // cumulative output. Surfacing that as a non-final `Usage` is what lets an
-                // interrupted stream settle the real numbers instead of a byte estimate — on a
-                // cached prompt those categories *are* the bill. Emitted only when the totals
-                // actually move, so a long stream does not carry one event per chunk.
-                //
-                // `Partial` is load-bearing here: the proxy treats a non-final `Usage` as
-                // accounting-only, so it never supersedes the terminal frame and never reaches
-                // the client (TD-0013 D7).
-                last_running = chunk.usage_running;
-                let mut usage: UsageV2 = chunk.usage_running.unwrap_or_default().into();
-                usage.completeness = UsageCompleteness::Partial;
-                usage.attempts = attempts;
-                yield ChatStreamEventV1::Usage { usage };
-            }
-        }
-    };
-    Box::pin(stream)
+    crate::qualified_stream::fixture(
+        raw,
+        requested_model,
+        sandhi_core::EndpointFamilyV1::AnthropicMessages,
+        false,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicitly_disabled_thinking_is_sent_instead_of_relying_on_backend_defaults() {
+        for control in [
+            serde_json::json!({"thinking":{"enabled":false}}),
+            serde_json::json!({"reasoning_effort":"none"}),
+        ] {
+            let mut value = serde_json::json!({"model":"fixture","max_output_tokens":64,"messages":[{"role":"user","content":"hello"}]});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(control.as_object().unwrap().clone());
+            let request = serde_json::from_value(value).unwrap();
+            let body = super::encode_anthropic_request(&request).unwrap();
+            assert_eq!(body["thinking"], serde_json::json!({"type":"disabled"}));
+        }
+        let request=serde_json::from_value(serde_json::json!({"model":"fixture","max_output_tokens":64,
+            "reasoning_effort":"none","thinking":{"enabled":true},"messages":[{"role":"user","content":"hello"}]})).unwrap();
+        assert!(super::encode_anthropic_request(&request).is_err());
+    }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
     /// ceiling from BELOW; on their own they would all still pass with the bound set to 1 KiB,
@@ -567,7 +555,14 @@ mod tests {
         use futures_util::StreamExt;
         // 200 KB in one terminated line: far past the old 64 KiB bound, far under the real one.
         let big = "x".repeat(200 * 1024);
-        let wire = format!("data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{big}\"}}}}\n\n");
+        let wire = [
+            json!({"type":"message_start","message":{"type":"message","role":"assistant","id":"large","model":"m","usage":{"input_tokens":1,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":big}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_stop"}),
+        ].iter().map(|v| format!("data: {v}\n\n")).collect::<String>();
         let chunks: Vec<_> = wire
             .as_bytes()
             .chunks(16 * 1024)
@@ -587,10 +582,12 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(
-            !results
+            results.iter().all(Result::is_ok),
+            "a 200 KB complete exchange must survive: {:?}",
+            results
                 .iter()
-                .any(|r| matches!(r, Err(crate::ProviderError::Transport(_)))),
-            "a 200 KB terminated frame is legitimate traffic and must survive"
+                .filter_map(|result| result.as_ref().err())
+                .collect::<Vec<_>>()
         );
         let text: usize = results
             .iter()
@@ -633,10 +630,8 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert!(
-            results
-                .iter()
-                .any(|item| matches!(item, Err(crate::ProviderError::Transport(_)))),
-            "a newline-free stream must terminate with a Transport error rather than \
+            results.iter().any(|item| item.is_err()),
+            "a newline-free stream must terminate with a projection error rather than \
              buffering without bound"
         );
     }
@@ -827,11 +822,11 @@ mod tests {
     #[tokio::test]
     async fn stream_codec_is_invariant_across_arbitrary_byte_boundaries() {
         let sse = concat!(
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-test\"}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"lookup\"}}\n\n",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"m1\",\"model\":\"claude-test\",\"usage\":{\"input_tokens\":2,\"output_tokens\":0,\"cache_creation_input_tokens\":4,\"cache_read_input_tokens\":5}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"c1\",\"name\":\"lookup\",\"input\":{}}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n",
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         ).as_bytes();
         for split in 0..=sse.len() {
@@ -908,7 +903,7 @@ mod tests {
             assert_eq!(
                 events
                     .iter()
-                    .filter(|event| matches!(event, ChatStreamEventV1::Usage { .. }))
+                    .filter(|event| matches!(event, ChatStreamEventV1::Usage { usage } if usage.completeness == UsageCompleteness::Final))
                     .count(),
                 1,
                 "split {split}"
@@ -933,7 +928,7 @@ mod streaming_usage_progress_tests {
     async fn decode_real_fixture() -> Vec<ChatStreamEventV1> {
         let body: &[u8] = include_bytes!("../tests/fixtures/anthropic/stream_cache_split.sse");
         // One SSE frame per chunk, as a paced upstream delivers them.
-        let frames: Vec<Bytes> = String::from_utf8_lossy(body)
+        let frames: Vec<Bytes> = format!("{}\n", String::from_utf8_lossy(body))
             .split_inclusive("\n\n")
             .map(|frame| Bytes::copy_from_slice(frame.as_bytes()))
             .collect();
@@ -1005,7 +1000,7 @@ mod streaming_usage_progress_tests {
         let events = decode_real_fixture().await;
         let usage_events = events
             .iter()
-            .filter(|event| matches!(event, ChatStreamEventV1::Usage { .. }))
+            .filter(|event| matches!(event, ChatStreamEventV1::Usage { usage } if usage.completeness == UsageCompleteness::Final))
             .count();
         let data_events = events.len() - usage_events;
         assert!(

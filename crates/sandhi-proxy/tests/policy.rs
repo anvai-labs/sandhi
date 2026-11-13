@@ -1,10 +1,11 @@
+mod support;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
 use sandhi_core::{policy::Engine, InMemorySink, KeyStore, VirtualKey};
 use sandhi_providers::ProviderRuntime;
-use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, policy::PolicyGate};
 use sandhi_store::policy::PolicyAuditStore;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
@@ -58,9 +59,9 @@ async fn setup(audit: Arc<PolicyAuditStore>) -> (axum::Router, MockServer) {
         None,
         None,
     );
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::from([("openai".into(), provider)]),
         None,

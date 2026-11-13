@@ -1,11 +1,12 @@
 //! The non-chat routes must cross the same authorization, audit and budget gates.
+mod support;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
 use sandhi_core::{policy::Engine, InMemorySink, KeyStore, Policy, VirtualKey, Window};
 use sandhi_providers::ProviderRuntime;
-use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, policy::PolicyGate, ProxyState};
 use sandhi_store::policy::PolicyAuditStore;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
@@ -62,18 +63,20 @@ async fn setup(
         ..Default::default()
     });
     let sink = Arc::new(InMemorySink::new());
-    let mut ledger = ProxyLedger::in_memory();
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger =
+        sandhi_proxy::ProxyLedger::durable(dir.path().join("original.db").to_str().unwrap(), 1)
+            .unwrap();
     ledger
         .set_budget("test", Some(limit), Window::Total, Policy::Block)
         .unwrap();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
         ledger,
         sink.clone(),
         HashMap::from([("local".into(), provider)]),
         None,
     );
-    let dir = tempfile::tempdir().unwrap();
     let policy=serde_json::to_vec(&json!({"schema_version":"1","revision":1,"deadline_ms":500,"max_body_bytes":65536,"rules":[
         {"id":"secret","effect":"block","evaluator":{"kind":"regex","pattern":"SECRET-[0-9]+"}},
         {"id":"review","effect":"quarantine","evaluator":{"kind":"regex","pattern":"QUARANTINE"}},
@@ -159,6 +162,31 @@ async fn bytes_routes_usage_and_identity_are_preserved_for_both_endpoints() {
             state.ledger.lock().unwrap().spent("test"),
             if route.ends_with("embeddings") { 9 } else { 11 }
         );
+        let conn = rusqlite::Connection::open(_dir.path().join("original.db")).unwrap();
+        let context: String = conn
+            .query_row(
+                "SELECT context_json FROM budget_execution_context",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context: Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(
+            context["operation"],
+            if route.ends_with("embeddings") {
+                "embedding"
+            } else {
+                "text_completion"
+            }
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM budget_settlement_outbox", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
     }
 }
 #[tokio::test]
@@ -412,7 +440,7 @@ async fn rate_limit_precedes_second_dispatch() {
 #[tokio::test]
 async fn completion_sse_is_preserved_and_terminal_usage_is_settled() {
     let (state, sink, upstream, _dir) = setup(500, 100, None, false).await;
-    let wire="data: {\"choices\":[{\"text\":\"ok\",\"index\":0}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11}}\n\ndata: [DONE]\n\n";
+    let wire="data: {\"object\":\"text_completion\",\"choices\":[{\"text\":\"ok\",\"index\":0,\"finish_reason\":\"stop\"}]}\n\ndata: {\"object\":\"text_completion\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11}}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(wire, "text/event-stream"))
@@ -495,7 +523,7 @@ async fn valid_controls_and_base64_vectors_remain_byte_exact() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(upstream.received_requests().await.unwrap()[0].body, raw);
-    let encoded = json!({"data":[{"embedding":"zcxMPs3MTD4=","index":0}],"usage":{"prompt_tokens":2,"total_tokens":2}});
+    let encoded = json!({"object":"list","data":[{"object":"embedding","embedding":"zcxMPs3MTD4=","index":0}],"usage":{"prompt_tokens":2,"total_tokens":2}});
     Mock::given(method("POST"))
         .and(path("/embeddings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&encoded))
@@ -560,11 +588,11 @@ async fn text_shape_validation_is_required_even_without_policy() {
 }
 
 #[tokio::test]
-async fn completion_stream_without_usage_is_explicitly_estimated_even_when_cancelled() {
+async fn completion_stream_without_usage_retains_unknown_liability_even_when_cancelled() {
     use futures_util::StreamExt;
     for cancel in [false, true] {
         let (state, sink, upstream, _dir) = setup(10000, 100, None, false).await;
-        let wire="data: {\"choices\":[{\"text\":\"some generated text\",\"index\":0}]}\n\ndata: [DONE]\n\n";
+        let wire="data: {\"object\":\"text_completion\",\"choices\":[{\"text\":\"some generated text\",\"index\":0,\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         Mock::given(method("POST"))
             .and(path("/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(wire, "text/event-stream"))
@@ -585,15 +613,148 @@ async fn completion_stream_without_usage_is_explicitly_estimated_even_when_cance
             assert!(chunks.next().await.unwrap().is_ok());
             drop(chunks);
         } else {
-            let _ = to_bytes(response.into_body(), 8192).await.unwrap();
+            assert!(to_bytes(response.into_body(), 8192).await.is_err());
         }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.lifecycle.wait_idle(),
+        )
+        .await
+        .unwrap();
         let events = sink.events();
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].usage_completeness,
-            sandhi_core::UsageCompleteness::Partial
+            sandhi_core::UsageCompleteness::Unavailable
         );
-        assert_eq!(events[0].usage_basis, sandhi_core::UsageBasis::Estimated);
-        assert!(state.ledger.lock().unwrap().spent("test") > 0);
+        assert_eq!(
+            events[0].usage_basis,
+            sandhi_core::UsageBasis::ProviderReported
+        );
+        assert_eq!(state.ledger.lock().unwrap().spent("test"), 0);
+        let conn = rusqlite::Connection::open(_dir.path().join("original.db")).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM budget_settlement_outbox", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_plaintext_usage_survives_restart_as_unknown_without_replay_or_free_capacity() {
+    for route in ["/v1/embeddings", "/v1/completions"] {
+        let (state, sink, upstream, directory) = setup(10000, 100, None, false).await;
+        let invalid = if route.ends_with("embeddings") {
+            json!({"object":"list","data":[{"object":"embedding","embedding":[0.1],"index":0}],"usage":{"total_tokens":9}})
+        } else {
+            json!({"object":"text_completion","choices":[{"index":0,"text":"ok","finish_reason":"stop"}],"usage":{"prompt_tokens":9}})
+        };
+        Mock::given(method("POST"))
+            .and(path(route.trim_start_matches("/v1")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(invalid))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let response = build_app(state.clone())
+            .oneshot(req(route, &payload(route, "hello"), true, false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()["x-should-retry"], "false");
+        assert_eq!(sink.events().len(), 1);
+        assert_eq!(
+            sink.events()[0].usage_completeness,
+            sandhi_core::UsageCompleteness::Unavailable
+        );
+        assert_eq!(state.ledger.lock().unwrap().spent("test"), 0);
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .set_budget("test", Some(1), Window::Total, Policy::Block)
+            .unwrap();
+        let provider = state
+            .providers
+            .lock()
+            .unwrap()
+            .get("local")
+            .unwrap()
+            .clone();
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "client".into(),
+            upstream_ref: "local".into(),
+            models: Some(vec!["m".into()]),
+            budget_scope: Some("test".into()),
+            ..Default::default()
+        });
+        let restarted = Arc::new(ProxyState::new(
+            keys,
+            sandhi_proxy::ProxyLedger::durable(
+                directory.path().join("original.db").to_str().unwrap(),
+                1,
+            )
+            .unwrap(),
+            Arc::new(InMemorySink::new()),
+            HashMap::from([("local".into(), provider)]),
+            None,
+        ));
+        sandhi_proxy::initialize_execution(&restarted).unwrap();
+        sandhi_proxy::settlement::buffered::recover(restarted.clone())
+            .await
+            .unwrap();
+        let response = build_app(restarted.clone())
+            .oneshot(req(route, &payload(route, "hello"), true, false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        assert!(restarted.ledger.lock().unwrap().reserved("test") > 0);
+        let connection = rusqlite::Connection::open(directory.path().join("original.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM budget_settlement_outbox", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM budget_reservation WHERE settled=0",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        let operation: String = connection
+            .query_row(
+                "SELECT json_extract(context_json,'$.operation') FROM budget_execution_context",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            operation,
+            if route.ends_with("embeddings") {
+                "embedding"
+            } else {
+                "text_completion"
+            }
+        );
     }
 }

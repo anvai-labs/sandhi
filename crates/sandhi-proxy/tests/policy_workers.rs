@@ -1,4 +1,5 @@
 #![cfg(unix)]
+mod support;
 use sandhi_core::policy::{Disposition, Engine, Identity, Registry};
 use sandhi_proxy::policy_workers::register_workers;
 use serde_json::json;
@@ -156,7 +157,7 @@ async fn python_worker_failure_and_findings_hold_zero_provider_calls() {
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
     use sandhi_providers::ProviderRuntime;
-    use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+    use sandhi_proxy::{build_app, policy::PolicyGate};
     use sandhi_store::policy::PolicyAuditStore;
     use std::{collections::HashMap, sync::Arc};
     use tower::ServiceExt;
@@ -182,16 +183,23 @@ async fn python_worker_failure_and_findings_hold_zero_provider_calls() {
             None,
             None,
         );
-        let mut state = ProxyState::new(
+        let mut state = support::state(
             keys,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
             Arc::new(InMemorySink::new()),
             HashMap::from([("openai".into(), provider)]),
             None,
         );
-        state.policy = Some(Arc::new(PolicyGate::new(
+        state.policy = Some(Arc::new(PolicyGate::with_deadline_floor(
             engine(&m),
             Arc::new(PolicyAuditStore::open(&dir.path().join("audit.db"), 100).unwrap()),
+            // This case checks the finding's HTTP verdict, not the 200 ms deadline.
+            // Keep every unavailable/error mode on its original configured bound.
+            if mode == "normal" {
+                Duration::from_secs(5)
+            } else {
+                Duration::ZERO
+            },
         )));
         let app = build_app(Arc::new(state));
         let body=serde_json::to_vec(&json!({"model":"test","max_tokens":4,"messages":[{"role":"user","content":"restricted"}]})).unwrap();

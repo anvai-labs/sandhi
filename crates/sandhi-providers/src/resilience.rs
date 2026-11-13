@@ -20,6 +20,8 @@ use crate::{
     StreamChunk,
 };
 
+mod qualified;
+
 /// Retry policy for transient failures.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -279,9 +281,11 @@ fn is_retryable(e: &ProviderError) -> bool {
             true
         }
         ProviderError::Upstream { status, .. } => *status >= 500,
-        ProviderError::InvalidRequest(_) | ProviderError::Auth | ProviderError::CircuitOpen => {
-            false
-        }
+        ProviderError::InvalidRequest(_)
+        | ProviderError::OutputProjection(_)
+        | ProviderError::GatewayFailure(_)
+        | ProviderError::Auth
+        | ProviderError::CircuitOpen => false,
     }
 }
 
@@ -292,8 +296,19 @@ fn backoff(base: Duration, attempt: u32) -> Duration {
 
 #[async_trait]
 impl Provider for ResilientProvider {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.inner.peer_role()
+    }
     fn slug(&self) -> &str {
         self.inner.slug()
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        qualified::stream(self, req, delivery).await
     }
 
     async fn complete(&self, req: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
@@ -466,6 +481,7 @@ mod tests {
 
     fn ok_resp() -> ProviderResponse {
         ProviderResponse {
+            usage_convention: None,
             status: 200,
             body: serde_json::json!({}),
             usage: ParsedUsage::default(),
@@ -527,6 +543,22 @@ mod tests {
         assert!(is_retryable(&ProviderError::Timeout(Duration::from_secs(
             30
         ))));
+    }
+
+    #[tokio::test]
+    async fn deterministic_output_refusal_never_replays_even_with_explicit_retries() {
+        let flaky = Flaky::new(vec![
+            Err(ProviderError::OutputProjection(
+                "requires native output".into(),
+            )),
+            Ok(ok_resp()),
+        ]);
+        let result = ResilientProvider::new(flaky.clone())
+            .with_retry(2, Duration::from_millis(1))
+            .complete(req())
+            .await;
+        assert!(matches!(result, Err(ProviderError::OutputProjection(_))));
+        assert_eq!(flaky.calls(), 1);
     }
 
     #[tokio::test]

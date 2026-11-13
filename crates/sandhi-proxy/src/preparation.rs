@@ -11,7 +11,6 @@ use crate::{
     policy::PolicyGate,
     rate_limited_error,
     ratelimit::{self, RateLimiter},
-    streaming::StreamBodyLifetime,
     GeminiRoute, ProxyState,
 };
 use axum::{
@@ -25,35 +24,48 @@ use serde_json::Value;
 use std::sync::Mutex;
 
 pub(super) struct PreparationContext<'a> {
+    state: &'a ProxyState,
+    count_only: bool,
     buffered_deadlines: Option<&'a BufferedDeadlines>,
     streaming_deadlines: Option<&'a StreamingDeadlines>,
-    stream_body_lifetime: Option<StreamBodyLifetime>,
     rate_limiter: &'a RateLimiter,
     metrics: &'a Metrics,
     policy: Option<&'a PolicyGate>,
+    started: std::time::Instant,
 }
 impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
     fn from(state: &'a ProxyState) -> Self {
         Self {
+            state,
+            count_only: false,
             buffered_deadlines: state.buffered_deadlines.as_ref(),
             streaming_deadlines: state.streaming_deadlines.as_ref(),
-            stream_body_lifetime: state.stream_body_lifetime,
             rate_limiter: &state.rate_limiter,
             metrics: &state.metrics,
             policy: state.policy.as_deref(),
+            started: std::time::Instant::now(),
         }
+    }
+}
+
+impl PreparationContext<'_> {
+    pub(super) fn for_counting(mut self) -> Self {
+        self.count_only = true;
+        self
     }
 }
 
 pub(super) struct ResolvedRoute {
     pub vk: VirtualKey,
-    pub provider: ProviderHandle,
+    pub provider: Option<ProviderHandle>,
     pub rate_identity: String,
     pub policy_identity: sandhi_core::policy::Identity,
 }
 
 pub(super) struct PreparedRequest {
     pub vk: VirtualKey,
+    pub reference_context: Option<crate::reference_ownership::Context>,
+    pub defaulted_output: bool,
     pub provider: ProviderHandle,
     pub request: ChatRequestV1,
     pub body: Bytes,
@@ -62,7 +74,7 @@ pub(super) struct PreparedRequest {
     pub transparent_eligible: bool,
     pub buffered_deadline: Option<EffectiveDeadline>,
     pub streaming_deadline: Option<StreamLimits>,
-    pub body_lifetime: Option<StreamBodyLifetime>,
+    pub routing: Option<crate::routing::DispatchPlan>,
 }
 
 // Preserve the already-rendered dialect response, including policy headers.
@@ -87,20 +99,10 @@ pub(super) async fn prepare(
         dialect,
         IngressDialect::Embeddings | IngressDialect::Completions
     );
-    if raw_text_route
-        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
-    {
-        return Err(ingress_error(
-            dialect,
-            StatusCode::BAD_REQUEST,
-            "text endpoints require a compatible raw upstream",
-        ));
-    }
-    let parsed = if raw_text_route {
-        sandhi_core::policy::strict_json(&body).map_err(|_| ())
-    } else {
-        serde_json::from_slice::<Value>(&body).map_err(|_| ())
-    };
+    // The same interpretation must authorize the request and reach the origin.
+    // Native forwarding preserves bytes, so duplicate keys (including escaped
+    // spellings) cannot be normalized away or left to an upstream parser.
+    let parsed = sandhi_core::policy::strict_json(&body).map_err(|_| ());
     let Ok(mut body_json) = parsed else {
         return Err(ingress_error(
             dialect,
@@ -185,6 +187,150 @@ pub(super) async fn prepare(
         ));
     }
 
+    let defaulted_output =
+        !context.count_only && !raw_text_route && request.max_output_tokens.is_none();
+    if defaulted_output {
+        if !(1..=1_000_000).contains(&context.state.default_max_output_tokens) {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invalid configured output default",
+            ));
+        }
+        // Candidate encoders (notably Messages) must see the same operator
+        // bound before routing. The selected model's declared clamp follows.
+        request.max_output_tokens = Some(context.state.default_max_output_tokens);
+    }
+
+    let selected = if provider.is_none() {
+        if raw_text_route {
+            return Err(ingress_error(
+                dialect,
+                StatusCode::BAD_REQUEST,
+                "logical routes support chat generation endpoints",
+            ));
+        }
+        Some(
+            crate::routing::select(
+                context.state,
+                &vk,
+                &mut request,
+                if context.count_only {
+                    Some(crate::routing::TrackedDelivery::Counting)
+                } else {
+                    context.state.buffered_accounting.get().map(|_| {
+                        if wants_stream {
+                            crate::routing::TrackedDelivery::Streaming
+                        } else {
+                            crate::routing::TrackedDelivery::Buffered
+                        }
+                    })
+                },
+            )
+            .await
+            .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?,
+        )
+    } else {
+        None
+    };
+    let provider = match (&selected, provider) {
+        (Some(selected), _) => {
+            request.model = selected.plan.actual_model.clone();
+            selected.provider.clone()
+        }
+        (_, Some(provider)) => provider,
+        _ => unreachable!("selected logical or fixed backend"),
+    };
+    if !context.count_only && !provider.reference_credential_is_current() {
+        return Err(crate::provider_error(
+            &sandhi_providers::ProviderError::Auth,
+            dialect,
+            provider.slug(),
+            false,
+        ));
+    }
+    let effective_upstream = selected
+        .as_ref()
+        .map(|selected| format!("backend/{}", selected.plan.backend_id))
+        .unwrap_or_else(|| vk.upstream_ref.clone());
+    if raw_text_route
+        && (provider.family() != ProviderFamily::OpenAiCompat || provider.raw_forwarder().is_none())
+    {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "text endpoints require a compatible raw upstream",
+        ));
+    }
+
+    if !provider.permits_model(&request.model) {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::FORBIDDEN,
+            "model is not declared for this backend",
+        ));
+    }
+
+    if defaulted_output {
+        let declared = provider
+            .backend_binding()
+            .and_then(|binding| {
+                binding.models.iter().find(|model| {
+                    model.id.eq_ignore_ascii_case(&request.model)
+                        || model
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.eq_ignore_ascii_case(&request.model))
+                })
+            })
+            .and_then(|model| model.max_output_tokens);
+        request.max_output_tokens = Some(
+            declared.map_or(context.state.default_max_output_tokens, |maximum| {
+                context.state.default_max_output_tokens.min(maximum)
+            }),
+        );
+    }
+
+    request
+        .native_input_for(provider.family().endpoint_family())
+        .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, &message))?;
+    // Decoder-owned native output belongs only to a compatible client. Keeping
+    // an unused source bucket on a translated response would bypass its portable
+    // fidelity check and then silently discard that state during rendering.
+    request.include_native_response = ingress_family(dialect) == provider.family();
+    request.include_native_stream = wants_stream
+        && ingress_family(dialect) == provider.family()
+        && provider.supports_native_stream();
+    if context.count_only {
+        // Local estimation never compiles or activates generation cache controls.
+    } else if !raw_text_route {
+        request.compiled_cache = provider
+            .compile_cache_plan(&request)
+            .map_err(|error| ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string()))?;
+        // A same-family envelope can still name resources this endpoint profile
+        // cannot resolve (for example, constrained Codex requires materialized
+        // input). Run its actual encoder before admission rather than discovering
+        // that refusal after taking a lease or emitting an execution event.
+        if request.native_input.as_ref().is_some_and(|native| {
+            native
+                .nonportable_features
+                .contains(&sandhi_core::NativeInputFeatureV1::ResourceReference)
+        }) {
+            provider.preflight_request(&request).map_err(|error| {
+                ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+            })?;
+        }
+    } else if provider
+        .backend_binding()
+        .is_some_and(|binding| binding.cache_policy.is_some())
+    {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "chat cache policies are not supported on text endpoints",
+        ));
+    }
+
     // 4b. Attribution is key-authoritative (ADR-0004 D4): the usage event always carries the
     //     resolved key's subject/group (step 3 above), and `x-sandhi-subject-id` /
     //     `x-sandhi-group-id` are admitted only as an idempotent echo of that binding. A
@@ -211,7 +357,7 @@ pub(super) async fn prepare(
         context
             .buffered_deadlines
             .as_ref()
-            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model))
+            .map(|policy| policy.resolve(&effective_upstream, &request.model))
     };
     if buffered_deadline.is_some() && provider.raw_forwarder().is_none() {
         return Err(ingress_error(
@@ -225,13 +371,11 @@ pub(super) async fn prepare(
         context
             .streaming_deadlines
             .as_ref()
-            .map(|policy| policy.resolve(&vk.upstream_ref, &request.model).0)
+            .map(|policy| policy.resolve(&effective_upstream, &request.model).0)
     } else {
         None
     };
-    let body_lifetime = streaming_deadline
-        .map(|policy| policy.body_lifetime())
-        .or(context.stream_body_lifetime);
+    let body_lifetime = streaming_deadline.map(|policy| policy.body_lifetime());
     if wants_stream && body_lifetime.is_some() && !provider.supports_streaming_deadlines() {
         return Err(ingress_error(
             dialect,
@@ -249,11 +393,11 @@ pub(super) async fn prepare(
     //
     // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
     // including the calls that get refused below and never reach a provider.
-    let transparent_eligible =
-        ingress_family(dialect) == provider.family() && provider.raw_forwarder().is_some();
-    // Preliminary plane label for the rate-limit metric (a throttled call never reaches a provider,
-    // so its plane is nominal). The handler recomputes the final plane once it knows whether the cap
-    // forces the translation plane.
+    let transparent_eligible = !defaulted_output
+        && ingress_family(dialect) == provider.family()
+        && provider.raw_forwarder().is_some();
+    // Final prepared plane also labels a throttled call that never reaches a provider.
+    // An injected output default has already selected canonical encoding.
     let plane = if transparent_eligible {
         metrics::Plane::Transparent
     } else {
@@ -290,7 +434,7 @@ pub(super) async fn prepare(
                 body.clone(),
                 policy_identity,
                 vk.id.clone(),
-                vk.upstream_ref.clone(),
+                effective_upstream,
                 request.model.clone(),
                 match dialect {
                     IngressDialect::OpenAi => Some(sandhi_core::policy::InputFormat::Chat),
@@ -354,10 +498,81 @@ pub(super) async fn prepare(
     // and only when the key is actually present, so ordinary traffic stays
     // byte-exact. The transparent plane and the raw text routes forward exactly
     // these cleaned bytes; the decoders strip their own body clones.
-    let body = codec::strip_reserved_passthrough(body);
+    let mut body = codec::strip_reserved_passthrough(body);
+    if selected.is_some() && dialect != IngressDialect::Gemini {
+        let mut native: Value = serde_json::from_slice(&body).expect("decoded request JSON");
+        native["model"] = serde_json::json!(request.model);
+        body = Bytes::from(serde_json::to_vec(&native).expect("selected model JSON"));
+    }
+    if let Some(plan) = request
+        .compiled_cache
+        .as_ref()
+        .filter(|plan| !plan.mutations.is_empty())
+    {
+        // The exact same frozen plan applies even when this call remains on the
+        // raw plane. Cross-family requests are encoded by their selected codec.
+        if ingress_family(dialect).endpoint_family() == plan.endpoint_family {
+            let mut native: Value = serde_json::from_slice(&body).expect("decoded request JSON");
+            provider
+                .apply_cache_plan(&request, &mut native)
+                .map_err(|error| {
+                    ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+                })?;
+            body = Bytes::from(serde_json::to_vec(&native).expect("patched JSON"));
+        }
+    }
 
+    let reference_context = if context.count_only || raw_text_route {
+        None
+    } else {
+        let effective = if transparent_eligible {
+            serde_json::from_slice(&body).expect("prepared native JSON")
+        } else {
+            provider
+                .encode_execution_request(&request)
+                .map_err(|error| {
+                    ingress_error(dialect, StatusCode::BAD_REQUEST, &error.to_string())
+                })?
+        };
+        crate::reference_ownership::prepare_effective(
+            context.state,
+            &vk,
+            &provider,
+            &request,
+            dialect,
+            &effective,
+            crate::settlement::buffered::proof_deadline(
+                context.state,
+                context.started,
+                buffered_deadline.map(|limit| limit.duration()),
+                streaming_deadline,
+                wants_stream,
+            )
+            .map_err(|message| ingress_error(dialect, StatusCode::BAD_REQUEST, message))?,
+        )
+        .await
+        .map_err(|error| error.into_response(dialect))?
+        .map(|proof| proof.with_streaming(wants_stream))
+    };
+
+    if let Some(selected) = selected.as_ref().filter(|_| !context.count_only) {
+        if reference_context
+            .as_ref()
+            .is_some_and(|proof| proof.has_input_references())
+        {
+            selected
+                .require_stateful_session()
+                .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?;
+        }
+        selected
+            .confirm(context.state)
+            .await
+            .map_err(|message| ingress_error(dialect, StatusCode::CONFLICT, message))?;
+    }
     Ok(PreparedRequest {
         vk,
+        reference_context,
+        defaulted_output,
         provider,
         request,
         body,
@@ -366,6 +581,6 @@ pub(super) async fn prepare(
         transparent_eligible,
         buffered_deadline,
         streaming_deadline,
-        body_lifetime,
+        routing: selected.map(|selected| selected.plan),
     })
 }

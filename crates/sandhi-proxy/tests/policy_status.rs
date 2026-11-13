@@ -1,9 +1,10 @@
+mod support;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
 use sandhi_core::{policy::Engine, InMemorySink, KeyStore};
-use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, policy::PolicyGate};
 use sandhi_store::policy::PolicyAuditStore;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
@@ -41,9 +42,9 @@ async fn policy_status_is_protected_redacted_and_reports_durable_capacity() {
     )
     .await
     .unwrap();
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::new(),
         None,
@@ -90,9 +91,9 @@ async fn policy_status_is_protected_redacted_and_reports_durable_capacity() {
 
 #[tokio::test]
 async fn unconfigured_policy_is_explicit() {
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         KeyStore::new(),
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::new(),
         None,

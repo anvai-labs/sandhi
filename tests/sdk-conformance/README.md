@@ -3,10 +3,12 @@
 The suite starts a real Sandhi binary with disposable stores and local synthetic upstreams.
 No provider account, real key, OS vault or external model request is needed.
 
-Install the SDK test dependencies from the `sdk-conformance` CI job and Python
-`playwright==1.58.0` and `PyJWT[crypto]>=2.10,<3`, then install its Chromium:
+Install the exact provider SDK baseline shared with the public CI job, then its
+test browser. The current baseline is OpenAI 3.49.0, Anthropic 2.8.0 and Google
+GenAI 3.2.0, selected from stable PyPI releases on 2026-11-12:
 
 ```sh
+python -m pip install -r tests/sdk-conformance/requirements.txt
 python -m playwright install chromium
 python -m pytest tests/sdk-conformance/ -q
 ```
@@ -24,6 +26,22 @@ Pytest clears its base directory, so never point `--basetemp` at retained eviden
 or an existing service directory. These fixtures build source binaries; their
 results are not installed-release or live-provider acceptance.
 
+Google GenAI 3.x defaults to Gemini `/v1` paths. Sandhi also retains `/v1beta` for
+older clients. Generation, streaming and countTokens use the same admission and
+accounting handlers on both prefixes. The shared `/v1/models` discovery path uses
+Google's credential/client headers to choose its envelope; key authorization
+remains unchanged. Gemini discovery omits IDs that cannot be used in its URL path;
+a logical alias can name an OpenAI-compatible backend model containing `/`.
+Anthropic 2.x uses Bearer API-key authentication, so shared discovery recognizes
+its `anthropic-version` header as well as older `x-api-key` clients. Header hints
+select serialization, never a backend credential type, account or extra grant.
+
+For SDK refreshes, verify stable release metadata and Python requirements, update
+the three exact pins, and run the ordinary vendor-client, route/cache, tool-loop,
+cancellation/restart and dashboard suite. Keep source changes required by new SDK
+defaults covered by regressions; do not force a new SDK back to an older API
+version just to hide an interoperability gap.
+
 `test_dashboard.py` covers authentication, keyboard usage, public/disabled modes, mutation
 feedback, one-time key visibility, token clearing and stale replies, hostile metadata, failed
 database reads, served CSP/assets and mobile overflow. A synthetic-data screenshot is written
@@ -31,12 +49,85 @@ under `target/dashboard-authenticated.png`. Its HTTPS authority fixture also dri
 default-mode SSO login, all three dashboard roles, cookie-authorized writes, logout and expiry.
 Only the disposable browser certificate is exempted from browser trust; the proxy verifies
 the fixture IdP certificate normally. Requires loopback sockets and headless Chromium.
+The navigable console cases exercise fragment/history/keyboard behavior, attribution
+filters without changed totals, escaped backend/route inventory and protected-data
+clearing. Cache composition requires complete read coverage. Usage-evidence cases
+query real persisted rows, distinguish failed/empty results and verify the separate
+SSO diagnostics grant using a viewer with and without explicit permission.
 
 `test_management.py` adds durable-write fault injection, invalid policy checks, concurrent
 budget writers, actual process restart comparison, partial config/alert reports, sequential
 retry deduplication and browser/CLI failure UX. Its SQLite triggers affect only disposable
 test databases. Provider metadata faults are exercised in `test_broker.py` after proving that
 the synthetic broker received the save, rather than merely failing input validation.
+
+`test_backend_registry.py` exercises explicit Responses backends through the real
+CLI/admin API, ordinary OpenAI SDK calls, durable records and process restart.
+Disposable read-only credential files simulate external provisioning/rotation;
+reference registration rebuilds dependent handles. It checks independent backend
+and credential revocation, additive config, stale revision refusal, secret-free
+inventory and suppression of key/profile grants after dependency failure. No live
+provider or subscription/cache behavior is inferred from these synthetic fixtures.
+Its cache-policy case uses all four SDKs and both modes, CLI JSON declarations,
+config restart, credential rotation and durable disjoint counts. Its Gemini SDK
+case also uses an explicit Responses backend; install google-genai
+to execute it. The Gemini suite covers native and cross-family generation,
+streaming, discovery and estimated countTokens through the ordinary SDK.
+
+`test_logical_routes.py` exercises the new logical alias through all four SDK APIs
+and both delivery modes. CLI route revision changes, candidate reordering, process
+restart, registered rotation, unreported credential-file changes and revocation
+test durable compatible pins and no silent switching. Config cases preflight
+invalid dependencies before writes, apply backend/route/key intent in order and
+retain additive definitions across restart. All origins and credentials are
+synthetic. Existing live Z.AI evidence below exercises fixed explicit backends;
+it is not evidence for this logical-route path or subscription renewal.
+Its tracked-context case injects a receipt failure after inference, verifies the
+admitted selection/cache/policy record, kills the gateway and restarts under a new
+runtime cache weight. Recovery keeps the old charge/context without redispatch;
+a rotated fixture credential and a new session produce a distinct new context.
+This extends evidence within existing tracked activation, not protocol coverage.
+New tracked admissions reserve both budget scopes atomically. Recovery snapshots
+include execution context and back-leg linkage; denial must leave every accounting
+row unchanged. Receipt-fault cases require both legs held before restart and both
+charged by the recovered original receipt. Missing-usage shutdown cases retain
+both liabilities in buffered/streamed HTTP/TLS variants. Default legacy recovery
+semantics remain separately tested.
+
+## Opt-in Z.AI live qualification
+
+`scripts/qualify_zai_router.py` is separate from the offline test suite. Build the
+gateway and install `openai`, `anthropic`, `google-genai` and `httpx` in the runner's
+environment. It reads the configured token from `~/.claude/settings.json.zai` into
+a private disposable credential file and starts its own gateway/store. It leaves
+the user's settings, running services and vault unchanged. The explicit `--live`
+flag authorizes provider calls; SDK retries are disabled. For example:
+
+```sh
+cargo build --locked -p sandhi-proxy --bins
+python scripts/qualify_zai_router.py --live --output /tmp/zai-matrix.json
+python scripts/qualify_zai_router.py --live --cache-pairs \
+  --cache-profile implicit_only --output /tmp/zai-cache-pairs.json
+python scripts/qualify_zai_router.py --live --accounting tracked --delivery streaming \
+  --backend responses --client responses --logical-route --cache-pairs \
+  --cache-profile implicit_only --output /tmp/zai-tracked-responses-stream.json
+```
+
+Defaults exercise four real client SDK APIs, three advertised backend protocols
+and buffered/streamed delivery (24 cells). Cache pairs issue two identical
+synthetic long-prefix requests per cell (48 calls). Reports contain sanitized SDK
+results and drained SQLite usage observations. The synthetic step IDs correlate
+new reports without exporting credentials. A first repeat is not guaranteed cold;
+use reported read counts rather than latency. Explicit TTL expiration, separate
+accounts, Gemini cache resources, subscriptions and full tool loops are separate
+qualification gates. See the retained [live review](../../docs/reviews/zai-router-live-2026-11-11.md).
+
+Tracked buffered and streaming runs support the four-client/three-GLM-backend
+matrix, with explicit usage profiles and bounded streaming deadlines. These runs
+verify durable attempt/context/usage/paired-receipt joins against each cell's actual
+delivery mode. Portable-output controls matter: default signed thinking is not
+universally translatable. See the [current buffered qualification](../../docs/reviews/zai-buffered-fidelity-cache-pairs-2026-11-12.md)
+and [Messages stream controls/evidence](../../docs/reviews/zai-messages-tracked-streams-2026-11-12.md).
 
 `test_reasoning.py` checks separate reasoning below, equal to and above candidate output across
 transparent Gemini and translated Chat/Responses/Anthropic, both streamed and complete. Its 24

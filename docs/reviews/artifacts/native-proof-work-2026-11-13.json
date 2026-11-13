@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "base_commit": "641ff491019d63351baf61862face2a51ea8481e",
+  "initial_public_ci": {
+    "run": 43352023570,
+    "sdk_passed": 735,
+    "sdk_skipped": 3,
+    "successful_jobs": 19,
+    "failed_jobs": [
+      "rust",
+      "CI Success"
+    ],
+    "failed_case": "native_input::codex_native_terminal_state_survives_stream_buffering_and_next_turn",
+    "runners": "all 21 public GitHub-hosted",
+    "causal_limit": "Controlled SQLite contention reproduces the surfaced failure mode; the exact original CI cause is unproven."
+  },
+  "patch_sha256": "c50ad646884911d04e08c7ebef8a3e045e0fe808788504c990aafba04fc8293e",
+  "gateway_binary_sha256": "b43a641becc32535fcece302c94a0a8016bc68a1c5a9e14b950f3632810561fd",
+  "corrected_local": {
+    "workspace_passed": 1300,
+    "workspace_failed": 0,
+    "workspace_ignored": 13,
+    "sentinel_proxy_store_passed": 717,
+    "sentinel_failed": 0,
+    "reference_filter_passed": 23,
+    "store_filter_passed": 7,
+    "clippy": "workspace all-targets warnings denied passed"
+  },
+  "live_reports": [
+    {
+      "report": "sandhi-proof-final-glm-chat-responses.json",
+      "sha256": "4061dde0b1f4f1c7b93d706b186410f8b7e763d2f40497a4751b608dda79d13f",
+      "thinking": "default",
+      "verification": {
+        "cells": 32,
+        "durable_observations": 32,
+        "sdk_usage_matches": 32,
+        "tracked_evidence_matches": 32,
+        "correlation": "step_id",
+        "positive_reported_cache_reads": {
+          "chat": 15,
+          "messages": 0,
+          "responses": 14
+        },
+        "errors": []
+      }
+    },
+    {
+      "report": "sandhi-proof-final-glm-messages.json",
+      "sha256": "1aade35bbc9c4deab637afa157d252066353783698b22a44cf0c13718b61cee7",
+      "thinking": "disabled",
+      "verification": {
+        "cells": 16,
+        "durable_observations": 16,
+        "sdk_usage_matches": 16,
+        "tracked_evidence_matches": 16,
+        "correlation": "step_id",
+        "positive_reported_cache_reads": {
+          "chat": 0,
+          "messages": 13,
+          "responses": 0
+        },
+        "errors": []
+      }
+    }
+  ],
+  "evidence_sha256": {
+    "sandhi-proof-integrated-workspace.log": "7d3d0042b4b252ab1cb94eb824de44e3405677517457974dea7637fcfd5aff71",
+    "sandhi-proof-integrated-sentinel.log": "3422bfa3d8494fc6a7ddd7eb68f0210384be86a1428bfc3c32bb2ae0b7d2266c",
+    "sandhi-proof-integrated-clippy.log": "ac9be77685d2959de10eaa267cff7d05eb96ef9e860f7b1622f4749fae341320",
+    "sandhi-proof-supervision-red.log": "e92417d87ee45e75ea76269852529212ddda22b98e60ccf768bd5201af99df15"
+  },
+  "boundaries": [
+    "Proof deadlines start with request preparation and include existing accounting headroom; frames never reset them.",
+    "Shutdown can shorten the deadline; pending actual workers remain owned after waiter cancellation.",
+    "Native bytes wait for durable proof; unknown source liability is retained without replay.",
+    "Final public CI and protected-main release authorization remain separate gates."
+  ]
+}

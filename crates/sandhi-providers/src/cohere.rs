@@ -58,10 +58,12 @@ impl Provider for Cohere {
         if let Some(obj) = body.as_object_mut() {
             obj.insert("stream".into(), Value::Bool(false));
         }
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::CohereChat,
+            Default::default(),
             |facts| async move {
                 let resp = self
                     .client
@@ -77,14 +79,20 @@ impl Provider for Cohere {
                 if !resp.status().is_success() {
                     return Err(error_for_response(resp, None).await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                let (response_usage, observed_usage) =
+                let body = crate::decode_response_json(resp).await?;
+                let (response_usage, _) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::Cohere, &body);
+                // The physical-attempt observation uses the same strict actual
+                // counts as the owner, never the legacy raw parser's fallback.
+                let observed_usage = sandhi_core::usage::qualify_buffered_usage(
+                    sandhi_core::EndpointFamilyV1::CohereChat,
+                    &body,
+                )
+                .ok()
+                .map(|usage| (&usage).into());
                 Ok((
                     ProviderResponse {
+                        usage_convention: None,
                         status,
                         body,
                         usage: response_usage,
@@ -123,6 +131,49 @@ impl Provider for Cohere {
                     return Err(error_for_response(resp, None).await);
                 }
                 Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+            },
+        )
+        .await
+    }
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        let model = req.model.clone();
+        let mut body = req.body.clone();
+        body.as_object_mut()
+            .ok_or_else(|| ProviderError::InvalidRequest("native chat requires an object".into()))?
+            .insert("stream".into(), Value::Bool(true));
+        let request = self
+            .client
+            .post(self.chat_url())
+            .bearer_auth(&self.api_key)
+            .headers(crate::merge_call_headers(&self.headers, &req.extra_headers))
+            .json(&body);
+        crate::attempt::observe_qualified_stream(
+            req.attempt_context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::CohereChat,
+            Default::default(),
+            Default::default(),
+            |facts| async move {
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_headers(response.status().as_u16(), response.headers(), None);
+                if !response.status().is_success() {
+                    return Err(error_for_response(response, None).await);
+                }
+                let id = crate::provider_request_id(response.headers(), None);
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, id))
             },
         )
         .await

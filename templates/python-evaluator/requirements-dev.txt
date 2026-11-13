@@ -1,2 +1,2 @@
 -r requirements-http.txt
-pytest>=8,<10
+pytest>=9.0.3,<10

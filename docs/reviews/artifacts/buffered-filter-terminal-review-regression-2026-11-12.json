@@ -1,0 +1,29 @@
+{
+  "scope": "synthetic buffered Gemini to Responses; no provider credential or live inference",
+  "reviewed_commit": "23caa78fefdc714138e9c6260bec449d0ceb55ce",
+  "review_base": "4443ed8544404d1fdd944e596141ac615f3f23d9",
+  "independent_finding": {
+    "severity": "P2",
+    "source_finish_reasons": ["SPII", "MODEL_ARMOR"],
+    "actual_http_status": 200,
+    "actual_responses_status": "completed",
+    "actual_incomplete_details": null,
+    "cause": "Portable validator admitted filtering reasons mapped to Unknown; Responses egress rendered Unknown as completed."
+  },
+  "fix_contract": {
+    "neutral_reason": "content_filter",
+    "responses_status": "incomplete",
+    "responses_incomplete_reason": "content_filter",
+    "chat_finish_reason": "content_filter",
+    "gemini_translated_finish_reason": "SAFETY",
+    "messages_projection": "explicit refusal when filtering semantics cannot be preserved",
+    "accounting": "Final source counts retain one receipt and both settled leases regardless of delivery refusal"
+  },
+  "regression": {
+    "test": "buffered_filter_terminals_never_become_successful_completion",
+    "source_profiles": 8,
+    "client_protocols": 4,
+    "physical_http_calls": 32,
+    "separate_incomplete_responses_validation": "Missing, unknown or contradictory incomplete reasons refuse portable delivery."
+  }
+}

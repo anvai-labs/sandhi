@@ -1,0 +1,1109 @@
+{
+  "started_at": "2026-11-12T06:23:46.496693+00:00",
+  "model": "glm-5.3",
+  "endpoints": {
+    "chat": "https://api.z.ai/api/coding/paas/v4",
+    "messages": "https://api.z.ai/api/anthropic",
+    "responses": "https://api.z.ai/api/v1"
+  },
+  "cache_policy": "implicit_only / auto",
+  "sdk_versions": {
+    "openai": "2.18.0",
+    "anthropic": "0.79.0",
+    "google-genai": "1.75.0"
+  },
+  "sdk_retries": 0,
+  "accounting": "tracked",
+  "delivery": "streaming",
+  "logical_route": true,
+  "thinking": "disabled",
+  "endpoint_profiles": {
+    "messages": "anthropic_implicit_cache"
+  },
+  "harness_sha256": "833893ef1ff5bac3b93417398d71f5b331af0fd332420d3f02596fbf918a2943",
+  "cache_pairs": true,
+  "cells": [
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-chat-1-0",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 14,
+          "prompt_tokens": 3781,
+          "total_tokens": 3795,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 3776
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 2.248,
+      "usage_rows_observed": 0
+    },
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": true,
+      "repeat": 1,
+      "status": "ok",
+      "step_id": "messages-chat-1-1",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 14,
+          "prompt_tokens": 3781,
+          "total_tokens": 3795,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 3776
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.377,
+      "usage_rows_observed": 2
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-messages-1-0",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_read_input_tokens": 3776,
+          "input_tokens": 5,
+          "output_tokens": 14,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 2.47,
+      "usage_rows_observed": 3
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": true,
+      "repeat": 1,
+      "status": "ok",
+      "step_id": "messages-messages-1-1",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_read_input_tokens": 3776,
+          "input_tokens": 5,
+          "output_tokens": 14,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 1.378,
+      "usage_rows_observed": 4
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-gemini-1-0",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cached_content_token_count": 3776,
+          "candidates_token_count": 14,
+          "prompt_token_count": 3781,
+          "total_token_count": 3795
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.372,
+      "usage_rows_observed": 5
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 1,
+      "status": "ok",
+      "step_id": "messages-gemini-1-1",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cached_content_token_count": 3776,
+          "candidates_token_count": 14,
+          "prompt_token_count": 3781,
+          "total_token_count": 3795
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.317,
+      "usage_rows_observed": 6
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-responses-1-0",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 3781,
+          "input_tokens_details": {
+            "cached_tokens": 3776
+          },
+          "output_tokens": 14,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 1.575,
+      "usage_rows_observed": 7
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": true,
+      "repeat": 1,
+      "status": "ok",
+      "step_id": "messages-responses-1-1",
+      "text": "```python\ndef identity(value):\n    return value\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 3781,
+          "input_tokens_details": {
+            "cached_tokens": 3776
+          },
+          "output_tokens": 14,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 2.628,
+      "usage_rows_observed": 8
+    }
+  ],
+  "gateway_binary_sha256": "c021d18db2f0dad2768265cf72bdfbc9a763ca2fc43987d45c20ea2e0feaee57",
+  "usage_events": [
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 2103,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:49.277424458Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464627154_0",
+      "step_id": "messages-chat-1-0",
+      "time_to_first_token_ms": 1979,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 1331,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:50.656764518Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464629307_1",
+      "step_id": "messages-chat-1-1",
+      "time_to_first_token_ms": 1307,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 2420,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:53.115694084Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464630686_2",
+      "step_id": "messages-messages-1-0",
+      "time_to_first_token_ms": 2327,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 1329,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:54.494834847Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464633156_3",
+      "step_id": "messages-messages-1-1",
+      "time_to_first_token_ms": 1237,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 1306,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:55.867368744Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464634543_4",
+      "step_id": "messages-gemini-1-0",
+      "time_to_first_token_ms": 1216,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 1253,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:57.185540492Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464635915_5",
+      "step_id": "messages-gemini-1-1",
+      "time_to_first_token_ms": 1156,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 1478,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:23:58.758549145Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464637263_6",
+      "step_id": "messages-responses-1-0",
+      "time_to_first_token_ms": 1276,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 3776,
+      "duration_ms": 2567,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-12T06:24:01.412415022Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794464638803_7",
+      "step_id": "messages-responses-1-1",
+      "time_to_first_token_ms": 2462,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 5,
+      "tokens_out": 14
+    }
+  ],
+  "executions": [
+    {
+      "request_id": "req_1794464627154_0",
+      "execution_id": "3d0218087770f84fd1242a613baf93045a2ab29ab0114cd55a6d1af568125eed",
+      "attempt_id": "7954a6ec162b93ecfa8d154b4bd0619c1f01a41cb57e24ad601f1a58e68bd9d6",
+      "authorized_at": 1794464627,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464629,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464629,
+      "receipt_id": "1786faca1e01d0d2bef801dca21fa20ff71323de01cf00c29136f3f9f86c2238",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464629,
+      "context": {
+        "version": 1,
+        "ingress": "openai_chat_completions",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "7954a6ec162b93ecfa8d154b4bd0619c1f01a41cb57e24ad601f1a58e68bd9d6",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464627180,
+        "terminal": {
+          "observed_at_ms": 1794464629277,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "dd199db1-b06a-4488-a82b-bd450d5a3f01"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "dd199db1-b06a-4488-a82b-bd450d5a3f01",
+        "duration_ms": 2103,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1979,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464629307_1",
+      "execution_id": "c55d16fd1e14bc9b620badbae6a4a2fa47fb3784113615311a1fd4e80de79e8f",
+      "attempt_id": "ce34a387bfee05188fa1b06f73f1e97b585fce44d3160830ab60be084698ba37",
+      "authorized_at": 1794464629,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464630,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464630,
+      "receipt_id": "34e2df2e1d31437ac11d963ab0dd99325814611842414fcba63cb7ab9b4dcbf8",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464630,
+      "context": {
+        "version": 1,
+        "ingress": "openai_chat_completions",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "ce34a387bfee05188fa1b06f73f1e97b585fce44d3160830ab60be084698ba37",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464629331,
+        "terminal": {
+          "observed_at_ms": 1794464630656,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "073aac94-f83c-426e-a4a2-473305e75453"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "073aac94-f83c-426e-a4a2-473305e75453",
+        "duration_ms": 1331,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1307,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464630686_2",
+      "execution_id": "242b44b052eb91b15d69ee1a9b817cf9fca00e15e06b4a5bbb6e18edc24137b3",
+      "attempt_id": "a6ce0caf6f869998c76e69fdad7c892693146e3a90b7e2664b332cfc612adfbc",
+      "authorized_at": 1794464630,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464633,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464633,
+      "receipt_id": "f01fc028697021b99c61738ff2a0eff76ab0f9495ab82cdbaf272716d06e3b4f",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464633,
+      "context": {
+        "version": 1,
+        "ingress": "anthropic_messages",
+        "delivery": "streaming",
+        "plane": "transparent",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "a6ce0caf6f869998c76e69fdad7c892693146e3a90b7e2664b332cfc612adfbc",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464630695,
+        "terminal": {
+          "observed_at_ms": 1794464633115,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "1c504c62-35bd-42e5-ae48-95f067ec7f73"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "1c504c62-35bd-42e5-ae48-95f067ec7f73",
+        "duration_ms": 2420,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 2327,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464633156_3",
+      "execution_id": "f07fb4a9316fe1856ca2bf5256680f6b2e637549f34b324e649c3a62c9b9c9ac",
+      "attempt_id": "c81aa5dd81f045fb821cf6a7d10a154c31bad109a11b04a6c2023ce826012a9d",
+      "authorized_at": 1794464633,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464634,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464634,
+      "receipt_id": "3d933c5eeac7d80b40e80df68114432b9cabedca693a91b1e1e46ec69b1064dc",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464634,
+      "context": {
+        "version": 1,
+        "ingress": "anthropic_messages",
+        "delivery": "streaming",
+        "plane": "transparent",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "c81aa5dd81f045fb821cf6a7d10a154c31bad109a11b04a6c2023ce826012a9d",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464633165,
+        "terminal": {
+          "observed_at_ms": 1794464634494,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "5063fa81-dd88-41a0-8e17-320927e278cb"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "5063fa81-dd88-41a0-8e17-320927e278cb",
+        "duration_ms": 1329,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1237,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464634543_4",
+      "execution_id": "2d44a64d5e0d95c6adcf4d5e0d057e0566c153fe7a4da35e367c4ea9a857fc98",
+      "attempt_id": "1f66bd0aa0c64d5def53be24bc1217cf88b4482a8226fa6e863c73d2161d367a",
+      "authorized_at": 1794464634,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464635,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464635,
+      "receipt_id": "67b733e78a11cf74e3a0b7a5a749528b677ef7191bd7960044d215ba840476e5",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464635,
+      "context": {
+        "version": 1,
+        "ingress": "gemini_generate_content",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "1f66bd0aa0c64d5def53be24bc1217cf88b4482a8226fa6e863c73d2161d367a",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464634566,
+        "terminal": {
+          "observed_at_ms": 1794464635867,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "6e68cc9e-b6cc-48ba-9565-55f6fe9630ae"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "6e68cc9e-b6cc-48ba-9565-55f6fe9630ae",
+        "duration_ms": 1306,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1216,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464635915_5",
+      "execution_id": "436355789bb20acfe423730371890e4996b4ba47312e49f66246a9456ee0963e",
+      "attempt_id": "0e044972a4e94411cf78ece68183045806545678cd76bebd0be72d1d18a2d16f",
+      "authorized_at": 1794464635,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464637,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464637,
+      "receipt_id": "5e1ad0a2532a3ae4a7600029ff6434bf2726fe674eb69a77aa972efc75aae120",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464637,
+      "context": {
+        "version": 1,
+        "ingress": "gemini_generate_content",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "0e044972a4e94411cf78ece68183045806545678cd76bebd0be72d1d18a2d16f",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464635938,
+        "terminal": {
+          "observed_at_ms": 1794464637185,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "47826c9c-cf3d-4a7b-a8ff-e8e2dcee475d"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "47826c9c-cf3d-4a7b-a8ff-e8e2dcee475d",
+        "duration_ms": 1253,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1156,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464637263_6",
+      "execution_id": "9b8b0a0bd29eb41e0211b4c859e0f3e26fe12c3ca3a03aec648dd5cbdec280cc",
+      "attempt_id": "636933aef165d4258bccb22d03ffe311951311ffac0aab6e2db09e7370c03d64",
+      "authorized_at": 1794464637,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464638,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464638,
+      "receipt_id": "0f2b7b1e90162c5f50479ce957a08dc6894b1960de68eb2ae4ef6c8981d5efdf",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464638,
+      "context": {
+        "version": 1,
+        "ingress": "openai_responses",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "636933aef165d4258bccb22d03ffe311951311ffac0aab6e2db09e7370c03d64",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464637286,
+        "terminal": {
+          "observed_at_ms": 1794464638758,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "0287f516-a4ad-41f1-99fa-8f0e5040aa2f"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "0287f516-a4ad-41f1-99fa-8f0e5040aa2f",
+        "duration_ms": 1478,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 1276,
+        "time_to_first_token_source": "boundary"
+      }
+    },
+    {
+      "request_id": "req_1794464638803_7",
+      "execution_id": "16ceb92766ea4000c1cd809fa81168013bae89ef09e46b03e6595bc1901424c5",
+      "attempt_id": "d6e25f7ef62188b99294fd91e32112ddd8dd3ca22687499503720bac9598d70a",
+      "authorized_at": 1794464638,
+      "frozen_charge": 3795,
+      "primary_scope": "group:zai-qualification",
+      "primary_actual": 3795,
+      "primary_settled": 1,
+      "primary_settled_at": 1794464641,
+      "upstream_scope": "upstream:anthropic",
+      "upstream_actual": 3795,
+      "upstream_settled": 1,
+      "upstream_settled_at": 1794464641,
+      "receipt_id": "7ba4477adf2a6509effac7128d50c359cf8880a099487a4c6e813f68a8b4f597",
+      "charged_tokens": 3795,
+      "receipt_settled_at": 1794464641,
+      "context": {
+        "version": 1,
+        "ingress": "openai_responses",
+        "delivery": "streaming",
+        "plane": "translation",
+        "upstream_ref": "route/qualify-messages",
+        "upstream_budget_scope": "upstream:anthropic",
+        "requested_model": "zai-code",
+        "actual_model": "glm-5.3",
+        "provider": "zai",
+        "endpoint_family": "anthropic_messages",
+        "route": {
+          "id": "qualify-messages",
+          "revision": 1
+        },
+        "backend": {
+          "id": "zai-messages",
+          "revision": 1,
+          "endpoint_profile": "anthropic_implicit_cache",
+          "credential_generation": 1
+        },
+        "cache": {
+          "intent": {
+            "mode": "auto"
+          },
+          "capability": "implicit_only",
+          "native_preserved": false
+        },
+        "accounting_policy": {
+          "version": 1,
+          "cache_read_weight": 10000
+        }
+      },
+      "attempt": {
+        "version": 1,
+        "attempt_id": "d6e25f7ef62188b99294fd91e32112ddd8dd3ca22687499503720bac9598d70a",
+        "attempt_ordinal": 1,
+        "dispatch_observed_at_ms": 1794464638829,
+        "terminal": {
+          "observed_at_ms": 1794464641412,
+          "outcome": "success",
+          "provider_status": 200,
+          "provider_request_id": "06e1346f-dd40-4c88-905c-37d5e79b7573"
+        },
+        "dropped_observations": 0,
+        "invalid": false
+      },
+      "usage": {
+        "tokens_in": 5,
+        "tokens_out": 14,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 3776,
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        },
+        "reasoning_included": true,
+        "completeness": "final",
+        "basis": "provider_reported",
+        "attempts": 1,
+        "outcome": "success",
+        "upstream_request_id": "06e1346f-dd40-4c88-905c-37d5e79b7573",
+        "duration_ms": 2567,
+        "duration_source": "boundary",
+        "time_to_first_token_ms": 2462,
+        "time_to_first_token_source": "boundary"
+      }
+    }
+  ],
+  "accounting_inventory": {
+    "budget_execution_intent": 8,
+    "budget_execution_context": 8,
+    "budget_physical_attempt": 8,
+    "budget_terminal_observation": 8,
+    "budget_execution_back_leg": 8,
+    "budget_reservation": 16,
+    "budget_settlement_outbox": 8
+  },
+  "gateway_exit_code": 0,
+  "accounting_diagnostics": [],
+  "finished_at": "2026-11-12T06:24:01.441333+00:00",
+  "verification": {
+    "cells": 8,
+    "durable_observations": 8,
+    "sdk_usage_matches": 8,
+    "tracked_evidence_matches": 8,
+    "correlation": "step_id",
+    "positive_reported_cache_reads": {
+      "chat": 0,
+      "messages": 8,
+      "responses": 0
+    },
+    "errors": []
+  }
+}

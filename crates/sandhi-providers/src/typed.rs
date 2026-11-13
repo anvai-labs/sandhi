@@ -62,6 +62,17 @@ pub struct FamilyFacts {
 }
 
 impl ProviderFamily {
+    pub const fn endpoint_family(self) -> sandhi_core::EndpointFamilyV1 {
+        use sandhi_core::EndpointFamilyV1 as E;
+        match self {
+            Self::OpenAiCompat => E::OpenaiChatCompletions,
+            Self::OpenAiResponses => E::OpenaiResponses,
+            Self::Anthropic => E::AnthropicMessages,
+            Self::Gemini => E::GeminiGenerateContent,
+            Self::Cohere => E::CohereChat,
+            Self::Ollama => E::OllamaChat,
+        }
+    }
     #[must_use]
     pub fn for_slug(slug: &str) -> Self {
         match slug {
@@ -131,6 +142,7 @@ pub struct ProviderTransportConfig {
     pub stream_setup_timeout_secs: Option<f64>,
     pub stream_idle_timeout_secs: Option<f64>,
     pub anthropic_auth_scheme: AnthropicAuthScheme,
+    pub anthropic_usage_profile: sandhi_core::usage::AnthropicUsageProfile,
     pub gemini_auth_scheme: GeminiAuthScheme,
     pub openai_responses_profile: OpenAiResponsesProfile,
     /// Per-endpoint User-Agent override. Rides the static headers to the wire,
@@ -162,6 +174,7 @@ impl ProviderTransportConfig {
             stream_setup_timeout_secs: None,
             stream_idle_timeout_secs: None,
             anthropic_auth_scheme: AnthropicAuthScheme::ApiKey,
+            anthropic_usage_profile: Default::default(),
             gemini_auth_scheme: GeminiAuthScheme::ApiKey,
             openai_responses_profile: OpenAiResponsesProfile::Standard,
             user_agent: None,
@@ -175,6 +188,41 @@ pub type ChatEventStream =
 
 #[async_trait]
 pub trait ChatProvider: Send + Sync {
+    /// Pure target-encoder admission. No transport or physical attempt is started.
+    /// Custom implementations opt in rather than claiming arbitrary family support.
+    fn preflight_request(&self, _request: &ChatRequestV1) -> Result<(), ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "request preflight is unsupported by this typed provider".into(),
+        ))
+    }
+    /// Exact pure backend/profile encoder used for HTTP execution inspection.
+    /// Unsupported custom providers cannot claim an uninspectable HTTP payload.
+    fn execution_request(&self, _request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "execution request inspection is unsupported by this typed provider".into(),
+        ))
+    }
+    /// Additional synchronous-operation checks for tracked buffered admission.
+    /// Capability remains factory-owned; this default grants no tracked support.
+    fn preflight_qualified_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.preflight_request(request)
+    }
+    /// A built-in constrained SSE codec can qualify buffered delivery without
+    /// granting external raw forwarding. The handle's factory gate still applies.
+    fn qualified_buffered_without_raw(&self) -> bool {
+        false
+    }
+    fn supports_qualified_streaming(&self) -> bool {
+        false
+    }
+    /// Transport capability; a provider label cannot enable cache synthesis.
+    fn allows_cache_synthesis(&self) -> bool {
+        false
+    }
+    /// Opt-in native SSE attachments, independent of raw request forwarding.
+    fn supports_native_stream(&self) -> bool {
+        false
+    }
     fn slug(&self) -> &str;
     /// `call_headers` are per-call wire headers (TD-0022 D1): gateway-path metadata that
     /// changes per turn (`x-sandhi-run-id` / `-step-id`, vendor correlation ids). They ride
@@ -202,6 +250,30 @@ pub trait ChatProvider: Send + Sync {
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         Err(ProviderError::InvalidRequest(
             "qualified buffered usage is unsupported by this typed provider".into(),
+        ))
+    }
+
+    /// Qualified usage and transport observations from the same invocation.
+    async fn complete_qualified_observed(
+        &self,
+        _request: ChatRequestV1,
+        _call_headers: http::HeaderMap,
+        _attempt_context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified physical-attempt observation is unsupported by this typed provider".into(),
+        ))
+    }
+
+    /// Strict source observation from the same physical stream as typed events.
+    async fn stream_qualified_observed(
+        &self,
+        _request: ChatRequestV1,
+        _headers: http::HeaderMap,
+        _context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "qualified typed streaming is unsupported".into(),
         ))
     }
 
@@ -277,6 +349,7 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     ))
     .with_headers(static_headers)
     .with_anthropic_auth(config.anthropic_auth_scheme)
+    .with_anthropic_usage_profile(config.anthropic_usage_profile)
     .with_gemini_auth(config.gemini_auth_scheme)
     .with_timeouts(timeouts.complete, timeouts.stream_setup, timeouts.idle)
     .with_session_header(
@@ -286,8 +359,27 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     .with_provider_request_id_header(response_request_id_header)
 }
 
+/// Immutable non-secret metadata for one configured backend revision. Model
+/// declarations travel with the transport across concurrent registry updates.
+#[derive(Debug, Clone)]
+pub struct BackendBinding {
+    pub id: String,
+    pub revision: u64,
+    pub provider: String,
+    pub credential_ref: String,
+    pub credential_generation: u64,
+    pub endpoint_family: sandhi_core::EndpointFamilyV1,
+    pub endpoint_profile: String,
+    pub models: Vec<sandhi_core::ModelDescriptorV1>,
+    pub cache_policy: Option<sandhi_core::BackendCachePolicyV1>,
+}
+
 #[derive(Clone)]
 pub struct ProviderHandle {
+    provider_identity: Option<Arc<str>>,
+    upstream_budget_scope: Arc<str>,
+    pub(crate) peer_role: sandhi_core::PeerRoleV1,
+    source_convention: Option<sandhi_core::UsageConventionV1>,
     inner: Arc<dyn ChatProvider>,
     /// The vault-declared / config-declared family (TD-0006 / ADR-0004 D1). This is what the
     /// proxy's plane-selection will use to decide transparent-forward vs. cross-family
@@ -304,6 +396,11 @@ pub struct ProviderHandle {
     /// Built-in transport supports setup/idle deadlines independently of raw forwarding.
     streaming_deadline_capable: bool,
     credential_expires_at: Option<u64>,
+    // Private transport identity. Never serialize this standalone credential-derived
+    // digest, log it or expose it through inventory. Routing/cache hashes wrap it.
+    credential_identity: Option<String>,
+    credential_account_fenced: bool,
+    backend_binding: Option<Arc<BackendBinding>>,
     qualified_single_attempt: bool,
 }
 
@@ -319,11 +416,18 @@ impl ProviderHandle {
     #[must_use]
     pub fn new(inner: Arc<dyn ChatProvider>) -> Self {
         Self {
+            upstream_budget_scope: format!("upstream:{}", inner.slug()).into(),
+            provider_identity: None,
             inner,
             family: ProviderFamily::OpenAiCompat,
+            source_convention: None,
             raw: None,
             streaming_deadline_capable: false,
             credential_expires_at: None,
+            credential_identity: None,
+            credential_account_fenced: false,
+            backend_binding: None,
+            peer_role: Default::default(),
             qualified_single_attempt: false,
         }
     }
@@ -350,14 +454,56 @@ impl ProviderHandle {
         Ok(())
     }
 
-    /// The raw byte-forwarder for the same-family transparent plane, or `None` for escape-hatch
-    /// handles. Proxy plane-selection (TD-0006 Step 2) uses this: same-family → forward via this;
-    /// cross-family or `None` → the typed `ChatRequestV1` translation path.
+    /// Admission-time eligibility only; every physical dispatch rechecks expiry.
+    pub fn credential_is_current(&self) -> bool {
+        self.check_credential().is_ok()
+    }
+
+    /// HTTP issuer ownership may use the Codex account-only identity only with
+    /// its current lease fence. Preserve the legacy routing digest separately.
+    pub fn reference_credential_is_current(&self) -> bool {
+        self.credential_is_current()
+            && (!self.credential_account_fenced || self.has_account_fenced_credential())
+    }
+
+    /// Trusted gateway composition only. Inventory and wire contracts must never
+    /// expose this private credential-derived value directly.
+    pub fn routing_credential_fingerprint(&self) -> Option<&str> {
+        self.credential_identity.as_deref()
+    }
+
+    /// Expiry ceiling for server-owned native issuer proofs; no secret material.
+    pub fn reference_credential_expiry(&self) -> Option<u64> {
+        self.credential_expires_at
+    }
+
+    pub fn has_account_fenced_credential(&self) -> bool {
+        self.credential_account_fenced && self.credential_expires_at.is_some()
+    }
+
+    pub fn source_usage_convention(&self) -> Result<sandhi_core::UsageConventionV1, &'static str> {
+        if self.peer_role != sandhi_core::PeerRoleV1::Provider {
+            return Err("gateway peer is not an upstream backend");
+        }
+        if let Some(convention) = self.source_convention {
+            return (convention.family() == self.family.endpoint_family())
+                .then_some(convention)
+                .ok_or("source convention does not match family");
+        }
+        sandhi_core::UsageConventionV1::standard(self.family.endpoint_family())
+    }
+
+    /// Factory-owned eligibility for tracked, retry-free buffered accounting.
+    /// Constrained SSE aggregation can qualify without enabling raw forwarding.
     #[must_use]
     pub fn supports_owned_buffered(&self) -> bool {
         self.qualified_single_attempt
-            && self.raw.is_some()
-            && self.family == ProviderFamily::OpenAiCompat
+            && (self.raw.is_some() || self.inner.qualified_buffered_without_raw())
+    }
+
+    #[must_use]
+    pub fn supports_owned_streaming(&self) -> bool {
+        self.qualified_single_attempt && self.inner.supports_qualified_streaming()
     }
 
     /// Whether the owned transport enforces gateway streaming setup/idle limits.
@@ -368,6 +514,8 @@ impl ProviderHandle {
         self.streaming_deadline_capable
     }
 
+    /// Same-family transparent transport; absent for custom/expiring profiles
+    /// that must use their constrained typed codec.
     pub fn raw_forwarder(&self) -> Option<&crate::raw::RawForwarder> {
         self.raw.as_ref()
     }
@@ -392,8 +540,158 @@ impl ProviderHandle {
         self.family
     }
 
+    pub fn supports_native_stream(&self) -> bool {
+        self.inner.supports_native_stream()
+    }
+    pub(crate) fn allows_cache_synthesis(&self) -> bool {
+        self.inner.allows_cache_synthesis()
+    }
+
+    fn observed_context(&self, context: crate::AttemptContext) -> crate::AttemptContext {
+        match self.provider_identity.as_deref() {
+            Some(identity) => context.with_configured_provider(identity),
+            None => context,
+        }
+    }
+
+    /// Configured provider identity for diagnostics; never a budget namespace.
     pub fn slug(&self) -> &str {
+        self.provider_identity
+            .as_deref()
+            .unwrap_or_else(|| self.inner.slug())
+    }
+
+    /// Original implementation label retained only for existing cache addressing.
+    /// Configured identity and budget authority have independent owners.
+    pub(crate) fn transport_slug(&self) -> &str {
         self.inner.slug()
+    }
+
+    /// Canonical authority captured independently of diagnostic identity and wire family.
+    pub fn upstream_budget_scope(&self) -> &str {
+        &self.upstream_budget_scope
+    }
+
+    /// Trusted composition only. Request bodies and headers cannot choose this namespace.
+    /// Registry callers restore the immutable stored binding before attaching its revision.
+    pub fn with_upstream_budget_scope(
+        mut self,
+        scope: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let scope = scope.into();
+        let valid = scope.strip_prefix("upstream:").is_some_and(|name| {
+            !name.is_empty()
+                && !name.ends_with('.')
+                && name.len() <= 128
+                && name.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+                })
+        });
+        if !valid || self.backend_binding.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "invalid or already bound upstream budget namespace".into(),
+            ));
+        }
+        self.upstream_budget_scope = scope.into();
+        Ok(self)
+    }
+
+    /// Override configured diagnostic identity without moving any budget authority.
+    pub fn with_provider_identity(
+        mut self,
+        identity: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let identity = identity.into();
+        if self
+            .backend_binding
+            .as_ref()
+            .is_some_and(|binding| binding.provider != identity)
+            || identity.trim().is_empty()
+            || identity.len() > 128
+            || identity.chars().any(char::is_control)
+        {
+            return Err(ProviderError::InvalidRequest(
+                "invalid configured provider identity".into(),
+            ));
+        }
+        self.provider_identity = Some(identity.into());
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_backend_binding(mut self, binding: BackendBinding) -> Self {
+        self.provider_identity = Some(Arc::from(binding.provider.as_str()));
+        self.backend_binding = Some(Arc::new(binding));
+        self
+    }
+
+    pub fn backend_binding(&self) -> Option<&BackendBinding> {
+        self.backend_binding.as_deref()
+    }
+
+    pub fn permits_model(&self, model: &str) -> bool {
+        self.backend_binding().is_none_or(|binding| {
+            binding
+                .models
+                .iter()
+                .any(|declared| declared.id.eq_ignore_ascii_case(model))
+        })
+    }
+
+    /// Validate using the actual codec/profile and compiled cache controls without
+    /// executing inference. Dispatch repeats validation and credential expiry checks.
+    pub fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.check_credential()?;
+        if !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "model is not declared for this backend".into(),
+            ));
+        }
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_request(&self.prepare_cache_request(request.clone())?)
+    }
+
+    /// Encode the final selected request without transport or recompiling an
+    /// already frozen cache plan. Uses the actual factory-owned codec/profile.
+    pub fn encode_execution_request(
+        &self,
+        request: &ChatRequestV1,
+    ) -> Result<Value, ProviderError> {
+        self.check_credential()?;
+        if !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "model is not declared for this backend".into(),
+            ));
+        }
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .execution_request(&self.prepare_cache_request(request.clone())?)
+    }
+
+    /// Validate a supported tracked buffered operation before taking either lease.
+    pub fn preflight_owned_buffered(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        if !self.supports_owned_buffered() || !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "tracked buffered operation is unsupported".into(),
+            ));
+        }
+        self.check_credential()?;
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_qualified_buffered(&self.prepare_cache_request(request.clone())?)
+    }
+
+    pub fn preflight_owned_streaming(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        if !self.supports_owned_streaming() || !self.permits_model(&request.model) {
+            return Err(ProviderError::InvalidRequest(
+                "tracked streaming operation is unsupported".into(),
+            ));
+        }
+        self.check_credential()?;
+        request.validate().map_err(ProviderError::InvalidRequest)?;
+        self.inner
+            .preflight_qualified_buffered(&self.prepare_cache_request(request.clone())?)
     }
 
     pub async fn complete(&self, request: ChatRequestV1) -> Result<ChatResponseV1, ProviderError> {
@@ -414,22 +712,55 @@ impl ProviderHandle {
         // Wire-truth latency, stamped once at the family-neutral typed
         // boundary (W3b) — the one seam every binding and the proxy call.
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let mut response = self.inner.complete(request, call_headers).await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
     }
 
-    /// Return qualified usage separately from the legacy response using the same transport.
+    /// Return the response and separately qualified source usage from the same transport.
     /// Accounting failure does not imply the model failed or authorize another call.
     pub async fn complete_with_qualified_usage(
         &self,
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_qualified_inner(request, call_headers, None)
+            .await
+    }
+
+    pub async fn complete_with_qualified_usage_and_attempts(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_qualified_inner(request, call_headers, Some(context))
+            .await
+    }
+
+    async fn complete_qualified_inner(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: Option<crate::AttemptContext>,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
-        let mut result = self.inner.complete_qualified(request, call_headers).await?;
+        let mut result = match context {
+            Some(context) => {
+                self.inner
+                    .complete_qualified_observed(
+                        request,
+                        call_headers,
+                        self.observed_context(context),
+                    )
+                    .await?
+            }
+            None => self.inner.complete_qualified(request, call_headers).await?,
+        };
         let elapsed = elapsed_ms(started);
         reconcile_duration(&mut result.response.usage, elapsed);
         if let Ok(usage) = &mut result.usage {
@@ -444,7 +775,13 @@ impl ProviderHandle {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
+        if request.include_native_stream && !self.supports_native_stream() {
+            return Err(ProviderError::InvalidRequest(
+                "native SSE attachments are not supported by this provider".into(),
+            ));
+        }
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let inner = self.inner.stream(request, call_headers).await?;
         Ok(stamp_stream_latency(inner, started))
@@ -460,10 +797,15 @@ impl ProviderHandle {
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let mut response = self
             .inner
-            .complete_observed(request, call_headers, attempt_context)
+            .complete_observed(
+                request,
+                call_headers,
+                self.observed_context(attempt_context),
+            )
             .await?;
         reconcile_duration(&mut response.usage, elapsed_ms(started));
         Ok(response)
@@ -476,13 +818,39 @@ impl ProviderHandle {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatEventStream, ProviderError> {
+        if request.include_native_stream && !self.supports_native_stream() {
+            return Err(ProviderError::InvalidRequest(
+                "native SSE attachments are not supported by this provider".into(),
+            ));
+        }
         self.check_credential()?;
+        let request = self.prepare_cache_request(request)?;
         let started = std::time::Instant::now();
         let inner = self
             .inner
-            .stream_observed(request, call_headers, attempt_context)
+            .stream_observed(
+                request,
+                call_headers,
+                self.observed_context(attempt_context),
+            )
             .await?;
         Ok(stamp_stream_latency(inner, started))
+    }
+
+    pub async fn stream_with_qualified_usage_and_attempts(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.preflight_owned_streaming(&request)?;
+        let request = self.prepare_cache_request(request)?;
+        let started = std::time::Instant::now();
+        let stream = self
+            .inner
+            .stream_qualified_observed(request, headers, self.observed_context(context))
+            .await?;
+        Ok(stamp_stream_latency(stream, started))
     }
 }
 
@@ -542,6 +910,53 @@ fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProviderRuntime;
 
+fn private_credential_identity(config: &ProviderTransportConfig) -> String {
+    let headers: std::collections::BTreeMap<_, _> = config
+        .headers
+        .keys()
+        .map(|name| {
+            (
+                name.as_str(),
+                config
+                    .headers
+                    .get_all(name)
+                    .iter()
+                    .map(|value| value.as_bytes())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    // A constrained Codex lease has an operator-configured account header; access-token renewal
+    // within that account need not masquerade as an account switch. Generic API
+    // credentials have no such proof, so their actual secret remains part of the hash.
+    let credential = if config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex {
+        config
+            .headers
+            .get("chatgpt-account-id")
+            .filter(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+            .map(|value| value.as_bytes())
+            .unwrap_or(config.api_key.as_bytes())
+    } else {
+        config.api_key.as_bytes()
+    };
+    sandhi_core::cache_digest(&(
+        "private-transport-credential-v1",
+        config.family.endpoint_family(),
+        &config.base_url,
+        credential,
+        headers,
+    ))
+    .expect("serializable transport identity")
+}
+
+fn account_fenced_config(config: &ProviderTransportConfig) -> bool {
+    config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex
+        && config
+            .headers
+            .get("chatgpt-account-id")
+            .is_some_and(|value| value.to_str().is_ok_and(|value| !value.trim().is_empty()))
+}
+
 /// Re-export of the family encoder the proxy's translation-plane tests drive
 /// end to end (ingress decode → family encode), pinning the seam where
 /// cross-family extras like `cache_control` live or die. `encode_openai_request`
@@ -554,10 +969,9 @@ impl ProviderRuntime {
         Self
     }
 
-    /// Construct the one resilient provider transport used internally by typed handles,
-    /// bindings, and the proxy. Provider-native JSON does not cross a public binding boundary.
-    #[must_use]
-    pub fn transport(&self, config: ProviderTransportConfig) -> Arc<dyn Provider> {
+    pub(crate) fn gateway_peer(&self, config: ProviderTransportConfig) -> ProviderHandle {
+        use sandhi_core::PeerRoleV1;
+        let role = PeerRoleV1::SandhiGatewayV1;
         let bare: Arc<dyn Provider> = match config.family {
             ProviderFamily::OpenAiCompat => Arc::new(
                 OpenAiCompat::new(
@@ -565,7 +979,78 @@ impl ProviderRuntime {
                     config.base_url.clone(),
                     config.api_key.clone(),
                 )
-                .with_headers(config.headers.clone()),
+                .with_headers(config.headers.clone())
+                .with_peer_role(role),
+            ),
+            ProviderFamily::Anthropic => Arc::new(
+                Anthropic::new(config.base_url.clone(), config.api_key.clone())
+                    .with_auth_scheme(AnthropicAuthScheme::Bearer)
+                    .with_headers(config.headers.clone())
+                    .with_peer_role(role),
+            ),
+            ProviderFamily::OpenAiResponses => Arc::new(
+                OpenAiResponses::new(
+                    config.slug.clone(),
+                    config.base_url.clone(),
+                    config.api_key.clone(),
+                )
+                .with_headers(config.headers.clone())
+                .with_peer_role(role),
+            ),
+            ProviderFamily::Gemini => Arc::new(
+                Gemini::new(config.base_url.clone(), config.api_key.clone())
+                    .with_auth_scheme(GeminiAuthScheme::Bearer)
+                    .with_headers(config.headers.clone())
+                    .with_peer_role(role),
+            ),
+            _ => unreachable!("gateway constructor validates dialect"),
+        };
+        let raw = self.decorate_transport(bare, &config);
+        let inner: Arc<dyn ChatProvider> = match config.family {
+            ProviderFamily::OpenAiCompat => Arc::new(TypedOpenAiCompat {
+                slug: config.slug.clone(),
+                raw,
+            }),
+            ProviderFamily::Anthropic => Arc::new(crate::anthropic_typed::TypedAnthropic::new(
+                raw,
+                Default::default(),
+            )),
+            ProviderFamily::OpenAiResponses => {
+                Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
+                    config.slug.clone(),
+                    raw,
+                    OpenAiResponsesProfile::Standard,
+                ))
+            }
+            ProviderFamily::Gemini => Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
+            _ => unreachable!("gateway constructor validates dialect"),
+        };
+        let mut handle = ProviderHandle::new(inner).with_family(config.family);
+        handle.peer_role = role;
+        handle
+    }
+
+    /// Construct the one resilient provider transport used internally by typed handles,
+    /// bindings, and the proxy. Provider-native JSON does not cross a public binding boundary.
+    #[must_use]
+    pub fn transport(&self, config: ProviderTransportConfig) -> Arc<dyn Provider> {
+        self.transport_with_openai_stream_usage_profile(config, Default::default())
+    }
+
+    fn transport_with_openai_stream_usage_profile(
+        &self,
+        config: ProviderTransportConfig,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Arc<dyn Provider> {
+        let bare: Arc<dyn Provider> = match config.family {
+            ProviderFamily::OpenAiCompat => Arc::new(
+                OpenAiCompat::new(
+                    config.slug.clone(),
+                    config.base_url.clone(),
+                    config.api_key.clone(),
+                )
+                .with_headers(config.headers.clone())
+                .with_stream_usage_profile(profile),
             ),
             ProviderFamily::OpenAiResponses => Arc::new(
                 OpenAiResponses::new(
@@ -579,6 +1064,7 @@ impl ProviderRuntime {
             ProviderFamily::Anthropic => Arc::new(
                 Anthropic::new(config.base_url.clone(), config.api_key.clone())
                     .with_auth_scheme(config.anthropic_auth_scheme)
+                    .with_usage_profile(config.anthropic_usage_profile)
                     .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Cohere => Arc::new(
@@ -641,6 +1127,33 @@ impl ProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
+        self.openai_compat_with_stream_usage_profile(
+            slug,
+            base_url,
+            api_key,
+            headers,
+            max_retries,
+            timeout_secs,
+            stream_setup_timeout_secs,
+            stream_idle_timeout_secs,
+            Default::default(),
+        )
+    }
+
+    /// Declare terminal-choice request-total usage without weakening standard Chat qualification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn openai_compat_with_stream_usage_profile(
+        &self,
+        slug: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        headers: http::HeaderMap,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> ProviderHandle {
         let slug = slug.into();
         let mut config = ProviderTransportConfig::new(
             ProviderFamily::OpenAiCompat,
@@ -653,14 +1166,26 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
-        let raw = self.transport(config);
+        let raw_forwarder =
+            Some(build_raw_forwarder(&config).with_openai_stream_usage_profile(profile));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
+        let raw = self.transport_with_openai_stream_usage_profile(config, profile);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(TypedOpenAiCompat { slug, raw }),
             family: ProviderFamily::OpenAiCompat,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
             qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
@@ -692,18 +1217,29 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
                 slug,
                 raw,
                 OpenAiResponsesProfile::Standard,
             )),
             family: ProviderFamily::OpenAiResponses,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -735,19 +1271,30 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         config.openai_responses_profile = OpenAiResponsesProfile::ChatGptCodex;
         // Subscription payloads must always pass through the constrained codec.
-        let raw_forwarder = None;
+        let raw_forwarder: Option<crate::raw::RawForwarder> = None;
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: format!("upstream:{slug}").into(),
             inner: Arc::new(crate::openai_responses_typed::TypedOpenAiResponses::new(
                 slug,
                 raw,
                 OpenAiResponsesProfile::ChatGptCodex,
             )),
             family: ProviderFamily::OpenAiResponses,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -763,23 +1310,64 @@ impl ProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
     ) -> ProviderHandle {
+        self.anthropic_with_usage_profile(
+            base_url,
+            api_key,
+            auth_scheme,
+            headers,
+            max_retries,
+            timeout_secs,
+            stream_setup_timeout_secs,
+            stream_idle_timeout_secs,
+            sandhi_core::usage::AnthropicUsageProfile::SeparateCacheWrites,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn anthropic_with_usage_profile(
+        &self,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        auth_scheme: AnthropicAuthScheme,
+        headers: http::HeaderMap,
+        max_retries: Option<u32>,
+        timeout_secs: Option<f64>,
+        stream_setup_timeout_secs: Option<f64>,
+        stream_idle_timeout_secs: Option<f64>,
+        usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> ProviderHandle {
         let mut config =
             ProviderTransportConfig::new(ProviderFamily::Anthropic, "anthropic", base_url, api_key);
         config.anthropic_auth_scheme = auth_scheme;
+        config.anthropic_usage_profile = usage_profile;
         config.headers = headers;
         config.max_retries = max_retries;
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
-            inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(raw)),
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:anthropic"),
+            inner: Arc::new(crate::anthropic_typed::TypedAnthropic::new(
+                raw,
+                usage_profile,
+            )),
             family: ProviderFamily::Anthropic,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -802,14 +1390,25 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:ollama"),
             inner: Arc::new(crate::ollama_typed::TypedOllama::new(raw)),
             family: ProviderFamily::Ollama,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -834,14 +1433,25 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:gemini"),
             inner: Arc::new(crate::gemini_typed::TypedGemini::new(raw)),
             family: ProviderFamily::Gemini,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -864,14 +1474,25 @@ impl ProviderRuntime {
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
+        let credential_identity = Some(private_credential_identity(&config));
+        let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
+            provider_identity: None,
+            upstream_budget_scope: Arc::from("upstream:cohere"),
             inner: Arc::new(crate::cohere_typed::TypedCohere::new(raw)),
             family: ProviderFamily::Cohere,
+            source_convention: raw_forwarder
+                .as_ref()
+                .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
             credential_expires_at: None,
-            qualified_single_attempt: false,
+            backend_binding: None,
+            credential_identity,
+            credential_account_fenced,
+            peer_role: Default::default(),
+            qualified_single_attempt: max_retries.unwrap_or(0) == 0,
         }
     }
 
@@ -912,6 +1533,30 @@ struct TypedOpenAiCompat {
 
 #[async_trait]
 impl ChatProvider for TypedOpenAiCompat {
+    fn supports_qualified_streaming(&self) -> bool {
+        true
+    }
+    async fn stream_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<ChatEventStream, ProviderError> {
+        self.stream_inner(request, headers, Some(context)).await
+    }
+
+    fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
+        encode_openai_request_for_peer(request, self.raw.peer_role())
+    }
+    fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
+        self.execution_request(request).map(|_| ())
+    }
+    fn allows_cache_synthesis(&self) -> bool {
+        true
+    }
+    fn supports_native_stream(&self) -> bool {
+        true
+    }
     fn slug(&self) -> &str {
         &self.slug
     }
@@ -921,9 +1566,9 @@ impl ChatProvider for TypedOpenAiCompat {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, None, false)
+        self.complete_inner(request, call_headers, None)
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn complete_qualified(
@@ -931,7 +1576,17 @@ impl ChatProvider for TypedOpenAiCompat {
         request: ChatRequestV1,
         call_headers: http::HeaderMap,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.complete_inner(request, call_headers, None, true).await
+        self.complete_inner(request, call_headers, None).await
+    }
+
+    async fn complete_qualified_observed(
+        &self,
+        request: ChatRequestV1,
+        call_headers: http::HeaderMap,
+        context: crate::AttemptContext,
+    ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
+        self.complete_inner(request, call_headers, Some(context))
+            .await
     }
 
     async fn stream(
@@ -948,9 +1603,9 @@ impl ChatProvider for TypedOpenAiCompat {
         call_headers: http::HeaderMap,
         attempt_context: crate::AttemptContext,
     ) -> Result<ChatResponseV1, ProviderError> {
-        self.complete_inner(request, call_headers, Some(attempt_context), false)
+        self.complete_inner(request, call_headers, Some(attempt_context))
             .await
-            .map(|r| r.response)
+            .and_then(crate::QualifiedCompletion::into_response)
     }
 
     async fn stream_observed(
@@ -970,33 +1625,50 @@ impl TypedOpenAiCompat {
         mut request: ChatRequestV1,
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
-        qualify: bool,
     ) -> Result<crate::QualifiedCompletion<ChatResponseV1>, ProviderError> {
-        self.apply_constraints(&mut request)?;
+        if self.raw.peer_role() == sandhi_core::PeerRoleV1::Provider {
+            self.apply_constraints(&mut request)?;
+        }
         request.validate().map_err(ProviderError::InvalidRequest)?;
         let req = provider_request_observed(
             &request,
-            encode_openai_request(&request)?,
+            self.execution_request(&request)?,
             call_headers,
             attempt_context,
         );
-        let response = self.raw.complete(req).await?;
-        let qualification = if qualify {
-            sandhi_core::usage::validate_openai_buffered_usage(&response.body)
+        let response = self
+            .raw
+            .complete(req)
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        let qualification = crate::buffered_completion::qualify(
+            &response,
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            Default::default(),
+        );
+        let reasoning = if request.include_native_response {
+            None
         } else {
-            Ok(())
+            crate::buffered_fidelity::validate(
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                &response.body,
+            )?
         };
-        let mut decoded = decode_openai_response(response.body, response.usage, &request.model)?;
+        let mut decoded = decode_openai_response(response.body, response.usage, &request.model)
+            .map_err(crate::buffered_completion::decode_error)?;
+        if let Some(reasoning) = reasoning {
+            decoded
+                .extensions
+                .insert("reasoning".into(), Value::String(reasoning));
+        }
         if !request.include_native_response {
             decoded.extensions.remove("openai");
         }
-        decoded.usage.attempts = response.attempts;
-        decoded.usage.outcome = Some("success".into());
-        let usage = qualification.map(|_| decoded.usage.clone());
-        Ok(crate::QualifiedCompletion {
-            response: decoded,
-            usage,
-        })
+        Ok(crate::buffered_completion::observed(
+            decoded,
+            qualification,
+            response.attempts,
+        ))
     }
 
     async fn stream_inner(
@@ -1005,16 +1677,30 @@ impl TypedOpenAiCompat {
         call_headers: http::HeaderMap,
         attempt_context: Option<crate::AttemptContext>,
     ) -> Result<ChatEventStream, ProviderError> {
-        self.apply_constraints(&mut request)?;
+        if self.raw.peer_role() == sandhi_core::PeerRoleV1::Provider {
+            self.apply_constraints(&mut request)?;
+        }
         request.validate().map_err(ProviderError::InvalidRequest)?;
-        let req = provider_request_observed(
-            &request,
-            encode_openai_request(&request)?,
-            call_headers,
-            attempt_context,
-        );
-        let raw = self.raw.stream(req).await?;
-        Ok(decode_openai_stream(raw, request.model))
+        let source = self
+            .raw
+            .stream_qualified(
+                provider_request_observed(
+                    &request,
+                    self.execution_request(&request)?,
+                    call_headers,
+                    attempt_context,
+                ),
+                crate::QualifiedStreamDelivery::Streaming,
+            )
+            .await
+            .map_err(|error| crate::peer::terminal_error(self.raw.peer_role(), error))?;
+        let decoded = if request.include_native_stream {
+            // Keep the established canonical view plus original native frames.
+            decode_openai_stream_delivery(source.stream, request.model, true, true)
+        } else {
+            crate::chat_projection::decode(source.stream, request.model)
+        };
+        Ok(crate::qualified_stream::decode(decoded, source.observation))
     }
 
     fn apply_constraints(&self, request: &mut ChatRequestV1) -> Result<(), ProviderError> {
@@ -1061,7 +1747,26 @@ pub(crate) fn provider_request_observed(
 }
 
 pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    encode_openai_request_for_peer(request, sandhi_core::PeerRoleV1::Provider)
+}
+fn encode_openai_request_for_peer(
+    request: &ChatRequestV1,
+    role: sandhi_core::PeerRoleV1,
+) -> Result<Value, ProviderError> {
+    crate::cache_policy::encode_for_peer(
+        request,
+        sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+        role,
+        encode_openai_request_base,
+    )
+}
+
+pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Value, ProviderError> {
     request.validate().map_err(ProviderError::InvalidRequest)?;
+    let native = request
+        .native_input_for(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions)
+        .map_err(ProviderError::InvalidRequest)?
+        .is_some();
     let mut body = request
         .extensions
         .get("openai")
@@ -1069,11 +1774,13 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         .cloned()
         .unwrap_or_default();
     body.insert("model".into(), Value::String(request.model.clone()));
-    body.insert(
-        "messages".into(),
-        Value::Array(request.messages.iter().map(encode_message).collect()),
-    );
-    if !request.tools.is_empty() {
+    if !native {
+        body.insert(
+            "messages".into(),
+            Value::Array(request.messages.iter().map(encode_message).collect()),
+        );
+    }
+    if !native && !request.tools.is_empty() {
         body.insert(
             "tools".into(),
             Value::Array(
@@ -1092,7 +1799,7 @@ pub fn encode_openai_request(request: &ChatRequestV1) -> Result<Value, ProviderE
             ),
         );
     }
-    if let Some(choice) = &request.tool_choice {
+    if let Some(choice) = request.tool_choice.as_ref().filter(|_| !native) {
         body.insert("tool_choice".into(), encode_tool_choice(choice));
     }
     insert_optional(&mut body, "temperature", request.temperature);
@@ -1265,11 +1972,22 @@ pub fn decode_openai_response(
         .get("content")
         .and_then(Value::as_str)
         .map(|s| MessageContent::Text(s.into()));
-    let tool_calls = message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .map(|calls| calls.iter().filter_map(decode_tool_call).collect())
-        .unwrap_or_default();
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(calls)) if calls.len() <= 1024 => calls
+            .iter()
+            .map(decode_tool_call)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        _ => {
+            return Err(ProviderError::OutputProjection(
+                "invalid upstream tool_calls array".into(),
+            ))
+        }
+    };
+    crate::buffered_completion::unique_calls(&tool_calls)?;
     let usage = usage_v2_from_openai(&body, parsed_usage, UsageCompleteness::Final);
     let extensions = BTreeMap::from([("openai".into(), body.clone())]);
     Ok(ChatResponseV1 {
@@ -1299,20 +2017,31 @@ pub fn decode_openai_response(
     })
 }
 
-fn decode_tool_call(value: &Value) -> Option<ToolCallV1> {
-    Some(ToolCallV1 {
-        id: value.get("id")?.as_str()?.into(),
-        name: value.pointer("/function/name")?.as_str()?.into(),
-        arguments: value
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .into(),
+fn decode_tool_call(value: &Value) -> Result<Option<ToolCallV1>, ProviderError> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .ok_or_else(|| {
+            ProviderError::OutputProjection("upstream tool call has invalid type".into())
+        })?;
+    if kind != "function" {
+        // Other named native tool kinds remain in the original envelope;
+        // do not manufacture a neutral function call from their fields.
+        return Ok(None);
+    }
+    let function = value.get("function").ok_or_else(|| {
+        ProviderError::OutputProjection("upstream tool call has no function".into())
+    })?;
+    Ok(Some(ToolCallV1 {
+        id: crate::buffered_fidelity::id(value, "id")?.into(),
+        name: crate::buffered_fidelity::id(function, "name")?.into(),
+        arguments: crate::buffered_fidelity::text(function, "arguments")?.into(),
         extensions: BTreeMap::new(),
-    })
+    }))
 }
 
-fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
+pub(crate) fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     match reason {
         "stop" => FinishReasonV1::Stop,
         "length" => FinishReasonV1::Length,
@@ -1350,19 +2079,52 @@ fn u64_opt(value: &Value, key: &str) -> Option<u64> {
 
 // Unavailable Usage updates emitted by the shared decorator carry only availability
 // corrections; reducers must not replace a previous numeric verdict with them.
+#[cfg(test)]
 fn decode_openai_stream(raw: ByteStream, requested_model: String) -> ChatEventStream {
-    crate::cache_read::decode_with_observation(raw, requested_model, decode_openai_stream_inner)
+    decode_openai_stream_mode(raw, requested_model, false)
 }
 
-fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> ChatEventStream {
+#[cfg(test)]
+pub(crate) fn decode_openai_stream_mode(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+) -> ChatEventStream {
+    decode_openai_stream_delivery(raw, requested_model, native, false)
+}
+
+pub(crate) fn decode_openai_stream_delivery(
+    raw: ByteStream,
+    requested_model: String,
+    native: bool,
+    drain_terminal: bool,
+) -> ChatEventStream {
+    crate::cache_read::decode_with_observation_policy(
+        raw,
+        requested_model,
+        move |raw, model| decode_openai_stream_inner(raw, model, native, drain_terminal),
+        native,
+    )
+}
+
+fn decode_openai_stream_inner(
+    mut raw: ByteStream,
+    requested_model: String,
+    native: bool,
+    drain_terminal: bool,
+) -> ChatEventStream {
     use futures_util::StreamExt;
     let stream = async_stream::try_stream! {
         // TD-0014 P1: the shared bounded splitter. One ceiling across both planes; only the
         // over-budget POLICY differs, and it is applied below. See MAX_STREAM_LINE_BYTES.
-        let mut splitter = crate::linesplit::LineSplitter::new(crate::MAX_STREAM_LINE_BYTES);
+        let mut splitter = crate::native_stream::SseDecoder::new((native || drain_terminal).then_some(sandhi_core::EndpointFamilyV1::OpenaiChatCompletions));
         let mut started = false;
         let mut open_tools = BTreeMap::<u32, ()>::new();
         let mut emitted_usage = false;
+        // Chat may send finish_reason before its request-total usage chunk.
+        // Native terminal envelopes in other dialects must see that usage first.
+        let mut pending_finish = None;
+        let mut protocol_done = false;
         // TD-0014 P2b: after the real chunks end, ONE synthetic empty chunk flushes any
         // trailing remainder (a final frame without its newline — Ollama's `done` frame) through
         // this same loop body, so per-chunk event ordering is preserved exactly and the body is
@@ -1396,8 +2158,24 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
             // (The terminal usage-only chunk is likewise empty and previously skipped this.)
             {
                 splitter.push(&chunk.data);
-                while let Some(line) = splitter.next_line() {
-                    let Some(value) = crate::sse_data_json(&line) else { continue; };
+                if native && chunk.terminal { splitter.flush_newline(); }
+                while let Some((line, mut native_frame)) = splitter.next_line()? {
+                    if !native { native_frame=None; }
+                    if (chunk.terminal && crate::openai_done_line(&line))
+                        || ((native || drain_terminal) && line == b"data: [DONE]") {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        protocol_done = true;
+                        splitter.reset();
+                        break;
+                    }
+                    let Some(value) = crate::sse_data_json(&line) else {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        continue;
+                    };
+                    if let Some(error) = crate::native_stream::upstream_error(&value) {
+                        if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
+                        Err(error)?;
+                    }
                     if !started {
                         yield ChatStreamEventV1::ResponseStart {
                             id: value.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -1452,8 +2230,9 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                             yield ChatStreamEventV1::ToolCallEnd { index };
                         }
                         open_tools.clear();
-                        yield ChatStreamEventV1::Finish { reason: decode_finish_reason(reason) };
+                        pending_finish = Some(decode_finish_reason(reason));
                     }
+                    if let Some(frame) = native_frame.take() { yield ChatStreamEventV1::NativeFrame { frame }; }
                 }
                 // TD-0014 P1 (gap G01): past MAX_STREAM_LINE_BYTES the upstream has sent no
                 // line boundary at all, which no real provider does. The raw plane drops the
@@ -1478,6 +2257,19 @@ fn decode_openai_stream_inner(mut raw: ByteStream, requested_model: String) -> C
                     emitted_usage = true;
                 }
             }
+            // A data-bearing terminal item is the protocol boundary ([DONE]),
+            // which can precede HTTP EOF. An empty terminal item instead marks
+            // EOF; let the existing tail-flush loop decode any final line first.
+            if protocol_done || (chunk.terminal && !chunk.data.is_empty()) {
+                if drain_terminal { while let Some(chunk)=raw.next().await {chunk?;} }
+                break;
+            }
+        }
+        if native && !protocol_done {
+            Err(ProviderError::Transport("native Chat stream ended before its protocol terminator".into()))?;
+        }
+        if let Some(reason) = pending_finish {
+            yield ChatStreamEventV1::Finish { reason };
         }
     };
     Box::pin(stream)
@@ -1489,8 +2281,13 @@ impl ProviderError {
         let mut request_id = None;
         let (code, retryable, http_status) = match self {
             Self::InvalidRequest(_) => ("invalid_request", false, Some(400)),
+            Self::OutputProjection(_) => ("output_projection_error", false, Some(502)),
             Self::Auth => ("authentication_error", false, Some(401)),
             Self::RateLimited => ("rate_limited", true, Some(429)),
+            Self::GatewayFailure(failure) => {
+                request_id = failure.request_id.clone();
+                (failure.code.as_str(), false, failure.http_status)
+            }
             Self::Upstream {
                 status,
                 body,
@@ -1520,6 +2317,124 @@ impl ProviderError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn buffered_tool_discriminators_cannot_invent_functions() {
+        use serde_json::json;
+        let mut call =
+            json!({"id":"call","type":"function","function":{"name":"inspect","arguments":"{}"}});
+        for kind in [
+            json!(7),
+            json!(null),
+            json!({}),
+            json!([]),
+            json!(true),
+            json!(""),
+        ] {
+            call["type"] = kind;
+            assert!(matches!(
+                super::decode_tool_call(&call),
+                Err(crate::ProviderError::OutputProjection(_))
+            ));
+        }
+        call["type"] = json!("custom");
+        assert!(super::decode_tool_call(&call).unwrap().is_none());
+        call["type"] = json!("function");
+        assert!(super::decode_tool_call(&call).unwrap().is_some());
+        call.as_object_mut().unwrap().remove("type");
+        assert!(matches!(
+            super::decode_tool_call(&call),
+            Err(crate::ProviderError::OutputProjection(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_finish_follows_trailing_usage_without_waiting_for_http_eof() {
+        use futures_util::StreamExt;
+        let wire = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":60,\"cache_write_tokens\":30}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for newline in ["\n", "\r\n"] {
+            let wire = wire.replace('\n', newline);
+            for split in 0..=wire.len() {
+                let upstream = futures_util::stream::iter(vec![
+                    Ok::<_, reqwest::Error>(bytes::Bytes::copy_from_slice(
+                        &wire.as_bytes()[..split],
+                    )),
+                    Ok(bytes::Bytes::copy_from_slice(&wire.as_bytes()[split..])),
+                ])
+                .chain(futures_util::stream::pending());
+                let raw =
+                    crate::metered_openai_passthrough(upstream, crate::openai::sniff_usage_line);
+                let events: Vec<_> = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    super::decode_openai_stream(raw, "fixture".into())
+                        .map(Result::unwrap)
+                        .collect(),
+                )
+                .await
+                .expect("[DONE] must complete the typed stream before HTTP EOF");
+                assert!(matches!(
+                    events.last(),
+                    Some(sandhi_core::ChatStreamEventV1::Finish {
+                        reason: sandhi_core::FinishReasonV1::Stop
+                    })
+                ));
+                let measurements: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        sandhi_core::ChatStreamEventV1::Usage { usage }
+                            if usage.completeness == sandhi_core::UsageCompleteness::Final =>
+                        {
+                            Some(usage)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(measurements.len(), 1);
+                assert_eq!(
+                    (
+                        measurements[0].tokens_in,
+                        measurements[0].cache_read_tokens,
+                        measurements[0].cache_creation_tokens
+                    ),
+                    (10, 60, 30)
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(
+                            event,
+                            sandhi_core::ChatStreamEventV1::Finish { .. }
+                        ))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_failure_before_done_does_not_publish_a_successful_finish() {
+        use futures_util::StreamExt;
+        let raw = futures_util::stream::iter(vec![
+            Ok(crate::StreamChunk {
+                data:bytes::Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+                usage:None, usage_running:None, cache_read_observation:None, attempts:1, terminal:false,
+            }),
+            Err(crate::ProviderError::Transport("synthetic failure before usage".into())),
+        ]);
+        let events: Vec<_> = super::decode_openai_stream(Box::pin(raw), "fixture".into())
+            .collect()
+            .await;
+        assert!(events.last().unwrap().is_err());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ok(sandhi_core::ChatStreamEventV1::Finish { .. }))));
+    }
+
     #[tokio::test]
     async fn received_content_before_cancellation_exposes_cache_absence() {
         use futures_util::StreamExt;
@@ -2042,7 +2957,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id":"m1","type":"message","role":"assistant",
                 "content":[{"type":"text","text":"hi"}],
-                "usage":{"input_tokens":3,"output_tokens":1}
+                "usage":{"input_tokens":3,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}
             })))
             .mount(&server)
             .await;
@@ -2189,7 +3104,7 @@ mod tests {
             .and(header("x-sandhi-run-id", "run-1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id":"r1","message":{"content":[{"type":"text","text":"hi"}]},
-                "usage":{"billed_units":{"input_tokens":3,"output_tokens":1}}
+                "usage":{"tokens":{"input_tokens":3,"output_tokens":1},"billed_units":{"input_tokens":2,"output_tokens":1}}
             })))
             .mount(&server)
             .await;
@@ -2287,10 +3202,28 @@ mod tests {
                 None,
             );
             let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}],"include_native_response":false})).unwrap();
+            let (context, receiver) =
+                crate::AttemptContext::single_attempt("execution", "c".repeat(64)).unwrap();
             let typed = handle
-                .complete_with_qualified_usage(request.clone(), Default::default())
+                .complete_with_qualified_usage_and_attempts(
+                    request.clone(),
+                    Default::default(),
+                    context.clone(),
+                )
                 .await
                 .unwrap();
+            assert_eq!(receiver.drain().len(), 2);
+            assert!(matches!(
+                handle
+                    .complete_with_qualified_usage_and_attempts(
+                        request.clone(),
+                        Default::default(),
+                        context
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
             assert_eq!(typed.usage.is_ok(), counts.is_some(), "typed: {body}");
             assert_eq!(
                 typed.response.output.content,
@@ -2337,26 +3270,31 @@ mod tests {
                 );
                 assert_eq!(typed_usage.completeness, UsageCompleteness::Final);
             }
-            let legacy = handle
-                .complete_with(request, Default::default())
-                .await
-                .unwrap();
-            let mut expected = serde_json::to_value(legacy).unwrap();
-            let mut actual = serde_json::to_value(&typed.response).unwrap();
-            for value in [&mut expected, &mut actual] {
-                value["usage"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("duration_ms");
-                value["usage"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("duration_source");
+            let ordinary = handle.complete_with(request, Default::default()).await;
+            if counts.is_some() {
+                let mut expected = serde_json::to_value(ordinary.unwrap()).unwrap();
+                let mut actual = serde_json::to_value(&typed.response).unwrap();
+                for value in [&mut expected, &mut actual] {
+                    value["usage"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("duration_ms");
+                    value["usage"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("duration_source");
+                }
+                assert_eq!(
+                    actual, expected,
+                    "both APIs project the same qualified counts"
+                );
+            } else {
+                assert!(matches!(ordinary, Err(ProviderError::OutputProjection(_))));
+                assert_eq!(
+                    typed.response.usage.completeness,
+                    UsageCompleteness::Unavailable
+                );
             }
-            assert_eq!(
-                actual, expected,
-                "qualified API preserves the legacy response"
-            );
             let requests = server.received_requests().await.unwrap();
             assert_eq!(
                 requests[0].body, requests[2].body,
@@ -2376,16 +3314,7 @@ mod tests {
         use wiremock::MockServer;
         let server = MockServer::start().await;
         let request: ChatRequestV1 = serde_json::from_value(json!({"schema_version":"1","model":"fixture","messages":[{"role":"user","content":"hi"}]})).unwrap();
-        let handle = ProviderRuntime::new().anthropic(
-            server.uri(),
-            "key",
-            crate::AnthropicAuthScheme::ApiKey,
-            Default::default(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let handle = ProviderHandle::new(Arc::new(NoOpProvider));
         assert!(matches!(
             handle
                 .complete_with_qualified_usage(request, Default::default())
@@ -2394,7 +3323,7 @@ mod tests {
         ));
         for (family, path, body) in [
             (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
-            (ProviderFamily::OpenAiCompat, "/v1/embeddings", "{}"),
+            (ProviderFamily::OpenAiCompat, "/v1/images/generations", "{}"),
             (
                 ProviderFamily::OpenAiCompat,
                 "/v1/chat/completions",
@@ -2540,6 +3469,7 @@ mod tests {
         }
         async fn complete(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
             Ok(ProviderResponse {
+                usage_convention: None,
                 status: 200,
                 body: self.0.clone(),
                 usage: ParsedUsage::default(),
@@ -2586,6 +3516,20 @@ mod tests {
         assert_eq!(out.finish_reason, Some(FinishReasonV1::Stop));
     }
 
+    #[test]
+    fn host_handle_namespace_does_not_follow_diagnostic_identity_or_declared_family() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        assert_eq!(handle.upstream_budget_scope(), "upstream:canned");
+        let renamed = handle
+            .with_provider_identity("configured-vendor")
+            .unwrap()
+            .with_family(ProviderFamily::Gemini);
+        assert_eq!(renamed.slug(), "configured-vendor");
+        assert_eq!(renamed.upstream_budget_scope(), "upstream:canned");
+        assert!(!renamed.supports_owned_buffered());
+        assert!(!renamed.supports_owned_streaming());
+    }
+
     /// Canned typed provider for the W3b latency-stamp tests.
     struct CannedChat;
     #[async_trait]
@@ -2624,6 +3568,26 @@ mod tests {
             ];
             Ok(Box::pin(futures_util::stream::iter(events)))
         }
+    }
+
+    #[tokio::test]
+    async fn unsupported_native_stream_opt_in_refuses_before_custom_dispatch() {
+        let handle = ProviderHandle::new(Arc::new(CannedChat));
+        assert!(!handle.supports_native_stream());
+        let mut request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"fixture", "messages":[], "include_native_stream":true
+        }))
+        .unwrap();
+        let result = handle.stream(request.clone()).await;
+        assert!(
+            matches!(result,Err(ProviderError::InvalidRequest(ref message)) if message.contains("native"))
+        );
+        request.include_native_stream = false;
+        use futures_util::StreamExt;
+        let events: Vec<_> = handle.stream(request).await.unwrap().collect().await;
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event, Ok(ChatStreamEventV1::NativeFrame { .. }))));
     }
 
     #[tokio::test]

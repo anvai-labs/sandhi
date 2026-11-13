@@ -1,4 +1,5 @@
 #![cfg(feature = "policy-onnx")]
+mod support;
 use sandhi_core::policy::{Disposition, Engine, Identity, Registry};
 use sandhi_proxy::policy_onnx::register_models;
 use serde_json::{json, Value};
@@ -97,7 +98,7 @@ async fn embedded_onnx_inflight_timeout_and_router_denial_never_dispatch() {
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
     use sandhi_providers::ProviderRuntime;
-    use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+    use sandhi_proxy::{build_app, policy::PolicyGate};
     use sandhi_store::policy::PolicyAuditStore;
     use sha2::{Digest, Sha256};
     use std::{collections::HashMap, sync::Arc};
@@ -131,9 +132,9 @@ async fn embedded_onnx_inflight_timeout_and_router_denial_never_dispatch() {
             None,
             None,
         );
-        let mut state = ProxyState::new(
+        let mut state = support::state(
             keys,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
             Arc::new(InMemorySink::new()),
             HashMap::from([("openai".into(), provider)]),
             None,

@@ -1,10 +1,11 @@
 # Buffered upstream deadlines
 
 The optional `buffered_deadlines` section of `SANDHI_CONFIG` sets buffered
-inference limits. Without it, behavior is unchanged: buffered calls have a
-120-second transport limit, stream setup 30 seconds, and stream idle gaps
-90 seconds. Streaming configuration is outside this increment; unknown fields
-inside the new policy are rejected, including streaming knobs.
+inference limits. Without it, buffered calls retain the 120-second transport
+limit. Streaming has its own [bounded route policy](streaming-deadlines.md);
+streaming knobs inside `buffered_deadlines` are rejected. The current standalone
+candidate requires the same paired durable execution owner independently of
+whether a deadline override is configured.
 
 ```json
 {

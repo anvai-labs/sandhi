@@ -1,8 +1,42 @@
 # Attempt accounting and durable evidence
 
+!!! warning "Current 0.17.0 contract; historical phase records below"
+    HTTP generation requires the original single-file paired owner, shared by binary
+    and public serving. Remove `SANDHI_BUFFERED_ACCOUNTING`; there is no accounting-off,
+    volatile-serving or usage-absence-as-zero path. Source attempts/usage and one paired
+    receipt remain separate from best-effort observations; unknown liabilities survive
+    expiry/restart. Provider FFI stays ledger-free. Native proof metadata is initialized
+    on that same file, with lifecycle-owned workers and original request/shutdown bounds.
+    Follow [ADR-0043](../adr/0043-mandatory-durable-http-execution.md),
+    [ADR-0044](../adr/0044-native-reference-ownership.md) and the
+    [0.17.0 upgrade checklist](../releases/v0.17.0.md).
+
+## Historical W05/M5 design and checkpoint records
+
+The remaining phase text preserves earlier implementation/activation scopes, including
+removed opt-in/legacy paths. It is evidence history, not current serving instructions.
+
 Status: W05 in progress. W05a and W05b are integrated. W05b remains
 opt-in diagnostics; W05c/d now include a limited tracked buffered HTTP mode, while broader W05c–e gates remain pending.
 Date: 2026-09-08. Tracker: [TD-0026](../td/TD-0026-gateway-product-evolution.md).
+
+Current router workspace increments additionally persist
+[admission selection/cache/policy context](../adr/0022-durable-execution-context.md)
+and [paired client/upstream budget ownership](../adr/0023-paired-budget-settlement.md),
+with [durable single-attempt transport evidence](../adr/0024-durable-physical-attempt-evidence.md).
+New supported tracked admissions settle both scopes atomically or retain both
+unknown liabilities through expiry/restart. Default legacy mode and older unpaired
+rows retain their original semantics. New tracked dispatch authorizations allocate
+a persistent attempt ID; transport evidence and qualified usage then commit
+together before canonical settlement. Authorization alone leaves send status
+unknown. The subsequent [M5d buffered protocol increment](../adr/0025-qualified-buffered-protocol-accounting.md)
+qualifies Chat/Messages/Responses/Gemini ingress against those four standard backend
+protocols. [M5e Responses streaming](../adr/0026-qualified-responses-stream-accounting.md)
+additionally qualifies bounded transparent standard Responses delivery.
+[M5f Codex aggregation](../adr/0027-qualified-codex-buffered-accounting.md) also qualifies
+buffered host delivery while preserving constrained typed encoding and independent
+source measurements. Broader tracked streaming remains gated. The
+historical substep records below keep their original scope.
 
 ## Work backward from reconciliation
 

@@ -3,8 +3,8 @@
 //! OpenRouter, vLLM, LM Studio, Ollama, Cerebras…). One adapter, many providers.
 
 use crate::{
-    error_for_response, metered_openai_passthrough as metered_passthrough, sse_data_json,
-    ByteStream, ParsedUsage, Provider, ProviderError, ProviderRequest, ProviderResponse,
+    metered_openai_passthrough as metered_passthrough, sse_data_json, ByteStream, ParsedUsage,
+    Provider, ProviderError, ProviderRequest, ProviderResponse,
 };
 use crate::{parse_openai_usage, validate_openai_chat_messages};
 use async_trait::async_trait;
@@ -15,10 +15,12 @@ use serde_json::{json, Value};
 /// the adapter POSTs to `{base_url}/chat/completions` with `Authorization: Bearer <key>`.
 pub struct OpenAiCompat {
     client: reqwest::Client,
+    peer_role: sandhi_core::PeerRoleV1,
     slug: String,
     base_url: String,
     api_key: String,
     headers: HeaderMap,
+    stream_usage_profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     /// Vendor request-id header from the catalog spec (strategy-via-data): set for
     /// slugs whose id header deviates from the standard (e.g. moonshot).
     request_id_header: Option<&'static str>,
@@ -37,10 +39,12 @@ impl OpenAiCompat {
         let spec = crate::resolve_openai_compat_provider(&slug);
         Self {
             client: crate::default_client(),
+            peer_role: Default::default(),
             slug,
             base_url: base_url.into(),
             api_key: api_key.into(),
             headers: HeaderMap::new(),
+            stream_usage_profile: Default::default(),
             request_id_header: spec.and_then(|spec| spec.request_id_header),
             session_header: spec.and_then(|spec| spec.session_header),
         }
@@ -62,6 +66,19 @@ impl OpenAiCompat {
         self
     }
 
+    pub(crate) fn with_stream_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Self {
+        self.stream_usage_profile = profile;
+        self
+    }
+
+    pub(crate) fn with_peer_role(mut self, role: sandhi_core::PeerRoleV1) -> Self {
+        self.peer_role = role;
+        self
+    }
+
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
@@ -75,7 +92,10 @@ impl OpenAiCompat {
     /// or body. `try_from`, not `from_static`: catalog names are `&'static str` data, and a
     /// future entry with invalid casing must be skipped, not panic the hot path.
     fn request_headers(&self, req: &ProviderRequest) -> HeaderMap {
-        let mut out = crate::merge_call_headers(&self.headers, &req.extra_headers);
+        let mut out = crate::peer::request_headers(self.peer_role, &self.headers, req);
+        if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+            return out;
+        }
         let Some(name) = self.session_header else {
             return out;
         };
@@ -100,6 +120,10 @@ impl OpenAiCompat {
 
 #[async_trait]
 impl Provider for OpenAiCompat {
+    fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     fn slug(&self) -> &str {
         &self.slug
     }
@@ -117,10 +141,12 @@ impl Provider for OpenAiCompat {
         if !self.api_key.is_empty() {
             request = request.bearer_auth(&self.api_key);
         }
-        crate::attempt::observe_complete(
+        crate::attempt::observe_complete_qualified(
             attempt_context,
             self.slug(),
             Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            Default::default(),
             |facts| async move {
                 let resp = request
                     .json(&body)
@@ -128,18 +154,32 @@ impl Provider for OpenAiCompat {
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
                 let status = resp.status().as_u16();
-                facts.record_headers(status, resp.headers(), self.request_id_header);
+                facts.record_peer_headers(
+                    self.peer_role,
+                    status,
+                    resp.headers(),
+                    self.request_id_header,
+                );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, self.request_id_header).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        self.request_id_header,
+                    )
+                    .await);
                 }
-                let body: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::Transport(e.to_string()))?;
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let body = crate::decode_response_json(resp).await?;
                 let (response_usage, observed_usage) =
                     crate::buffered_usage(sandhi_core::CacheReadFamily::OpenAi, &body);
                 Ok((
                     ProviderResponse {
+                        usage_convention,
                         status,
                         body,
                         usage: response_usage,
@@ -186,18 +226,98 @@ impl Provider for OpenAiCompat {
                     .send()
                     .await
                     .map_err(|e| ProviderError::Transport(e.to_string()))?;
-                facts.record_headers(
+                facts.record_peer_headers(
+                    self.peer_role,
                     resp.status().as_u16(),
                     resp.headers(),
                     self.request_id_header,
                 );
                 if !resp.status().is_success() {
-                    return Err(error_for_response(resp, self.request_id_header).await);
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        resp,
+                        self.request_id_header,
+                    )
+                    .await);
                 }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    resp.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
                 // Forward every upstream chunk verbatim (O(1) pass-through) while sniffing each complete
                 // line for the terminal usage object; `metered_passthrough` is the shared streaming
                 // primitive (the chunk-boundary property test exercises this exact path).
                 Ok(metered_passthrough(resp.bytes_stream(), sniff_usage_line))
+            },
+        )
+        .await
+    }
+
+    async fn stream_qualified(
+        &self,
+        req: ProviderRequest,
+        _delivery: crate::QualifiedStreamDelivery,
+    ) -> Result<crate::QualifiedProviderStream, ProviderError> {
+        validate_openai_chat_messages(&req.body)?;
+        let context = req.attempt_context.clone();
+        let model = req.model.clone();
+        let headers = self.request_headers(&req);
+        let mut body = req.body;
+        body["stream"] = Value::Bool(true);
+        if !body.get("stream_options").is_some_and(Value::is_object) {
+            body["stream_options"] = json!({});
+        }
+        body["stream_options"]["include_usage"] = Value::Bool(true);
+        let mut request = self.client.post(self.chat_url()).headers(headers);
+        if !self.api_key.is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
+        crate::attempt::observe_qualified_stream(
+            context,
+            self.slug(),
+            Some(&model),
+            sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+            self.stream_usage_profile,
+            Default::default(),
+            |facts| async move {
+                let response = request
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|error| ProviderError::Transport(error.to_string()))?;
+                facts.record_peer_headers(
+                    self.peer_role,
+                    response.status().as_u16(),
+                    response.headers(),
+                    self.request_id_header,
+                );
+                if !response.status().is_success() {
+                    return Err(crate::peer::error_for_response(
+                        self.peer_role,
+                        response,
+                        self.request_id_header,
+                    )
+                    .await);
+                }
+                let usage_convention = crate::peer::resolve(
+                    self.peer_role,
+                    sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                    response.headers(),
+                )?;
+                facts.record_usage_convention(usage_convention);
+                let request_id = crate::peer::response_request_id(
+                    self.peer_role,
+                    response.headers(),
+                    self.request_id_header,
+                );
+                use futures_util::StreamExt;
+                let raw: crate::raw::RawChunkStream =
+                    Box::pin(response.bytes_stream().map(|chunk| {
+                        chunk.map_err(|error| ProviderError::Transport(error.to_string()))
+                    }));
+                Ok((raw, request_id))
             },
         )
         .await
@@ -733,7 +853,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, ProviderError::Transport(_)));
+        assert!(matches!(error, ProviderError::OutputProjection(_)));
         let observations = receiver.drain();
         assert!(matches!(
             &observations[1].phase,

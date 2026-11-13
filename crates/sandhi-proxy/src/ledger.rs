@@ -1,19 +1,15 @@
-//! The proxy's enforcement ledger — the ADR-0005 lease model, made durable when `SANDHI_STORE` is
-//! set (ADR-0005 step 2, the proxy repoint).
+//! The proxy's supplied enforcement ledger and historical lease-tool API.
 //!
-//! [`ProxyState.ledger`](crate::ProxyState) is a [`ProxyLedger`]: one of two arms behind the same
-//! reserve-a-ceiling → settle-by-id contract.
+//! HTTP generation uses only the canonical paired execution owner against the
+//! validated single file-backed [`ProxyLedger::Durable`] arm. It never calls the
+//! older unpaired `reserve`/`settle`/dedup methods or admits storage failures.
 //!
-//! - [`ProxyLedger::Durable`] — a [`SqliteLedger`]: caps + spend + in-flight leases persist, so a
-//!   restart no longer zeroes accrued spend (ADR-0005 D3), spend is measured over calendar windows
-//!   (D5), and a crashed request's lease is reclaimed rather than leaking capacity (D2).
-//! - [`ProxyLedger::Memory`] — a [`InMemoryLedger`]: the volatile dev / fallback path (spend + leases
-//!   reset on restart). It carries no policy notion of its own, so a `Warn` (soft-cap) scope is
-//!   stored uncapped here; the durable arm enforces `Warn` natively.
-//!
-//! D6 fail-open/closed lives here, over the durable arm's fallible API: a `Block` scope fails closed
-//! (a backend error denies — a hard cap must never admit on a blind write), a `Warn` scope fails
-//! open (admit, unmetered). Neutral tokens throughout — no dollars.
+//! The memory arm and lower-level historical lease operations remain available
+//! for read-only operator composition, migration tools and legacy row handling.
+//! Their old Warn fail-open outcome does not authorize HTTP dispatch. New paired
+//! unknown executions retain liability through restart and never settle at zero
+//! merely because a client disconnects or usage is unavailable. Neutral units
+//! throughout; no dollar pricing or second allowance engine.
 
 use std::sync::Mutex;
 
@@ -48,7 +44,7 @@ pub enum ProxyLedger {
 }
 
 impl ProxyLedger {
-    /// A volatile in-memory ledger (dev / no-`SANDHI_STORE` fallback).
+    /// A volatile ledger for tools/read-only states; unsupported for HTTP execution.
     #[must_use]
     pub fn in_memory() -> Self {
         Self::Memory(InMemoryLedger::new())

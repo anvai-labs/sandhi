@@ -132,8 +132,11 @@ def assert_closed(result, component):
     assert process.poll() == 2, log.read_text()
     with pytest.raises(httpx.TransportError):
         client.get("/readyz")
-    diagnostic = f"sandhi-proxy: startup failed: configured_store_unavailable component={component}"
-    assert diagnostic in log.read_text().splitlines()
+    if component == "topology":
+        assert "requires SANDHI_LEDGER_SHARDS=1" in log.read_text()
+    else:
+        diagnostic = f"sandhi-proxy: startup failed: configured_store_unavailable component={component}"
+        assert diagnostic in log.read_text().splitlines()
     assert "falling back to in-memory" not in log.read_text()
     assert REAL_OPENAI_KEY not in log.read_text()
 
@@ -181,14 +184,16 @@ def test_healthy_base_with_unopenable_shard_fails_startup(store_process, gated_p
         connection.execute("INSERT INTO retained_data VALUES('unchanged')")
         connection.commit()
     Path(str(database) + "-ledger-shard-0.db").mkdir()
+    original = database.read_bytes()
     with store_process(database, shards=2) as result:
-        assert_closed(result, "ledger")
+        assert_closed(result, "topology")
+    assert database.read_bytes() == original
     assert gated_provider.requests == []
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("SELECT * FROM retained_data").fetchall() == [("unchanged",)]
 
 
-@pytest.mark.parametrize("component,table", [("vault", "vault"), ("vkeys", "virtual_keys"), ("alerts", "alert_rules")])
+@pytest.mark.parametrize("component,table", [("vault", "vault"), ("backends", "backends"), ("routes", "logical_routes"), ("vkeys", "virtual_keys"), ("alerts", "alert_rules")])
 def test_configured_component_initialization_failure_is_fatal(store_process, tmp_path, component, table):
     database = tmp_path / "usage.db"
     with closing(sqlite3.connect(database)) as connection:
@@ -217,7 +222,7 @@ def test_non_utf8_store_configuration_is_not_implicit_memory(store_process):
 
 
 @pytest.mark.parametrize("durable", [False, True])
-def test_explicit_no_store_and_valid_store_remain_healthy_with_unavailable_broker(store_process, gated_provider, tmp_path, durable):
+def test_canonical_store_requirement_and_valid_store_with_unavailable_broker(store_process, gated_provider, tmp_path, durable):
     database = tmp_path / "usage.db"
     if durable:
         with closing(sqlite3.connect(database)) as connection:
@@ -230,6 +235,10 @@ def test_explicit_no_store_and_valid_store_remain_healthy_with_unavailable_broke
             connection.commit()
     with store_process(database if durable else None) as result:
         process, client, ready, _log = result
+        if not durable:
+            assert_closed(result, "configuration")
+            assert gated_provider.requests == []
+            return
         assert ready and process.poll() is None
         if durable:
             assert "credential not activated" in _log.read_text()

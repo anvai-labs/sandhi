@@ -115,6 +115,7 @@ def connect(page, client):
     page.get_by_role("button", name="Use token", exact=True).click()
     for panel in ("usage", "keys", "budgets"):
         expect(page.locator("#" + panel)).to_have_attribute("data-state", "ready")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Keys & credentials', exact=True).click()
     page.get_by_text("Add a credential", exact=True).click()
     page.get_by_label("Credential source").select_option("reference")
     expect(page.locator("#c-secret")).to_be_disabled()
@@ -129,7 +130,8 @@ def register(page, upstream, *, label="default"):
         page.get_by_role("button", name="Add", exact=True).click()
     response = completed.value
     sent = response.request.post_data_json
-    assert set(sent) == {"provider", "label", "base_url"}, "reference form must never send a secret"
+    assert set(sent) == {"provider", "label", "base_url", "scheme"}, "reference form must never send a secret"
+    assert sent["scheme"] == "api_key", "reference onboarding must retain the selected API authentication scheme"
     assert sent["provider"] == "openai" and sent["label"] == label
     return response
 
@@ -195,11 +197,12 @@ def verify_attribution(page, client, database, steps):
     expect(page.locator("#usage")).to_have_attribute("data-state", "ready")
     expect(page.locator("#usage")).to_contain_text(SUBJECT)
     expect(page.locator("#usage")).to_contain_text(GROUP)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Run explorer', exact=True).click()
     page.get_by_label("Run ID", exact=True).fill(RUN)
     page.get_by_role("button", name="Look up", exact=True).click()
     expect(page.locator("#run-tree")).to_have_attribute("data-state", "ready")
     expect(page.locator("#run-tree")).to_be_visible()
-    expect(page.locator("#run-tree")).to_contain_text(f"Total: {14 * len(steps)} billable tokens across {len(steps)} calls")
+    expect(page.locator("#run-tree")).to_contain_text(f"Total: {14 * len(steps)} observed token units across {len(steps)} calls")
     for step in steps:
         rendered = page.locator("#run-tree .step").filter(has_text=step)
         expect(rendered).to_have_count(1)
@@ -208,6 +211,7 @@ def verify_attribution(page, client, database, steps):
 
 
 def budget(page, client, limit):
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Budgets", exact=True).click()
     page.locator("#b-scope").fill(SCOPE)
     page.locator("#b-limit").fill(str(limit))
     page.locator("#b-window").select_option("total")
@@ -242,6 +246,7 @@ def verify_budget_row(page, saved, *, timeout=5000):
 def test_budget_decision_rejects_incorrect_displayed_limit(page, broker):
     client, _daemon = broker
     connect(page, client)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     saved = budget(page, client, 0)
     page.locator("#budgets tr").filter(has_text=SCOPE).locator("td").nth(1).evaluate(
@@ -264,6 +269,7 @@ def test_browser_onboarding_displayed_key_attribution_and_budget_decisions(
     connect(page, client)
     assert register(page, upstream).status == 201
     expect(page.locator("#c-result")).to_contain_text("Registered openai:default")
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Keys & credentials', exact=True).click()
     page.get_by_text("Mint a virtual key", exact=True).click()
     page.get_by_label("Upstream", exact=True).fill("openai:default")
     page.get_by_label("Subject", exact=True).fill(SUBJECT)
@@ -288,6 +294,7 @@ def test_browser_onboarding_displayed_key_attribution_and_budget_decisions(
         "billable_tokens": 14, "attribution_verified": True, "displayed_key_used": True,
         "browser_run_verified": True, "read_only_broker": True,
     })
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     budget(page, client, 0)
     before_sql = checkpoint(daemon.database)
@@ -305,6 +312,7 @@ def test_browser_onboarding_displayed_key_attribution_and_budget_decisions(
     assert len(upstream.requests) == before_upstream + 1
     verify_attribution(page, client, daemon.database, ["first-request", "after-budget-recovery"])
     read_only(daemon)
+    page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Budgets", exact=True).click()
     evidence(decision_artifacts, page, "budget-recovery", {
         "request_status": 200, "scope_limit": 100000, "persisted_calls": 2,
         "billable_tokens": 28, "attribution_verified": True, "browser_run_verified": True,

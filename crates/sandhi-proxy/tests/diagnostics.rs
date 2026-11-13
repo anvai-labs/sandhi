@@ -1,4 +1,5 @@
 //! ADR-0011 admin boundary tests. No live credentials, model calls, or body capture.
+mod support;
 use std::{
     collections::HashMap,
     sync::{
@@ -18,7 +19,7 @@ use sandhi_core::{
     Backend, CacheReadObservation, CacheReadStatus, InMemorySink, KeyStore, LatencySource, Sink,
     UsageEvent, VirtualKey,
 };
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyState};
 use sandhi_store::{
     diagnostics::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES},
     SqliteStore,
@@ -41,9 +42,9 @@ fn state(
         upstream_ref: "unused".into(),
         ..Default::default()
     });
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         Arc::new(InMemorySink::new()),
         HashMap::new(),
         store,

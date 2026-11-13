@@ -1,0 +1,61 @@
+{
+  "evidence_kind": "live_direct_ffi_stream_profiles",
+  "source_parent": "a74a8f14a326ba93d745887a22007d9b9080682f",
+  "factory_sha256": "fa763a65fde4ed94dc01f29c32f8b6bca5f76a87d9ac1f5be55a0eaec8464ce4",
+  "wheel_sha256": "e9d39f602ec3916ac3c0aa63e8499af146a0ac1afcb40cec1b919864e372f211",
+  "limits": [
+    "Two tiny direct streaming calls; no gateway or receipt joins.",
+    "No cold/warm, savings, full cache lifecycle or subscription qualification.",
+    "Current coding models endpoint returned HTTP 200 and listed glm-4.6 before this run.",
+    "External credential loaded into memory only; no raw model bodies, headers or error bodies exported.",
+    "This export did not select the canonical reasoning_included field; no reasoning addition or total billable claim is derived from it."
+  ],
+  "cells": [
+    {
+      "protocol": "chat_completions",
+      "profile": "openai_terminal_chunk_usage",
+      "model": "glm-4.6",
+      "max_retries": 0,
+      "result": "pass",
+      "final_count": 1,
+      "finish": true,
+      "text_present": true,
+      "usage": {
+        "tokens_in": 16,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "tokens_out": 3,
+        "reasoning_tokens": 2,
+        "completeness": "final",
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        }
+      },
+      "event_count": 7
+    },
+    {
+      "protocol": "anthropic_messages",
+      "profile": "anthropic_implicit_cache",
+      "model": "glm-4.6",
+      "max_retries": 0,
+      "result": "pass",
+      "final_count": 1,
+      "finish": true,
+      "text_present": true,
+      "usage": {
+        "tokens_in": 16,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "tokens_out": 3,
+        "reasoning_tokens": null,
+        "completeness": "final",
+        "cache_read_observation": {
+          "status": "reported",
+          "source": "origin_usage"
+        }
+      },
+      "event_count": 7
+    }
+  ]
+}

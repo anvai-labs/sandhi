@@ -31,12 +31,15 @@ def test_configured_buffer_metrics_use_real_capacities_and_existing_auth(dashboa
         assert all("dashboard-test-admin" not in line for line in samples)
 
 
-@pytest.mark.parametrize("dashboard", [{"store": False}], indirect=True)
-def test_unconfigured_buffers_are_not_reported_as_active_zero_backlogs(dashboard):
+def test_mandatory_store_default_buffers_report_real_active_capacities(dashboard):
     response = httpx.get(dashboard.base + "/metrics", headers=dashboard.headers)
     assert response.status_code == 200
     samples = [line for line in response.text.splitlines() if line.startswith("sandhi_buffer_")]
-    assert samples == [
-        'sandhi_buffer_configured{buffer="usage"} 0',
-        'sandhi_buffer_configured{buffer="alerts"} 0',
-    ]
+    assert len(samples) == 10
+    for buffer, capacity in [("usage", 1024), ("alerts", 256)]:
+        assert f'sandhi_buffer_configured{{buffer="{buffer}"}} 1' in samples
+        assert f'sandhi_buffer_capacity{{buffer="{buffer}"}} {capacity}' in samples
+        for metric in ("queued", "in_flight", "dropped_total"):
+            prefix = f'sandhi_buffer_{metric}{{buffer="{buffer}"}} '
+            value, = [line.removeprefix(prefix) for line in samples if line.startswith(prefix)]
+            assert int(value) >= 0

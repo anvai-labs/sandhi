@@ -92,6 +92,21 @@ def _start_server(handler_cls):
     return server
 
 
+def _standard_chat_sse(frames):
+    """Build complete standard Chat chunks with a distinct totals event."""
+    events=[]
+    for original in frames:
+        frame={**original, "object":"chat.completion.chunk"}
+        choices=[{"index":index, **choice} for index,choice in enumerate(frame.get("choices",[]))]
+        frame["choices"]=choices
+        usage=frame.pop("usage",None)
+        if choices or usage is None:
+            events.append(frame)
+        if usage is not None:
+            events.append({"object":"chat.completion.chunk","choices":[],"usage":usage})
+    return ("".join(f"data: {json.dumps(event)}\n\n" for event in events)+"data: [DONE]\n\n").encode()
+
+
 def test_cache_observation_precedes_consumer_stopping_at_first_content():
     frame = {"id": "r", "model": "gpt-test",
              "choices": [{"delta": {"content": "he"}, "finish_reason": None}],
@@ -141,6 +156,102 @@ def test_cache_observation_precedes_consumer_stopping_at_first_content():
         server.server_close()
 
 
+def test_native_stream_opt_in_preserves_wire_state_without_duplicate_usage():
+    frames = [
+        {"id": "fixture", "model": "fixture", "choices": [{"delta": {"content": "ok", "provider_state": "opaque"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {
+            "prompt_tokens": 100, "completion_tokens": 2,
+            "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 30}}},
+    ]
+    body = _standard_chat_sse(frames)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = _start_server(Handler)
+    try:
+        provider = sg.ProviderRuntime().openai_compat(
+            "fixture", f"http://127.0.0.1:{server.server_port}/v1", "fixture-key", max_retries=0
+        )
+
+        async def consume(native):
+            request = {"model": "fixture", "messages": [{"role": "user", "content": "hi"}]}
+            if native:
+                request["include_native_stream"] = True
+            return [json.loads(value) async for value in provider.stream_json(json.dumps(request))]
+
+        with pytest.raises(sg.SandhiProviderError) as refused:
+            asyncio.run(consume(False))
+        assert json.loads(str(refused.value))["code"] == "output_projection_error"
+        assert json.loads(str(refused.value))["retryable"] is False
+        for native in (True,):
+            events = asyncio.run(consume(native))
+            attachments = [event["frame"] for event in events if event["event"] == "native_frame"]
+            assert len(attachments) == 4
+            if native:
+                assert all(frame["endpoint_family"] == "openai_chat_completions" for frame in attachments)
+                assert '"provider_state": "opaque"' in attachments[0]["sse"]
+                assert attachments[-1]["sse"] == "data: [DONE]\n\n"
+            assert "".join(event["delta"] for event in events if event["event"] == "text_delta") == "ok"
+            final = [event["usage"] for event in events if event["event"] == "usage" and event["usage"]["completeness"] == "final"]
+            assert len(final) == 1
+            assert [final[0][key] for key in ("tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out")] == [10, 60, 30, 2]
+            assert events[-1]["event"] == "finish"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_explicit_cache_suppression_and_undeclared_automatic_intent_cross_real_binding():
+    seen = []
+    encoded = json.dumps({"id": "fixture", "model": "fixture", "content": [{"type": "text", "text": "ok"}],
+                          "stop_reason": "end_turn", "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers["content-length"]))))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *_args):
+            pass
+
+    server = _start_server(Handler)
+    try:
+        provider = sg.ProviderRuntime().provider("anthropic", "fixture", "fixture-key",
+            base_url=f"http://127.0.0.1:{server.server_port}", max_retries=0)
+
+        async def run():
+            request = {"model": "fixture", "messages": [{"role": "system", "content": "policy"},
+                       {"role": "user", "content": "hello"}], "max_output_tokens": 16}
+            await provider.complete_json(json.dumps(request))
+            request["cache_intent"] = {"mode": "suppress_gateway"}
+            await provider.complete_json(json.dumps(request))
+            request["cache_intent"] = {"mode": "auto"}
+            with pytest.raises(sg.SandhiProviderError, match="requires declared"):
+                await provider.complete_json(json.dumps(request))
+
+        asyncio.run(run())
+        assert len(seen) == 2
+        assert seen[0]["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in seen[1]["system"][0]
+        assert all("cache_intent" not in body and "compiled_cache" not in body for body in seen)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_contract_discovery_and_schemas():
     assert sg.wire_contract_version() == "1"
     assert (
@@ -150,6 +261,8 @@ def test_contract_discovery_and_schemas():
     assert descriptor["slug"] == "anthropic"
     assert descriptor["endpoint_family"] == "anthropic_messages"
     schema = json.loads(sg.chat_contract_schema_json("chat-request.v1"))
+    assert "cache_intent" in schema["properties"]
+    assert "compiled_cache" not in schema["properties"]
     assert schema["title"] == "ChatRequestV1"
 
 
@@ -228,12 +341,15 @@ def test_persistent_typed_provider_complete_and_stream():
             },
         }
     ).encode()
-    stream_body = (
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
-        '"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n'
-        "data: [DONE]\n\n"
-    ).encode()
+    stream_body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r2',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}],
+  'id': 'r2',
+  'model': 'gpt-test',
+  'usage': {'completion_tokens': 3,
+            'prompt_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 4}}}])
 
     class Handler(BaseHTTPRequestHandler):
         calls = 0
@@ -303,12 +419,13 @@ def test_per_call_wire_headers_ride_and_cannot_override_the_credential():
             "usage": {"prompt_tokens": 10, "completion_tokens": 3},
         }
     ).encode()
-    stream_body = (
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n'
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],'
-        '"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n'
-        "data: [DONE]\n\n"
-    ).encode()
+    stream_body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r2',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}],
+  'id': 'r2',
+  'model': 'gpt-test',
+  'usage': {'completion_tokens': 3, 'prompt_tokens': 10}}])
 
     class Handler(BaseHTTPRequestHandler):
         calls = 0
@@ -386,14 +503,16 @@ def test_static_headers_json_reaches_all_four_families():
     bodies = {
         "/v1/messages": {"id": "m1", "type": "message", "role": "assistant",
                          "content": [{"type": "text", "text": "ok"}],
-                         "usage": {"input_tokens": 2, "output_tokens": 1}},
+                         "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}},
         "/models/gemini-x:generateContent": {
             "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
             "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1}},
         "/v2/chat": {"id": "r1", "message": {"content": [{"type": "text", "text": "ok"}]},
-                     "usage": {"billed_units": {"input_tokens": 2, "output_tokens": 1}}},
+                     "finish_reason": "COMPLETE",
+                     "usage": {"tokens": {"input_tokens": 2, "output_tokens": 1},
+                               "billed_units": {"input_tokens": 1, "output_tokens": 0}}},
         "/api/chat": {"message": {"role": "assistant", "content": "ok"}, "done": True,
-                      "prompt_eval_count": 2, "eval_count": 1},
+                      "done_reason": "stop", "prompt_eval_count": 2, "eval_count": 1},
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -471,7 +590,7 @@ def test_anthropic_bearer_auth_crosses_typed_ffi_without_api_key_header():
             "model": "claude-test",
             "content": [{"type": "text", "text": "ok"}],
             "stop_reason": "end_turn",
-            "usage": {"input_tokens": 2, "output_tokens": 1},
+            "usage": {"input_tokens": 2, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
         }
     ).encode()
 
@@ -654,7 +773,7 @@ def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
     stream_body = (
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n'
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n'
-        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n'
     ).encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -701,6 +820,8 @@ def test_chatgpt_responses_profile_aggregates_required_upstream_stream():
 
         response = json.loads(asyncio.run(complete()))
         assert response["output"]["content"] == "ok"
+        assert response["usage"]["completeness"] == "final"
+        assert response["usage"]["attempts"] == 1
         assert Handler.request_body["instructions"] == "be precise"
         assert Handler.request_body["store"] is False
         assert Handler.request_body["stream"] is True
@@ -1262,12 +1383,11 @@ def test_stream_setup_timeout_kwarg_bounds_time_to_first_byte():
     class SlowHeaders(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             time.sleep(0.6)
-            body = (
-                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{"content":"he"},'
-                '"finish_reason":null}]}\n\n'
-                'data: {"id":"r1","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
-                "data: [DONE]\n\n"
-            ).encode()
+            body = _standard_chat_sse([{'choices': [{'delta': {'content': 'he'}, 'finish_reason': None}],
+  'id': 'r1',
+  'model': 'gpt-test'},
+ {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'id': 'r1', 'model': 'gpt-test'},
+ {'choices': [], 'usage': {'completion_tokens': 1, 'prompt_tokens': 2}}])
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("content-length", str(len(body)))

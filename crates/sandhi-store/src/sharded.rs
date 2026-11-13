@@ -165,6 +165,21 @@ impl ShardedLedger {
             .settle_with_evidence_durable(scope, reservation_id, charged_tokens)
     }
 
+    /// Open only native-reference metadata on this validated original ledger's
+    /// actual connection path. No caller-selected second database or ledger.
+    pub fn open_native_reference_store(
+        &self,
+    ) -> Result<crate::references::ReferenceStore, &'static str> {
+        let ledger = self
+            .tracked_ledger()
+            .map_err(|_| "native references require the original single file-backed ledger")?;
+        let path = ledger
+            .reference_store_path()
+            .ok_or("native references require the original single file-backed ledger")?;
+        crate::references::ReferenceStore::open(&path)
+            .map_err(|_| "native reference storage unavailable")
+    }
+
     /// Validate tracked operation topology without reopening or replacing the ledger.
     pub fn validate_tracked_durable(&self) -> Result<(), EvidenceError> {
         drop(self.tracked_ledger()?);
@@ -196,6 +211,93 @@ impl ShardedLedger {
     ) -> Result<Option<String>, EvidenceError> {
         self.tracked_ledger()?
             .request_id_durable(scope, execution_id)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_contextual_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+        request_id: &str,
+        context: &crate::ledger::evidence::context::ExecutionContext,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        self.tracked_ledger()?.reserve_contextual_durable(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            request_id,
+            context,
+        )
+    }
+    pub fn execution_context_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<crate::ledger::evidence::context::ExecutionContext>, EvidenceError> {
+        self.tracked_ledger()?
+            .execution_context_durable(scope, execution_id)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_paired_contextual_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+        request_id: &str,
+        context: &crate::ledger::evidence::context::ExecutionContext,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        self.reserve_paired_contextual_durable_observed(
+            scope,
+            ceiling,
+            now,
+            ttl,
+            retained_limit,
+            request_id,
+            context,
+            None,
+        )
+    }
+    /// Optional diagnostics do not change tracked topology or atomic admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_paired_contextual_durable_observed(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+        request_id: &str,
+        context: &crate::ledger::evidence::context::ExecutionContext,
+        progress: Option<&crate::ledger::evidence::AdmissionProgress>,
+    ) -> Result<IntentAdmission, EvidenceError> {
+        if let Some(progress) = progress {
+            progress.mark(crate::ledger::evidence::AdmissionStage::ShardLock);
+        }
+        self.tracked_ledger()?
+            .reserve_paired_contextual_durable_observed(
+                scope,
+                ceiling,
+                now,
+                ttl,
+                retained_limit,
+                request_id,
+                context,
+                progress,
+            )
+    }
+    pub fn execution_back_leg_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<sandhi_core::Reservation>, EvidenceError> {
+        self.tracked_ledger()?
+            .execution_back_leg_durable(scope, execution_id)
     }
     pub fn recovery_scopes_durable(
         &self,
@@ -248,6 +350,33 @@ impl ShardedLedger {
             usage,
             cache_read_bp,
         )
+    }
+
+    pub fn record_terminal_with_attempt_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+        usage: &sandhi_core::UsageV2,
+        cache_read_bp: u32,
+        attempt: &crate::ledger::evidence::AttemptEvidence,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        let mut ledger = self.tracked_ledger()?;
+        let original = Self::checked_intent(&ledger, intent)?;
+        ledger.record_terminal_with_attempt_durable(
+            &original.reservation.scope,
+            &original.execution_id,
+            usage,
+            cache_read_bp,
+            attempt,
+        )
+    }
+
+    pub fn physical_attempt_durable(
+        &self,
+        scope: &str,
+        execution_id: &str,
+    ) -> Result<Option<crate::ledger::evidence::PhysicalAttempt>, EvidenceError> {
+        self.tracked_ledger()?
+            .physical_attempt_durable(scope, execution_id)
     }
 
     // One full binding check shared by terminal evidence and dispatch transitions.

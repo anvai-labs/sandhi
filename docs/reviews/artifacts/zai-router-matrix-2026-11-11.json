@@ -1,0 +1,1138 @@
+{
+  "started_at": "2026-11-11T21:35:53.776869+00:00",
+  "model": "glm-5.3",
+  "endpoints": {
+    "chat": "https://api.z.ai/api/coding/paas/v4",
+    "messages": "https://api.z.ai/api/anthropic",
+    "responses": "https://api.z.ai/api/v1"
+  },
+  "cache_policy": "native_only / preserve_native",
+  "sdk_versions": {
+    "openai": "2.18.0",
+    "anthropic": "0.79.0",
+    "google-genai": "1.75.0"
+  },
+  "sdk_retries": 0,
+  "cache_pairs": false,
+  "cells": [
+    {
+      "backend": "chat",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-chat-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. They want only the code returned. An identity function takes a value and returns that same value.\n\nThe simplest implementation:\n\n```python\ndef identity(x):\n    return x\n```\n\nThey said \"Return only the code\" so I should just return the code without explanation. Should I wrap it in a code block? Probably yes, for formatting, but \"only the code\" suggests minimal output. A code block is the standard way to present code. I'll just give the code block with nothing else.",
+      "usage": [
+        {
+          "completion_tokens": 126,
+          "prompt_tokens": 25,
+          "total_tokens": 151,
+          "completion_tokens_details": {
+            "reasoning_tokens": 112
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 5.605,
+      "usage_rows_observed": 1
+    },
+    {
+      "backend": "chat",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-chat-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity` that returns its argument. They want only the code.",
+      "usage": [
+        {
+          "completion_tokens": 36,
+          "prompt_tokens": 25,
+          "total_tokens": 61,
+          "completion_tokens_details": {
+            "reasoning_tokens": 22
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.564,
+      "usage_rows_observed": 1
+    },
+    {
+      "backend": "chat",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-messages-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 76
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 3.031,
+      "usage_rows_observed": 3
+    },
+    {
+      "backend": "chat",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-messages-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code returned.\n\nThe simplest version:\n\n```python\ndef identity(x):\n    return x\n```\n\nCould also use type hints or make it generic, but \"return only the code\" suggests keeping it minimal. A slightly more complete version could be:\n\n```python\ndef identity(x):\n    return x\n```\n\nThat's it. I'll return just the code as requested.",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 113
+        }
+      ],
+      "events": [
+        null,
+        "end_turn"
+      ],
+      "elapsed_seconds": 4.393,
+      "usage_rows_observed": 4
+    },
+    {
+      "backend": "chat",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-gemini-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 26,
+          "total_token_count": 65
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 2.566,
+      "usage_rows_observed": 5
+    },
+    {
+      "backend": "chat",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-gemini-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 39,
+          "total_token_count": 78
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.546,
+      "usage_rows_observed": 6
+    },
+    {
+      "backend": "chat",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-responses-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 40,
+          "output_tokens_details": {
+            "reasoning_tokens": 26
+          }
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 2.513,
+      "usage_rows_observed": 7
+    },
+    {
+      "backend": "chat",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "chat-responses-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 98,
+          "output_tokens_details": {
+            "reasoning_tokens": 84
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 2.402,
+      "usage_rows_observed": 8
+    },
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-chat-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 148,
+          "prompt_tokens": 25,
+          "total_tokens": 173,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 2.623,
+      "usage_rows_observed": 9
+    },
+    {
+      "backend": "messages",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-chat-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its input unchanged. They want only the code.",
+      "usage": [
+        {
+          "completion_tokens": 39,
+          "prompt_tokens": 25,
+          "total_tokens": 64,
+          "completion_tokens_details": {},
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.492,
+      "usage_rows_observed": 10
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-messages-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They said \"Return only the code.\"\n\nThe simplest version:\n\n```python\ndef identity(x):\n    return x\n```\n\nOr a more general version using *args, but the standard identity function is the simple one-argument version. I'll go with the simple one. They asked for only the code, so no explanation.",
+      "usage": [
+        {
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 99,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 2.615,
+      "usage_rows_observed": 11
+    },
+    {
+      "backend": "messages",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-messages-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "The user wants a Python identity function named `identity`. An identity function returns its argument unchanged. They want only the code.",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 39,
+          "server_tool_use": {
+            "web_search_requests": 0
+          },
+          "service_tier": "standard"
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 1.548,
+      "usage_rows_observed": 12
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-gemini-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 118,
+          "prompt_token_count": 25,
+          "total_token_count": 143
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 2.617,
+      "usage_rows_observed": 13
+    },
+    {
+      "backend": "messages",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-gemini-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 39,
+          "prompt_token_count": 25,
+          "total_token_count": 64
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 1.476,
+      "usage_rows_observed": 14
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-responses-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 39,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 1.347,
+      "usage_rows_observed": 15
+    },
+    {
+      "backend": "messages",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "messages-responses-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 40,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 1.688,
+      "usage_rows_observed": 16
+    },
+    {
+      "backend": "responses",
+      "client": "chat",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-chat-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 75,
+          "prompt_tokens": 25,
+          "total_tokens": 100,
+          "completion_tokens_details": {
+            "reasoning_tokens": 61
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 1.629,
+      "usage_rows_observed": 17
+    },
+    {
+      "backend": "responses",
+      "client": "chat",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-chat-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "completion_tokens": 138,
+          "prompt_tokens": 25,
+          "total_tokens": 163,
+          "completion_tokens_details": {
+            "reasoning_tokens": 124
+          },
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      ],
+      "events": [
+        "stop"
+      ],
+      "elapsed_seconds": 3.45,
+      "usage_rows_observed": 18
+    },
+    {
+      "backend": "responses",
+      "client": "messages",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-messages-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 85
+        }
+      ],
+      "events": [
+        "end_turn"
+      ],
+      "elapsed_seconds": 2.442,
+      "usage_rows_observed": 19
+    },
+    {
+      "backend": "responses",
+      "client": "messages",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-messages-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "input_tokens": 25,
+          "output_tokens": 46
+        }
+      ],
+      "events": [
+        null,
+        "end_turn"
+      ],
+      "elapsed_seconds": 1.207,
+      "usage_rows_observed": 20
+    },
+    {
+      "backend": "responses",
+      "client": "gemini",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-gemini-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 94,
+          "total_token_count": 133
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 2.334,
+      "usage_rows_observed": 21
+    },
+    {
+      "backend": "responses",
+      "client": "gemini",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-gemini-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "candidates_token_count": 14,
+          "prompt_token_count": 25,
+          "thoughts_token_count": 35,
+          "total_token_count": 74
+        }
+      ],
+      "events": [
+        "FinishReason.STOP"
+      ],
+      "elapsed_seconds": 4.279,
+      "usage_rows_observed": 22
+    },
+    {
+      "backend": "responses",
+      "client": "responses",
+      "stream": false,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-responses-0-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 200,
+          "output_tokens_details": {
+            "reasoning_tokens": 186
+          },
+          "total_tokens": 225
+        }
+      ],
+      "events": [
+        "completed"
+      ],
+      "elapsed_seconds": 3.611,
+      "usage_rows_observed": 23
+    },
+    {
+      "backend": "responses",
+      "client": "responses",
+      "stream": true,
+      "repeat": 0,
+      "status": "ok",
+      "step_id": "responses-responses-1-0",
+      "text": "```python\ndef identity(x):\n    return x\n```",
+      "reasoning": "",
+      "usage": [
+        {
+          "input_tokens": 25,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 80,
+          "output_tokens_details": {
+            "reasoning_tokens": 66
+          },
+          "total_tokens": 105
+        }
+      ],
+      "events": [
+        "response.completed"
+      ],
+      "elapsed_seconds": 1.765,
+      "usage_rows_observed": 24
+    }
+  ],
+  "gateway_binary_sha256": "5f233f5a6ad04b76a6f64017964053348befe07a77fa88da2077eb6ebe11826d",
+  "usage_events": [
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 5472,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:00.031824723Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 112,
+      "request_id": "req_1794432954540_0",
+      "step_id": "chat-chat-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 126
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1541,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:01.619151743Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 22,
+      "request_id": "req_1794432960059_1",
+      "step_id": "chat-chat-1-0",
+      "time_to_first_token_ms": 1222,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 36
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2977,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:04.627682038Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 62,
+      "request_id": "req_1794432961634_2",
+      "step_id": "chat-messages-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 76
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 4363,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:09.025900293Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 99,
+      "request_id": "req_1794432964653_3",
+      "step_id": "chat-messages-1-0",
+      "time_to_first_token_ms": 3134,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 113
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2531,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:11.59194896Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 26,
+      "request_id": "req_1794432969050_4",
+      "step_id": "chat-gemini-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 40
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1514,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:13.139439928Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 39,
+      "request_id": "req_1794432971615_5",
+      "step_id": "chat-gemini-1-0",
+      "time_to_first_token_ms": 956,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 53
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2427,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:15.627958359Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 26,
+      "request_id": "req_1794432973189_6",
+      "step_id": "chat-responses-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 40
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2376,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:18.056214952Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 84,
+      "request_id": "req_1794432975669_7",
+      "step_id": "chat-responses-1-0",
+      "time_to_first_token_ms": 1204,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 98
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2599,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:20.767838372Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432978159_8",
+      "step_id": "messages-chat-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 148
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1467,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:22.260594271Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432980783_9",
+      "step_id": "messages-chat-1-0",
+      "time_to_first_token_ms": 1160,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2592,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:24.909962209Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432982275_10",
+      "step_id": "messages-messages-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 99
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1525,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:26.459573635Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432984924_11",
+      "step_id": "messages-messages-1-0",
+      "time_to_first_token_ms": 927,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2586,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:29.075896714Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432986481_12",
+      "step_id": "messages-gemini-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 118
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1444,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:30.553519635Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432989099_13",
+      "step_id": "messages-gemini-1-0",
+      "time_to_first_token_ms": 1042,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1323,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:31.901651316Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432990569_14",
+      "step_id": "messages-responses-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 39
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1664,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:33.590078203Z",
+      "provider": "anthropic",
+      "reasoning_included": 1,
+      "reasoning_tokens": null,
+      "request_id": "req_1794432991916_15",
+      "step_id": "messages-responses-1-0",
+      "time_to_first_token_ms": 1136,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 40
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1605,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:35.31175058Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 61,
+      "request_id": "req_1794432993696_16",
+      "step_id": "responses-chat-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 75
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 3427,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:38.763087563Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 124,
+      "request_id": "req_1794432995326_17",
+      "step_id": "responses-chat-1-0",
+      "time_to_first_token_ms": 894,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 138
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2417,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:41.205574342Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 71,
+      "request_id": "req_1794432998778_18",
+      "step_id": "responses-messages-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 85
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1185,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:42.414560881Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 32,
+      "request_id": "req_1794433001219_19",
+      "step_id": "responses-messages-1-0",
+      "time_to_first_token_ms": 768,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 46
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 2305,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:44.747551874Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 94,
+      "request_id": "req_1794433002434_20",
+      "step_id": "responses-gemini-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 108
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 4249,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:49.029257466Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 35,
+      "request_id": "req_1794433004770_21",
+      "step_id": "responses-gemini-1-0",
+      "time_to_first_token_ms": 3424,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 49
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 3577,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:52.632710245Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 186,
+      "request_id": "req_1794433009045_22",
+      "step_id": "responses-responses-0-0",
+      "time_to_first_token_ms": null,
+      "time_to_first_token_source": null,
+      "tokens_in": 25,
+      "tokens_out": 200
+    },
+    {
+      "backend": "external",
+      "cache_creation_tokens": 0,
+      "cache_read_source": "origin_usage",
+      "cache_read_status": "reported",
+      "cache_read_tokens": 0,
+      "duration_ms": 1744,
+      "duration_source": "boundary",
+      "model": "glm-5.3",
+      "occurred_at": "2026-11-11T21:36:54.443810032Z",
+      "provider": "zai",
+      "reasoning_included": 1,
+      "reasoning_tokens": 66,
+      "request_id": "req_1794433012656_23",
+      "step_id": "responses-responses-1-0",
+      "time_to_first_token_ms": 724,
+      "time_to_first_token_source": "boundary",
+      "tokens_in": 25,
+      "tokens_out": 80
+    }
+  ],
+  "gateway_exit_code": 0,
+  "finished_at": "2026-11-11T21:36:54.453031+00:00",
+  "verification": {
+    "cells": 24,
+    "durable_observations": 24,
+    "sdk_usage_matches": 24,
+    "correlation": "step_id",
+    "positive_reported_cache_reads": {
+      "chat": 0,
+      "messages": 0,
+      "responses": 0
+    },
+    "errors": []
+  }
+}

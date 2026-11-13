@@ -1,11 +1,17 @@
 # Streaming route deadlines
 
-Standalone operators can opt into `streaming_deadlines` in `SANDHI_CONFIG`.
+The current standalone candidate always selects a bounded streaming policy.
+Without an explicit section, its source defaults are 30 seconds for setup,
+90 seconds for idle gaps and 180 seconds for the body, within a 240-second
+ceiling. Operators can override them through `streaming_deadlines` in
+`SANDHI_CONFIG`. These are configured source defaults, not proof of a particular
+process's effective override or a physical token guarantee.
+
 The section is startup-only: config preview/apply reports active and desired
 policies and `restart required`. Invalid configuration or an unregistered
-credential endpoint fails startup. Without this section, setup remains 30 seconds,
-idle remains 90 seconds, and the body remains pull-driven without a total lifetime
-(unless a Rust embedder sets the existing body-only option).
+credential endpoint fails startup. The pure provider FFI has no ledger owner;
+Rust library body-only options are described separately in
+[streaming body ownership](stream-body-lifetime.md).
 
 ```json
 {

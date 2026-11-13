@@ -1,5 +1,6 @@
 //! Protocol completion must settle measured usage before the client can close at DONE.
 //! A real TCP fake upstream deliberately keeps its response open until the test releases EOF.
+mod support;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
@@ -13,7 +14,7 @@ use sandhi_core::{
     InMemorySink, KeyStore, Sink, UsageBasis, UsageCompleteness, UsageEvent, VirtualKey,
 };
 use sandhi_providers::ProviderRuntime;
-use sandhi_proxy::{build_app, ProxyLedger, ProxyState};
+use sandhi_proxy::{build_app, ProxyState};
 use sandhi_store::{
     diagnostics::{DiagnosticQuery, DiagnosticSelector},
     SqliteStore,
@@ -96,7 +97,7 @@ async fn exercise_mode(
     newline: &str,
     width: usize,
     ending: Ending,
-    supervised: bool,
+    _supervised: bool,
 ) -> UsageEvent {
     let (tx, address, server) = origin().await;
     let capture = Arc::new(Capture {
@@ -119,28 +120,24 @@ async fn exercise_mode(
         None,
         None,
     );
-    let mut state = ProxyState::new(
+    let state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         capture.clone(),
         HashMap::from([("origin".into(), provider)]),
         None,
     );
-    if supervised {
-        state.stream_body_lifetime =
-            Some(sandhi_proxy::streaming::StreamBodyLifetime::new(Duration::from_secs(5)).unwrap());
-    }
     let state = Arc::new(state);
     let request = Request::builder().method("POST").uri("/v1/chat/completions")
         .header("authorization", "Bearer vk_terminal_fixture").header("content-type", "application/json")
         .header("x-sandhi-session", "terminal-session").header("x-sandhi-run-id", "terminal-run")
-        .body(Body::from(r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}"#)).unwrap();
-    let content = format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"hello\"}},\"finish_reason\":null}}],\"usage\":null}}{newline}{newline}");
-    let finish = format!("data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":null}}{newline}{newline}");
-    let usage = format!("data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":24,\"completion_tokens\":7,\"total_tokens\":31,\"prompt_tokens_details\":{{\"cached_tokens\":8}},\"duration_ms\":123}}}}{newline}{newline}");
-    // Intentionally stop at the newline ending DONE, not its following blank line. SDKs
-    // commonly close here; EOF must still be impossible while the sender remains alive.
-    let done = format!("data: [DONE]{newline}");
+        .body(Body::from(r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"max_tokens":64,"stream":true,"stream_options":{"include_usage":true}}"#)).unwrap();
+    let content = format!("data: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"hello\"}},\"finish_reason\":null}}],\"usage\":null}}{newline}{newline}");
+    let finish = format!("data: {{\"object\":\"chat.completion.chunk\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":null}}{newline}{newline}");
+    let usage = format!("data: {{\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{{\"prompt_tokens\":24,\"completion_tokens\":7,\"total_tokens\":31,\"prompt_tokens_details\":{{\"cached_tokens\":8}},\"duration_ms\":123}}}}{newline}{newline}");
+    // Deliver a complete DONE event while keeping the transport open. A client
+    // can close at this terminal event without observing HTTP EOF.
+    let done = format!("data: [DONE]{newline}{newline}");
     let wire = match ending {
         Ending::DropBeforeUsage => content,
         Ending::DropAfterUsage => format!("{content}{finish}{usage}"),
@@ -163,21 +160,26 @@ async fn exercise_mode(
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
     let mut received = Vec::new();
-    let mut expected_len = 0;
-    for (index, chunk) in chunks.iter().enumerate() {
-        if index != 0 {
-            tx.send(chunk.clone()).await.unwrap();
-        }
-        expected_len += chunk.len();
-        while received.len() < expected_len {
-            let bytes = tokio::time::timeout(Duration::from_secs(5), body.next())
-                .await
-                .unwrap()
-                .expect("raw bytes before EOF")
-                .unwrap();
-            received.extend_from_slice(&bytes);
-        }
+    let producer = {
+        let tx = tx.clone();
+        let remaining = chunks.into_iter().skip(1).collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for chunk in remaining {
+                tx.send(chunk).await.unwrap();
+            }
+        })
+    };
+    // Reference-bearing frames must be complete and durably authorized before
+    // exposure. Consume independently of arbitrary transport fragmentation.
+    while received.len() < wire.len() {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .unwrap()
+            .expect("raw bytes before EOF")
+            .unwrap();
+        received.extend_from_slice(&bytes);
     }
+    producer.await.unwrap();
     assert_eq!(
         received,
         wire.as_bytes(),
@@ -187,19 +189,21 @@ async fn exercise_mode(
         Ending::DrainEof | Ending::NoUsageDrain => {
             // The same terminal line is already delivered; only now permit transport EOF.
             drop(tx);
-            assert!(tokio::time::timeout(Duration::from_secs(5), body.next())
+            let terminal = tokio::time::timeout(Duration::from_secs(5), body.next())
                 .await
-                .unwrap()
-                .is_none());
+                .unwrap();
+            if matches!(ending, Ending::NoUsageDrain) {
+                assert!(terminal.unwrap().is_err());
+            } else {
+                assert!(terminal.is_none());
+            }
             drop(body);
         }
         _ => {
-            drop(body); // default accounting finishes synchronously; opt-in settlement is owned.
-            if supervised {
-                tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
-                    .await
-                    .unwrap();
-            }
+            drop(body); // The durable owner retains cleanup after downstream disconnect.
+            tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
+                .await
+                .unwrap();
             assert_eq!(
                 capture.memory.len(),
                 1,
@@ -208,11 +212,12 @@ async fn exercise_mode(
             drop(tx);
         }
     }
-    if supervised {
-        tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
-            .await
-            .unwrap();
-    }
+    // Wire EOF follows settlement publication, but the detached owner and its
+    // final operation guards may still be dropping. Observe lifecycle completion
+    // independently before asserting cleanup, including both EOF drain endings.
+    tokio::time::timeout(Duration::from_secs(5), state.lifecycle.wait_idle())
+        .await
+        .unwrap();
     server.abort();
     let _ = server.await;
     assert_eq!(state.lifecycle.active_operations(), 0);
@@ -286,7 +291,7 @@ fn assert_authoritative(event: &UsageEvent) {
 #[tokio::test]
 async fn close_immediately_at_done_retains_terminal_usage_before_transport_eof() {
     for slug in ["openai", "inferflux"] {
-        for newline in ["\n", "\r\n"] {
+        for newline in ["\n", "\r\n", "\r"] {
             for width in [usize::MAX, 7, 1] {
                 let event = exercise(slug, newline, width, Ending::CloseAtDone).await;
                 assert_authoritative(&event);
@@ -298,7 +303,7 @@ async fn close_immediately_at_done_retains_terminal_usage_before_transport_eof()
 #[tokio::test]
 async fn draining_transport_eof_retains_the_same_terminal_counts_exactly_once() {
     for slug in ["openai", "inferflux"] {
-        for newline in ["\n", "\r\n"] {
+        for newline in ["\n", "\r\n", "\r"] {
             let event = exercise(slug, newline, 7, Ending::DrainEof).await;
             assert_authoritative(&event);
         }
@@ -306,18 +311,20 @@ async fn draining_transport_eof_retains_the_same_terminal_counts_exactly_once() 
 }
 
 #[tokio::test]
-async fn genuinely_preterminal_disconnect_remains_partial_estimated() {
+async fn disconnect_preserves_only_reported_source_evidence() {
     for slug in ["openai", "inferflux"] {
         for ending in [Ending::DropBeforeUsage, Ending::DropAfterUsage] {
             let event = exercise(slug, "\r\n", 7, ending).await;
-            assert_eq!(event.usage_completeness, UsageCompleteness::Partial);
-            assert_eq!(event.usage_basis, UsageBasis::Estimated);
-            assert!(event.tokens_out > 7);
+            assert_eq!(event.usage_basis, UsageBasis::ProviderReported);
             if matches!(ending, Ending::DropAfterUsage) {
+                assert_eq!(event.usage_completeness, UsageCompleteness::Final);
+                assert_eq!(event.tokens_out, 7);
                 // A finish_reason and usage object alone are not protocol completion.
                 assert_eq!(event.tokens_in, 16);
                 assert_eq!(event.cache_read_tokens, 8);
             } else {
+                assert_eq!(event.usage_completeness, UsageCompleteness::Unavailable);
+                assert_eq!(event.tokens_out, 0);
                 assert_eq!(event.tokens_in, 0);
                 assert_eq!(event.cache_read_tokens, 0);
             }
@@ -330,9 +337,9 @@ async fn done_without_usage_does_not_invent_a_final_zero_measurement() {
     for ending in [Ending::NoUsageClose, Ending::NoUsageDrain] {
         for slug in ["openai", "inferflux"] {
             let event = exercise(slug, "\n", 7, ending).await;
-            assert_eq!(event.usage_completeness, UsageCompleteness::Partial);
-            assert_eq!(event.usage_basis, UsageBasis::Estimated);
-            assert!(event.tokens_out > 0);
+            assert_eq!(event.usage_completeness, UsageCompleteness::Unavailable);
+            assert_eq!(event.usage_basis, UsageBasis::ProviderReported);
+            assert_eq!(event.tokens_out, 0);
             assert_eq!(event.tokens_in, 0);
             assert_eq!(event.cache_read_tokens, 0);
         }
@@ -371,17 +378,14 @@ async fn streaming_fixture(
         None,
         None,
     );
-    let mut state = ProxyState::new(
+    let mut state = support::state(
         keys,
-        ProxyLedger::in_memory(),
+        support::Ledger::new(),
         capture.clone(),
         HashMap::from([("openai:origin".into(), provider)]),
         None,
     );
-    // Exercise standalone policy through the same body/settlement fixtures. The legacy
-    // library lifetime is deliberately different, so route precedence is observable.
-    state.stream_body_lifetime =
-        Some(sandhi_proxy::streaming::StreamBodyLifetime::new(Duration::from_secs(60)).unwrap());
+    // Exercise the same canonical configured deadline owner on both planes.
     state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(&serde_json::json!({
         "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"endpoints":{"openai:origin":{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
     }).to_string()).unwrap();
@@ -405,10 +409,10 @@ async fn streaming_fixture(
         .header("authorization", "Bearer vk_body")
         .header("content-type", "application/json")
         .body(Body::from(
-            r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"stream":true}"#,
+            r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"max_tokens":64,"stream":true}"#,
         ))
         .unwrap();
-    tx.send(Bytes::from_static(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")).await.unwrap();
+    tx.send(Bytes::from_static(b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")).await.unwrap();
     let response = build_app(state.clone()).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     StreamingFixture {
@@ -454,8 +458,9 @@ async fn retained_unpolled_body_closes_origin_and_settles_on_both_planes() {
             assert!(body.next().await.is_none());
             let events = capture.events();
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].usage_completeness, UsageCompleteness::Partial);
-            assert!(events[0].tokens_out > 0);
+            assert_eq!(events[0].usage_completeness, UsageCompleteness::Unavailable);
+            assert_eq!(events[0].tokens_out, 0);
+            assert_eq!(state.ledger.lock().unwrap().spent("vk:vk_body"), 0);
             server.abort();
             let _ = server.await;
         }
@@ -516,6 +521,9 @@ async fn origin_body_errors_do_not_become_clean_eof_or_translated_done() {
             .await
             .unwrap();
         assert_eq!(capture.events().len(), 1);
-        assert_eq!(capture.events()[0].outcome.as_deref(), Some("error"));
+        assert!(capture.events()[0]
+            .outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.contains("error")));
     }
 }

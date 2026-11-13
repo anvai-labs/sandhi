@@ -1,3 +1,4 @@
+mod support;
 use sandhi_core::policy::{Disposition, Engine, Identity, Registry};
 use sandhi_proxy::policy_remote::register_remotes;
 use serde_json::{json, Value};
@@ -43,9 +44,12 @@ fn run(e: &Engine, text: &str) -> Disposition {
     .disposition
 }
 fn reply(request: &wiremock::Request) -> ResponseTemplate {
+    reply_with_budget(request, 150)
+}
+fn reply_with_budget(request: &wiremock::Request, maximum_ms: u64) -> ResponseTemplate {
     let v: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(v.as_object().unwrap().len(), 8);
-    assert!(v["timeout_ms"].as_u64().unwrap() <= 150);
+    assert!(v["timeout_ms"].as_u64().unwrap() <= maximum_ms);
     ResponseTemplate::new(200).set_body_json(json!({"version":1,"id":v["id"],"evaluator":v["evaluator"],"artifact_sha256":v["artifact_sha256"],"code_sha256":v["code_sha256"],"score":if v["text"].as_str().unwrap().contains("restricted"){1.0}else{0.0}}))
 }
 async fn good(server: &MockServer) {
@@ -275,7 +279,7 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
     };
     use sandhi_core::{InMemorySink, KeyStore, VirtualKey};
     use sandhi_providers::ProviderRuntime;
-    use sandhi_proxy::{build_app, policy::PolicyGate, ProxyLedger, ProxyState};
+    use sandhi_proxy::{build_app, policy::PolicyGate};
     use sandhi_store::policy::PolicyAuditStore;
     use std::collections::HashMap;
     use tower::ServiceExt;
@@ -287,10 +291,19 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
                 .mount(&remote)
                 .await;
         } else {
-            good(&remote).await;
+            Mock::given(method("POST"))
+                .respond_with(|request: &wiremock::Request| {
+                    reply_with_budget(request, 2000).set_delay(Duration::from_millis(250))
+                })
+                .mount(&remote)
+                .await;
         }
         let upstream = MockServer::start().await;
-        let (dir, m) = manifest(&[remote.uri()]);
+        let (dir, mut m) = manifest(&[remote.uri()]);
+        // This case asserts verdicts, durable audit and no inference dispatch.
+        // Exercise a healthy reply slower than the separate 150 ms deadline
+        // fixtures, under explicit bounded semantic-test budgets on both layers.
+        m["evaluators"][0]["timeout_ms"] = json!(2000);
         let keys = KeyStore::new();
         keys.insert(VirtualKey {
             id: "client".into(),
@@ -307,19 +320,22 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
             None,
             None,
         );
-        let mut state = ProxyState::new(
+        let mut state = support::state(
             keys,
-            ProxyLedger::in_memory(),
+            support::Ledger::new(),
             Arc::new(InMemorySink::new()),
             HashMap::from([("openai".into(), provider)]),
             None,
         );
-        state.policy = Some(Arc::new(PolicyGate::new(
+        let audit = Arc::new(PolicyAuditStore::open(&dir.path().join("audit.db"), 100).unwrap());
+        state.policy = Some(Arc::new(PolicyGate::with_deadline_floor(
             engine(&m),
-            Arc::new(PolicyAuditStore::open(&dir.path().join("audit.db"), 100).unwrap()),
+            audit.clone(),
+            Duration::from_secs(5),
         )));
         let app = build_app(Arc::new(state));
         let body=serde_json::to_vec(&json!({"model":"test","max_tokens":4,"messages":[{"role":"user","content":"restricted"}]})).unwrap();
+        let started = Instant::now();
         let response = app
             .oneshot(
                 Request::builder()
@@ -332,21 +348,29 @@ async fn remote_findings_and_failures_hold_zero_provider_calls() {
             )
             .await
             .unwrap();
+        let status = response.status();
+        let receipt_present = response.headers().contains_key("x-sandhi-policy-receipt");
+        let code = response.headers().get("x-sandhi-policy-code").cloned();
+        let body = to_bytes(response.into_body(), 8192).await.unwrap();
+        let upstream_calls = upstream.received_requests().await.unwrap().len();
+        let requests = remote.received_requests().await.unwrap();
+        let audit_summary = audit.summary().unwrap();
+        let diagnostics = format!("failed={failed}, status={status}, elapsed_ms={}, receipt={receipt_present}, code={code:?}, evaluator_calls={}, provider_calls={upstream_calls}, audit={audit_summary}, response_bytes={}", started.elapsed().as_millis(), requests.len(), body.len());
+        // Record the dispatch invariant before any verdict assertion can fail.
+        assert_eq!(upstream_calls, 0, "{diagnostics}");
+        assert_eq!(requests.len(), 1, "{diagnostics}");
         assert_eq!(
-            response.status(),
+            status,
             if failed {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::FORBIDDEN
-            }
+            },
+            "{diagnostics}"
         );
-        assert!(
-            !String::from_utf8_lossy(&to_bytes(response.into_body(), 8192).await.unwrap())
-                .contains("restricted")
-        );
-        assert!(upstream.received_requests().await.unwrap().is_empty());
-        let requests = remote.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
+        assert!(receipt_present, "{diagnostics}");
+        assert_eq!(audit_summary["used"], 1, "{diagnostics}");
+        assert!(!String::from_utf8_lossy(&body).contains("restricted"));
         assert_eq!(
             requests[0].headers.get("authorization").unwrap(),
             "Bearer synthetic_evaluator_service_key_12345"

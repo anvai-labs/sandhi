@@ -42,7 +42,7 @@ fn parse_expected(s: &str) -> ParsedUsage {
 }
 
 /// Recompute `ParsedUsage` from the schema-generated OpenAI struct — an independent path from
-/// `parse_openai_usage` (which reads the raw JSON). Same formula (fresh = prompt − cached), but
+/// `parse_openai_usage` (which reads the raw JSON). Fresh input excludes reads and writes, but
 /// over spec-typed fields: if the parser read a field the spec does not declare, this diverges.
 fn oracle_openai(usage: &Value) -> ParsedUsage {
     let u: openai_schema::OpenAiCompletionUsage = serde_json::from_value(usage.clone()).unwrap();
@@ -50,6 +50,11 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
         .prompt_tokens_details
         .as_ref()
         .map(|d| d.cached_tokens)
+        .unwrap_or(0);
+    let written = u
+        .prompt_tokens_details
+        .as_ref()
+        .map(|d| d.cache_write_tokens)
         .unwrap_or(0);
     ParsedUsage {
         cache_read_observation: Some(sandhi_core::CacheReadObservation::origin(
@@ -60,9 +65,13 @@ fn oracle_openai(usage: &Value) -> ParsedUsage {
             },
         )),
         reasoning_included: Some(true),
-        tokens_in: (u.prompt_tokens - cached).max(0) as u64,
+        tokens_in: u
+            .prompt_tokens
+            .saturating_sub(cached.max(0))
+            .saturating_sub(written.max(0))
+            .max(0) as u64,
         tokens_out: u.completion_tokens.max(0) as u64,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: written.max(0) as u64,
         cache_read_tokens: cached.max(0) as u64,
         reasoning_tokens: 0,
         duration_ms: None,
@@ -104,6 +113,24 @@ fn openai_shipped_parser_agrees_with_generated_oracle() {
     assert_eq!(
         shipped, expected,
         "shipped parse_openai_usage vs ground truth"
+    );
+}
+
+#[test]
+fn openai_cache_writes_agree_with_generated_oracle() {
+    let response = serde_json::json!({"usage": {
+        "prompt_tokens":1000,"completion_tokens":50,"total_tokens":1050,
+        "prompt_tokens_details":{"cached_tokens":800,"cache_write_tokens":100}
+    }});
+    let parsed = parse_openai_usage(&response).unwrap();
+    assert_eq!(parsed, oracle_openai(&response["usage"]));
+    assert_eq!(
+        (
+            parsed.tokens_in,
+            parsed.cache_read_tokens,
+            parsed.cache_creation_tokens
+        ),
+        (100, 800, 100)
     );
 }
 

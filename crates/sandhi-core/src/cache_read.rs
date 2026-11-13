@@ -243,7 +243,7 @@ pub fn observe_cache_read(family: CacheReadFamily, response: &Value) -> CacheRea
             Some(u) if !u.is_object() => CacheReadStatus::Malformed,
             _ => CacheReadStatus::Absent,
         },
-        Ollama => CacheReadStatus::Absent,
+        Ollama => field_status(response, &["prompt_eval_cached_count"]),
     };
     CacheReadObservation::origin(status)
 }

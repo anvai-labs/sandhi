@@ -569,6 +569,10 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
         // input by the extras collect loop below, so the passthrough cannot
         // hide wire-visible text (e.g. an anthropic `system` block).
         "sandhi_extensions",
+        "sandhi_cache",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "prompt_cache_options",
     ];
     let fields = match format {
         InputFormat::Chat => FIELDS,
@@ -596,6 +600,8 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             // the proxy strips it before forwarding; allowed so a client
             // library that sets it unconditionally is not failed here.
             "sandhi_extensions",
+            "sandhi_cache",
+            "cache_control",
         ],
         InputFormat::Embeddings => &[
             "model",
@@ -607,6 +613,7 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             // strips it before forwarding; allowed so a client library that
             // sets it unconditionally is not failed by the strict allowlist.
             "sandhi_extensions",
+            "sandhi_cache",
         ],
         InputFormat::Completions => &[
             "model",
@@ -629,6 +636,7 @@ fn inspect_format(body: &[u8], format: InputFormat) -> Result<Inspection, Evalua
             "seed",
             // Gateway-reserved (ADR-0013), uninterpreted here — see above.
             "sandhi_extensions",
+            "sandhi_cache",
         ],
     };
     if object.keys().any(|k| !fields.contains(&k.as_str())) {

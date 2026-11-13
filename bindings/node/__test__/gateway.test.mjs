@@ -76,14 +76,21 @@ function localServer(responses) {
   return new Promise((resolve) => {
     let calls = 0;
     let lastHeaders = {};
+    let lastBody;
     const server = createServer((request, response) => {
       lastHeaders = request.headers;
+      const chunks = [];
+      request.on("data", chunk => chunks.push(chunk));
       const item = responses[calls++];
-      response.writeHead(item.status ?? 200, {
-        "content-type": item.contentType,
-        "content-length": Buffer.byteLength(item.body),
+      request.on("end", () => {
+        lastBody = JSON.parse(Buffer.concat(chunks).toString());
+        response.writeHead(item.status ?? 200, {
+          "content-type": item.contentType,
+          "content-length": Buffer.byteLength(item.body),
+          ...(item.headers ?? {}),
+        });
+        response.end(item.body);
       });
-      response.end(item.body);
     });
     server.listen(0, "127.0.0.1", () => {
       resolve({
@@ -91,6 +98,7 @@ function localServer(responses) {
         baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
         calls: () => calls,
         lastHeaders: () => lastHeaders,
+        lastBody: () => lastBody,
         close: () => new Promise((done) => server.close(done)),
       });
     });
@@ -124,6 +132,49 @@ test("cache observation is delivered before a consumer stops at first content", 
   } finally {
     await server.close();
   }
+});
+
+test("native stream opt-in preserves wire state without duplicate usage", async () => {
+  const frames = [
+    { id: "fixture", model: "fixture", choices: [{ delta: { content: "ok", provider_state: "opaque" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }], usage: {
+      prompt_tokens: 100, completion_tokens: 2,
+      prompt_tokens_details: { cached_tokens: 60, cache_write_tokens: 30 },
+    } },
+  ];
+  const chunks=frames.flatMap(original=>{
+    const {usage,...frame}=original;
+    frame.object="chat.completion.chunk";
+    frame.choices=frame.choices.map((choice,index)=>({index,...choice}));
+    return usage ? [frame,{object:"chat.completion.chunk",choices:[],usage}] : [frame];
+  });
+  const body = chunks.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
+  const item = { contentType: "text/event-stream", body };
+  const server = await localServer([item, item]);
+  try {
+    const provider = new ProviderRuntime().openaiCompat("fixture", server.baseUrl, "fixture-key", undefined, 0);
+    await assert.rejects(async()=>{
+      for await (const _ of provider.streamJson(JSON.stringify({model:"fixture",messages:[{role:"user",content:"hi"}]}))) {}
+    }, error=>error.code==="output_projection_error" && error.retryable===false);
+    for (const native of [true]) {
+      const request = { model: "fixture", messages: [{ role: "user", content: "hi" }] };
+      if (native) request.include_native_stream = true;
+      const events = [];
+      for await (const value of provider.streamJson(JSON.stringify(request))) events.push(JSON.parse(value));
+      const attachments = events.filter(event => event.event === "native_frame").map(event => event.frame);
+      assert.equal(attachments.length, 4);
+      if (native) {
+        assert.ok(attachments.every(frame => frame.endpoint_family === "openai_chat_completions"));
+        assert.ok(attachments[0].sse.includes('"provider_state":"opaque"'));
+        assert.equal(attachments.at(-1).sse, "data: [DONE]\n\n");
+      }
+      assert.equal(events.filter(event => event.event === "text_delta").map(event => event.delta).join(""), "ok");
+      const final = events.filter(event => event.event === "usage" && event.usage.completeness === "final");
+      assert.equal(final.length, 1);
+      assert.deepEqual(["tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out"].map(key => final[0].usage[key]), [10, 60, 30, 2]);
+      assert.equal(events.at(-1).event, "finish");
+    }
+  } finally { await server.close(); }
 });
 
 test("per-call wire headers ride and cannot override the credential (TD-0022)", async () => {
@@ -179,8 +230,8 @@ test("streamJson per-call wire headers ride and cannot override the credential (
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);
@@ -229,18 +280,18 @@ test("static headersJson reaches all four non-OpenAI families (TD-0022 D3)", asy
     "/v1/messages": JSON.stringify({
       id: "m1", type: "message", role: "assistant",
       content: [{ type: "text", text: "ok" }],
-      usage: { input_tokens: 2, output_tokens: 1 },
+      usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     }),
     "/models/gemini-x:generateContent": JSON.stringify({
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
       usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
     }),
     "/v2/chat": JSON.stringify({
-      id: "r1", message: { content: [{ type: "text", text: "ok" }] },
-      usage: { billed_units: { input_tokens: 2, output_tokens: 1 } },
+      id: "r1", message: { content: [{ type: "text", text: "ok" }] }, finish_reason: "COMPLETE",
+      usage: { tokens: { input_tokens: 2, output_tokens: 1 }, billed_units: { input_tokens: 1, output_tokens: 0 } },
     }),
     "/api/chat": JSON.stringify({
-      message: { role: "assistant", content: "ok" }, done: true,
+      message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop",
       prompt_eval_count: 2, eval_count: 1,
     }),
   };
@@ -299,8 +350,8 @@ test("persistent typed provider completes and streams neutral documents", async 
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":4}}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);
@@ -339,6 +390,29 @@ test("persistent typed provider completes and streams neutral documents", async 
   }
 });
 
+test("explicit cache suppression and undeclared automatic intent cross the real binding", async () => {
+  const item = { contentType: "application/json", body: JSON.stringify({
+    id: "fixture", model: "fixture", content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn", usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+  }) };
+  const server = await localServer([item, item]);
+  try {
+    const provider = new ProviderRuntime().provider("anthropic", "fixture", "fixture-key", server.origin, undefined, 0);
+    const request = { model: "fixture", max_output_tokens: 16,
+      messages: [{ role: "system", content: "policy" }, { role: "user", content: "hello" }] };
+    await provider.completeJson(JSON.stringify(request));
+    assert.deepEqual(server.lastBody().system[0].cache_control, { type: "ephemeral" });
+    request.cache_intent = { mode: "suppress_gateway" };
+    await provider.completeJson(JSON.stringify(request));
+    assert.equal(server.lastBody().system[0].cache_control, undefined);
+    assert.equal(server.lastBody().cache_intent, undefined);
+    assert.equal(server.lastBody().compiled_cache, undefined);
+    request.cache_intent = { mode: "auto" };
+    await assert.rejects(provider.completeJson(JSON.stringify(request)), /requires declared/);
+    assert.equal(server.calls(), 2);
+  } finally { await server.close(); }
+});
+
 test("Anthropic bearer auth is explicit across the typed binding", async () => {
   const server = await localServer([
     {
@@ -350,7 +424,7 @@ test("Anthropic bearer auth is explicit across the typed binding", async () => {
         model: "claude-test",
         content: [{ type: "text", text: "ok" }],
         stop_reason: "end_turn",
-        usage: { input_tokens: 2, output_tokens: 1 },
+        usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       }),
     },
   ]);
@@ -446,7 +520,7 @@ test("ChatGPT Responses profile aggregates its required upstream stream", async 
       body:
         'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-test"}}\n\n' +
         'data: {"type":"response.output_text.delta","delta":"ok"}\n\n' +
-        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-test","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":4,"output_tokens":1}}}\n\n',
     },
   ]);
   try {
@@ -715,7 +789,7 @@ test("provider() rejects invalid dispatch inputs at the FFI seam", () => {
   // Responses protocol + unknown provider + no base_url.
   assert.throws(
     () => runtime.provider("acme", "m", "k", undefined, undefined, 0, undefined, undefined, undefined, "responses"),
-    /baseUrl/,
+    /base_url/,
   );
   // Unknown catalog provider without a base_url under chat_completions → typed provider error.
   assert.throws(() => runtime.provider("acme", "m", "k", undefined, undefined, 0), /unknown catalog provider|acme/);
@@ -732,8 +806,8 @@ test("TypedEventStream.read() drains a healthy stream to exhaustion", async () =
     {
       contentType: "text/event-stream",
       body:
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}\n\n' +
-        'data: {"id":"r2","model":"gpt-test","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n' +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"he\"},\"finish_reason\":null,\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\n" +
+        "data: {\"id\":\"r2\",\"model\":\"gpt-test\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"object\":\"chat.completion.chunk\"}\n\ndata: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n" +
         "data: [DONE]\n\n",
     },
   ]);
@@ -990,3 +1064,202 @@ test("parseUsage exercises every built-in provider parser", () => {
   // Invalid JSON throws.
   assert.throws(() => parseUsage("openai", "{nope"), /valid JSON/);
 });
+
+for (const [protocol, profile, label, scheme] of [
+  ["chat_completions", "openai_terminal_chunk_usage", "anthropic", "bearer"],
+  ["anthropic_messages", "anthropic_implicit_cache", "custom-messages", "api_key"],
+]) {
+  test(`explicit ${profile} is source configuration, independent of ${label}`, async () => {
+    const chat = protocol === "chat_completions";
+    const values = chat ? [
+      {
+        object: "chat.completion.chunk", id: "chat", model: "fixture",
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 11, completion_tokens: 3,
+          prompt_tokens_details: { cached_tokens: 4, cache_write_tokens: 1 },
+          completion_tokens_details: { reasoning_tokens: 0 },
+        },
+      },
+    ] : [
+      {
+        type: "message_start",
+        message: {
+          type: "message", id: "msg", model: "fixture", role: "assistant", content: [],
+          usage: { input_tokens: 6, output_tokens: 0, cache_read_input_tokens: 4 },
+        },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
+      { type: "message_stop" },
+    ];
+    const body = values.map(value => `data: ${JSON.stringify(value)}\n\n`).join("")
+      + (chat ? "data: [DONE]\n\n" : "");
+    const response = { contentType: "text/event-stream", body };
+    const server = await localServer([response, response]);
+    try {
+      const runtime = new ProviderRuntime();
+      const make = selected => runtime.provider(
+        label, "fixture", "synthetic", server.origin,
+        undefined, 0, 5, 2, scheme, protocol, 2, selected,
+      );
+      const request = JSON.stringify({
+        model: "fixture", max_output_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      });
+      const collect = async handle => {
+        const events = [];
+        for await (const value of handle.streamJson(request)) events.push(JSON.parse(value));
+        return events;
+      };
+      const handle = make(profile);
+      assert.equal(handle.provider, label);
+      const events = await collect(handle);
+      assert.equal(events.filter(e => e.event === "text_delta").map(e => e.delta).join(""), "ok");
+      const finals = events.filter(e => e.event === "usage" && e.usage.completeness === "final");
+      assert.equal(finals.length, 1);
+      assert.deepEqual(
+        ["tokens_in", "cache_read_tokens", "cache_creation_tokens", "tokens_out"]
+          .map(key => finals[0].usage[key]),
+        [6, 4, Number(chat), 3],
+      );
+      assert.equal(events.at(-1).event, "finish");
+      assert.equal(server.calls(), 1);
+      assert.equal(server.lastBody().endpoint_profile, undefined);
+      assert.deepEqual(
+        [server.lastHeaders().authorization, server.lastHeaders()["x-api-key"]],
+        scheme === "bearer" ? ["Bearer synthetic", undefined] : [undefined, "synthetic"],
+      );
+      await assert.rejects(
+        () => collect(make("standard")),
+        error => error.code === "output_projection_error" && error.retryable === false,
+      );
+      assert.equal(server.calls(), 2);
+    } finally {
+      await server.close();
+    }
+  });
+}
+
+for (const [protocol, profile] of [
+  ["responses", "openai_terminal_chunk_usage"],
+  ["gemini_generate_content", "anthropic_implicit_cache"],
+  ["anthropic_messages", "chatgpt_codex"],
+  ["chatgpt_responses", "standard"],
+  ["chat_completions", "unsupported"],
+]) {
+  test(`incompatible ${protocol}/${profile} fails at construction`, () => {
+    assert.throws(() => new ProviderRuntime().provider(
+      "fixture", "fixture", "synthetic", "http://127.0.0.1:9",
+      undefined, 0, 5, 2, undefined, protocol, 2, profile,
+    ));
+  });
+}
+
+for (const [protocol, body] of [
+  ["chat_completions", {
+    id: "r", model: "fixture",
+    choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 5, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 9 } },
+  }],
+  ["responses", {
+    id: "r", object: "response", model: "fixture", status: "completed",
+    output: [{ type: "message", id: "msg", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+    usage: { input_tokens: 5, output_tokens: 2, input_tokens_details: { cached_tokens: 9 } },
+  }],
+  ["anthropic_messages", {
+    id: "r", type: "message", model: "fixture", role: "assistant",
+    content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+    usage: { input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: -1 },
+  }],
+  ["gemini_generate_content", {
+    candidates: [{ index: 0, content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+    usageMetadata: { promptTokenCount: 5, cachedContentTokenCount: 9, candidatesTokenCount: 2, thoughtsTokenCount: 0, totalTokenCount: 7 },
+  }],
+]) {
+  test(`${protocol} refuses invalid buffered counts without replay`, async () => {
+    const server = await localServer([{ contentType: "application/json", body: JSON.stringify(body) }]);
+    try {
+      const handle = new ProviderRuntime().provider(
+        "fixture", "fixture", "synthetic", server.origin,
+        undefined, 0, 5, 2, undefined, protocol,
+      );
+      await assert.rejects(
+        () => handle.completeJson(JSON.stringify({
+          model: "fixture", max_output_tokens: 16,
+          messages: [{ role: "user", content: "hello" }],
+        })),
+        error => error.code === "output_projection_error" && error.retryable === false,
+      );
+      assert.equal(server.calls(), 1);
+    } finally {
+      await server.close();
+    }
+  });
+}
+
+for (const native of [false, true]) {
+  test(`explicit gateway peer forwards cache intent and keeps usage qualified (native=${native})`, async () => {
+    const body = { id: "r", model: "fixture", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 6, cache_write_tokens: 2 } } };
+    const server = await localServer([{ contentType: "application/json", body: JSON.stringify(body), headers: { "x-sandhi-usage-convention": "v1-chat-standard" } }]);
+    try {
+      const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.baseUrl, undefined, 0, 5, 2, "bearer", "chat_completions", 2, undefined, "sandhi_gateway_v1");
+      const intent = { mode: "auto_stable_prefix", lifetime: "5m" };
+      const response = JSON.parse(await provider.completeJson(JSON.stringify({ model: "fixture", max_output_tokens: 16, include_native_response: native, messages: [{ role: "user", content: "hello" }], cache_intent: intent }), JSON.stringify({ "Idempotency-Key": "obsolete", "ChatGPT-Account-ID": "upstream-only" })));
+      assert.deepEqual([response.usage.tokens_in, response.usage.cache_read_tokens, response.usage.cache_creation_tokens, response.usage.tokens_out, response.usage.attempts], [2, 6, 2, 4, 1]);
+      assert.equal(provider.provider, "neutral-agent");
+      assert.deepEqual(server.lastBody().sandhi_cache, intent);
+      assert.equal(server.lastBody().prompt_cache_key, undefined);
+      assert.equal(server.lastHeaders()["idempotency-key"], undefined);
+      assert.equal(server.lastHeaders()["chatgpt-account-id"], undefined);
+      assert.equal(server.calls(), 1);
+    } finally { await server.close(); }
+  });
+}
+
+test("explicit gateway peer rejects metadata that could be mistaken for backend authority", async () => {
+  const server = await localServer([{ contentType: "application/json", body: "{}", headers: { "x-sandhi-usage-convention": "chatgpt_codex" } }]);
+  try {
+    const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.baseUrl, undefined, 0, 5, 2, "bearer", "chat_completions", 2, undefined, "sandhi_gateway_v1");
+    await assert.rejects(() => provider.completeJson(JSON.stringify({ model: "fixture", messages: [{ role: "user", content: "hello" }] })), error => error.code === "output_projection_error" && error.retryable === false);
+    assert.equal(server.calls(), 1);
+  } finally { await server.close(); }
+});
+
+for (const [protocol, convention] of [
+  ["chat_completions", "v1-chat-standard"],
+  ["anthropic_messages", "v1-messages-standard"],
+  ["responses", "v1-responses-standard"],
+  ["gemini_generate_content", "v1-gemini-standard"],
+]) {
+  for (const streaming of [false, true]) {
+    test(`explicit gateway peer keeps HTTP502 terminal: ${protocol}/${streaming}`, async () => {
+      const server = await localServer([{ status: 502, contentType: "application/json", body: JSON.stringify({ error: { code: "output_projection_error", retryable: false, http_status: 502 } }), headers: { "x-should-retry": "false", "x-sandhi-request-id": "gateway-id" } }]);
+      try {
+        const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.origin, undefined, 0, 5, 2, "bearer", protocol, 2, undefined, "sandhi_gateway_v1");
+        const request = JSON.stringify({ model: "fixture", max_output_tokens: 16, messages: [{ role: "user", content: "hello" }] });
+        await assert.rejects(async () => {
+          if (streaming) { for await (const _ of provider.streamJson(request)) {} }
+          else { await provider.completeJson(request); }
+        }, error => error.code === "output_projection_error" && error.retryable === false && error.httpStatus === 502 && error.requestId === "gateway-id");
+        assert.equal(server.calls(), 1);
+      } finally { await server.close(); }
+    });
+  }
+  for (const native of [false, true]) {
+    test(`explicit gateway peer keeps SSE error terminal: ${protocol}/${native}`, async () => {
+      const frame = { type: "error", error: { code: "output_projection_error", retryable: false, http_status: 502 } };
+      const server = await localServer([{ contentType: "text/event-stream", body: `data: ${JSON.stringify(frame)}\n\n`, headers: { "x-sandhi-usage-convention": convention, "x-sandhi-request-id": "gateway-id" } }]);
+      try {
+        const provider = new ProviderRuntime().provider("neutral-agent", "fixture", "virtual", server.origin, undefined, 0, 5, 2, "bearer", protocol, 2, undefined, "sandhi_gateway_v1");
+        const events = [];
+        await assert.rejects(async () => {
+          for await (const value of provider.streamJson(JSON.stringify({ model: "fixture", max_output_tokens: 16, include_native_stream: native, messages: [{ role: "user", content: "hello" }] }))) events.push(JSON.parse(value));
+        }, error => error.code === "output_projection_error" && error.retryable === false && error.requestId === "gateway-id");
+        assert.equal(events.some(event => event.event === "finish" || event.event === "usage" && event.usage.completeness === "final"), false);
+        assert.equal(server.calls(), 1);
+      } finally { await server.close(); }
+    });
+  }
+}

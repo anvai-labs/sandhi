@@ -23,8 +23,10 @@ use serde_json::Value;
 use std::pin::Pin;
 use std::time::Duration;
 
-mod qualified_stream;
-pub use qualified_stream::{QualifiedStreamObservation, QualifiedStreamSnapshot};
+pub(crate) mod qualified_stream;
+pub use qualified_stream::{
+    QualifiedStreamEvidence, QualifiedStreamObservation, QualifiedStreamSnapshot,
+};
 
 /// Anthropic API version header value (mirrors the typed adapter).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -74,6 +76,8 @@ pub struct RawForwarder {
     base_url: String,
     api_key: String,
     anthropic_auth: AnthropicAuthScheme,
+    anthropic_usage_profile: sandhi_core::usage::AnthropicUsageProfile,
+    openai_stream_usage_profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     gemini_auth: GeminiAuthScheme,
     extra_headers: HeaderMap,
     /// Vendor session-affinity request header from the catalog spec (strategy-via-data):
@@ -119,6 +123,8 @@ impl RawForwarder {
             base_url: base_url.into(),
             api_key: api_key.into(),
             anthropic_auth: AnthropicAuthScheme::ApiKey,
+            anthropic_usage_profile: Default::default(),
+            openai_stream_usage_profile: Default::default(),
             gemini_auth: GeminiAuthScheme::ApiKey,
             extra_headers: HeaderMap::new(),
             session_header: None,
@@ -151,6 +157,38 @@ impl RawForwarder {
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         // Single-sourced strip (TD-0022 D2) — same owned-name set as every family adapter.
         self.extra_headers = crate::strip_transport_owned(headers);
+        self
+    }
+    pub fn usage_convention(&self) -> Result<sandhi_core::UsageConventionV1, &'static str> {
+        use sandhi_core::UsageConventionV1 as C;
+        if self.family == ProviderFamily::Anthropic
+            && self.anthropic_usage_profile
+                == sandhi_core::usage::AnthropicUsageProfile::ImplicitCache
+        {
+            return Ok(C::MessagesImplicitCache);
+        }
+        if self.family == ProviderFamily::OpenAiCompat
+            && self.openai_stream_usage_profile
+                == sandhi_core::usage::OpenAiStreamUsageProfile::TerminalChunk
+        {
+            return Ok(C::ChatTerminal);
+        }
+        C::standard(self.family.endpoint_family())
+    }
+
+    pub(crate) fn with_anthropic_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::AnthropicUsageProfile,
+    ) -> Self {
+        self.anthropic_usage_profile = profile;
+        self
+    }
+
+    pub(crate) fn with_openai_stream_usage_profile(
+        mut self,
+        profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    ) -> Self {
+        self.openai_stream_usage_profile = profile;
         self
     }
 
@@ -218,8 +256,8 @@ impl RawForwarder {
     /// Attach opt-in physical-attempt observation to this cloned forwarder's **metered** methods.
     /// [`Self::forward`] and [`Self::forward_stream`] remain unobserved escape hatches. The
     /// provider/model labels are diagnostic facts only; they never enter the upstream request.
-    /// Reusing the forwarder is safe: every metered call receives a fresh cancellation signal
-    /// and attempt ordinal.
+    /// Every metered call receives a fresh cancellation signal. A single-attempt
+    /// context refuses reuse; ordinary contexts allocate another ordinal.
     #[must_use]
     pub fn with_metered_attempt_context(
         mut self,
@@ -373,7 +411,8 @@ impl RawForwarder {
         ))
     }
 
-    /// Opt-in qualified OpenAI-compatible chat usage with unchanged wire response.
+    /// Opt-in qualified usage for the four supported buffered wire protocols,
+    /// retaining the unchanged wire response and independent transport evidence.
     /// Unsupported family/path/streaming combinations fail before dispatch.
     /// Missing or malformed response usage is returned separately, never as a
     /// transport error that might cause inference replay.
@@ -388,15 +427,18 @@ impl RawForwarder {
         let request: Value = serde_json::from_slice(&body).map_err(|_| {
             ProviderError::InvalidRequest("qualified buffered request must be JSON".into())
         })?;
-        if self.family != ProviderFamily::OpenAiCompat
-            || !matches!(path, "/v1/chat/completions" | "/chat/completions")
+        if !qualified_buffered_path(self.family, path)
             || !request.is_object()
             || request
                 .get("stream")
                 .is_some_and(|value| value != &Value::Bool(false))
+            || (self.family == ProviderFamily::OpenAiResponses
+                && request
+                    .get("background")
+                    .is_some_and(|v| v != &Value::Bool(false)))
         {
             return Err(ProviderError::InvalidRequest(
-                "qualified usage supports buffered OpenAI-compatible chat only".into(),
+                "qualified usage requires a supported synchronous generation operation".into(),
             ));
         }
         self.forward_buffered_inner(path, body, session, correlation, call_headers, true)
@@ -429,27 +471,59 @@ impl RawForwarder {
                     response_request_id_header,
                 )
                 .await?;
-            let value = serde_json::from_slice::<Value>(&raw.body).ok();
+            let value = if qualify {
+                sandhi_core::policy::strict_json(&raw.body).ok()
+            } else {
+                serde_json::from_slice::<Value>(&raw.body).ok()
+            };
             let (usage, observed_usage) = value
                 .as_ref()
                 .map(|value| crate::buffered_usage(cache_read_family(self.family), value))
                 .unwrap_or_default();
-            let qualification = if qualify {
+            let usage = if qualify {
                 value
                     .as_ref()
                     .ok_or(sandhi_core::usage::BufferedUsageError::InvalidResponse)
-                    .and_then(sandhi_core::usage::validate_openai_buffered_usage)
+                    .and_then(|value| {
+                        if self.family == ProviderFamily::OpenAiCompat
+                            && matches!(
+                                path,
+                                "/completions"
+                                    | "/v1/completions"
+                                    | "/embeddings"
+                                    | "/v1/embeddings"
+                            )
+                        {
+                            sandhi_core::usage::qualify_openai_plaintext_usage(
+                                value,
+                                path.ends_with("/embeddings"),
+                            )
+                        } else {
+                            sandhi_core::usage::qualify_buffered_usage_with_profile(
+                                self.family.endpoint_family(),
+                                self.anthropic_usage_profile,
+                                value,
+                            )
+                        }
+                    })
             } else {
-                Ok(())
+                Ok(usage.into())
             };
-            let usage = qualification.map(|_| {
-                let mut usage: sandhi_core::UsageV2 = usage.into();
+            let usage = usage.map(|mut usage| {
                 if qualify {
                     usage.upstream_request_id =
                         crate::provider_request_id(&raw.headers, response_request_id_header);
                 }
                 usage
             });
+            let observed_usage = if qualify {
+                usage
+                    .as_ref()
+                    .ok()
+                    .map(sandhi_core::usage::ParsedUsage::from)
+            } else {
+                observed_usage
+            };
             Ok((
                 crate::QualifiedCompletion {
                     response: raw,
@@ -517,7 +591,7 @@ impl RawForwarder {
         })
     }
 
-    /// Opt-in complete-event qualification for OpenAI-compatible Chat streams.
+    /// Opt-in complete-event qualification for Chat, Responses and Messages streams.
     /// Missing/true `stream` is accepted and normalized; conflicting modes and
     /// unsupported operations fail before dispatch. Response bytes (including
     /// malformed SSE) pass unchanged. Inspect the observation's qualification
@@ -530,20 +604,65 @@ impl RawForwarder {
         correlation: Option<&str>,
         call_headers: &HeaderMap,
     ) -> Result<RawQualifiedStreamResponse, ProviderError> {
-        let request: Value = serde_json::from_slice(&body).map_err(|_| {
+        let request = sandhi_core::policy::strict_json(&body).map_err(|_| {
             ProviderError::InvalidRequest("qualified stream request must be JSON".into())
         })?;
-        if self.family != ProviderFamily::OpenAiCompat
-            || !matches!(path, "/v1/chat/completions" | "/chat/completions")
-            || !request.is_object()
+        let endpoint = match (self.family, path) {
+            (ProviderFamily::OpenAiCompat, "/v1/chat/completions" | "/chat/completions") => {
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
+            }
+            (ProviderFamily::OpenAiCompat, "/v1/completions" | "/completions") => {
+                sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
+            }
+            (ProviderFamily::OpenAiResponses, "/v1/responses" | "/responses") => {
+                sandhi_core::EndpointFamilyV1::OpenaiResponses
+            }
+            (ProviderFamily::Anthropic, "/v1/messages" | "/messages") => {
+                sandhi_core::EndpointFamilyV1::AnthropicMessages
+            }
+            (ProviderFamily::Gemini, _) if qualified_gemini_stream_path(path) => {
+                sandhi_core::EndpointFamilyV1::GeminiGenerateContent
+            }
+            _ => {
+                return Err(ProviderError::InvalidRequest(
+                    "qualified streaming requires a supported generation operation".into(),
+                ))
+            }
+        };
+        if !request.is_object()
             || request
                 .get("stream")
                 .is_some_and(|value| value != &Value::Bool(true))
+            || (self.family == ProviderFamily::OpenAiResponses
+                && request
+                    .get("background")
+                    .is_some_and(|value| value != &Value::Bool(false)))
         {
             return Err(ProviderError::InvalidRequest(
-                "qualified streaming usage supports OpenAI-compatible chat only".into(),
+                "qualified streaming requires synchronous stream delivery".into(),
             ));
         }
+        let observer = if self.family == ProviderFamily::OpenAiCompat
+            && matches!(path, "/v1/completions" | "/completions")
+        {
+            if self.openai_stream_usage_profile
+                != sandhi_core::usage::OpenAiStreamUsageProfile::Standard
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "text operation does not support a Chat-specific source profile".into(),
+                ));
+            }
+            crate::stream_usage::ProtocolStreamUsageObserver::for_text_completion()
+        } else {
+            crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+                endpoint,
+                self.openai_stream_usage_profile,
+                self.anthropic_usage_profile,
+            )
+            .map_err(|_| {
+                ProviderError::InvalidRequest("stream usage profile does not match endpoint".into())
+            })?
+        };
         let (response, guard, idle) = self
             .setup_stream(path, body, session, correlation, call_headers)
             .await?;
@@ -557,7 +676,8 @@ impl RawForwarder {
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(|error| ProviderError::Transport(error.to_string()))),
         );
-        let (stream, observation) = qualified_stream::observe(with_idle_timeout(raw, idle), guard);
+        let (stream, observation) =
+            qualified_stream::observe_response(with_idle_timeout(raw, idle), guard, observer, None);
         Ok(RawQualifiedStreamResponse {
             status,
             headers,
@@ -598,7 +718,11 @@ impl RawForwarder {
         if deadline.at <= tokio::time::Instant::now() {
             return Err(ProviderError::Timeout(deadline.timeout));
         }
-        let mut guard = context.and_then(|context| context.begin(provider, model));
+        let mut guard = context
+            .as_ref()
+            .map(|context| context.begin_checked(provider, model))
+            .transpose()?
+            .flatten();
         let resp = match tokio::time::timeout_at(deadline.at, async {
             let response = self
                 .send_with_session(&url, out_body, session, correlation, call_headers)
@@ -805,6 +929,66 @@ fn with_idle_timeout<T: Send + 'static>(
 /// request on a parse failure).
 /// The family's streaming usage sniffer, single-sourced with each typed adapter — so the
 /// transparent plane accumulates usage exactly as the translated path does.
+fn qualified_buffered_path(family: ProviderFamily, path: &str) -> bool {
+    match family {
+        ProviderFamily::OpenAiCompat => {
+            matches!(
+                path,
+                "/chat/completions"
+                    | "/v1/chat/completions"
+                    | "/completions"
+                    | "/v1/completions"
+                    | "/embeddings"
+                    | "/v1/embeddings"
+            )
+        }
+        ProviderFamily::OpenAiResponses => matches!(path, "/responses" | "/v1/responses"),
+        ProviderFamily::Anthropic => matches!(path, "/messages" | "/v1/messages"),
+        ProviderFamily::Gemini => path
+            .strip_prefix("/v1beta/models/")
+            .or_else(|| path.strip_prefix("/models/"))
+            .and_then(|p| p.strip_suffix(":generateContent"))
+            .is_some_and(sandhi_core::model_id_is_path_safe),
+        _ => false,
+    }
+}
+
+fn qualified_gemini_stream_path(path: &str) -> bool {
+    let Some(path) = path.strip_suffix("?alt=sse") else {
+        return false;
+    };
+    path.strip_prefix("/v1beta/models/")
+        .or_else(|| path.strip_prefix("/models/"))
+        .and_then(|model| model.strip_suffix(":streamGenerateContent"))
+        .is_some_and(sandhi_core::model_id_is_path_safe)
+}
+
+#[cfg(test)]
+mod qualified_gemini_path_tests {
+    use super::qualified_gemini_stream_path;
+    #[test]
+    fn qualified_gemini_paths_require_exact_generation_model_and_sse_operation() {
+        for prefix in ["/models/", "/v1beta/models/"] {
+            assert!(qualified_gemini_stream_path(&format!(
+                "{prefix}fixture:streamGenerateContent?alt=sse"
+            )));
+        }
+        for path in [
+            "/models/fixture:streamGenerateContent",
+            "/models/fixture:streamGenerateContent?alt=json",
+            "/models/fixture:streamGenerateContent?alt=sse&key=synthetic",
+            "/models/:streamGenerateContent?alt=sse",
+            "/models/fixture:generateContent?alt=sse",
+            "/models/fixture:countTokens?alt=sse",
+            "/models/fixture:streamGenerateContent/other?alt=sse",
+            "/models/fixture%2fother:streamGenerateContent?alt=sse",
+            "/operations/fixture:streamGenerateContent?alt=sse",
+        ] {
+            assert!(!qualified_gemini_stream_path(path), "{path}");
+        }
+    }
+}
+
 fn sniff_for_family(family: ProviderFamily) -> fn(&[u8], &mut crate::ParsedUsage) -> bool {
     match family {
         ProviderFamily::OpenAiCompat => crate::openai::sniff_usage_line,
@@ -1606,7 +1790,42 @@ data: [DONE]\n\n";
         let (context, receiver) = crate::AttemptContext::channel("not-dispatched", 4).unwrap();
         for (family, path, body) in [
             (ProviderFamily::Anthropic, "/v1/chat/completions", "{}"),
+            (
+                ProviderFamily::Anthropic,
+                "/v1/messages",
+                "{\"stream\":false}",
+            ),
+            (
+                ProviderFamily::Gemini,
+                "/v1beta/models/fixture:generateContent?alt=sse",
+                "{}",
+            ),
             (ProviderFamily::OpenAiCompat, "/v1/responses", "{}"),
+            (
+                ProviderFamily::OpenAiResponses,
+                "/responses",
+                "{\"background\":true}",
+            ),
+            (
+                ProviderFamily::OpenAiResponses,
+                "/responses",
+                "{\"background\":null}",
+            ),
+            (
+                ProviderFamily::OpenAiResponses,
+                "/responses",
+                "{\"stream\":false}",
+            ),
+            (
+                ProviderFamily::OpenAiResponses,
+                "/responses/resp-test",
+                "{}",
+            ),
+            (
+                ProviderFamily::OpenAiResponses,
+                "/responses",
+                "{\"stream\":true,\"stream\":true}",
+            ),
             (
                 ProviderFamily::OpenAiCompat,
                 "/v1/chat/completions?other=1",
@@ -1924,6 +2143,90 @@ data: [DONE]\n\n";
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn persisted_single_attempt_allows_one_real_send_across_raw_delivery_modes() {
+        use crate::{AttemptContext, AttemptPhase};
+        use futures_util::StreamExt;
+        for streaming in [false, true] {
+            let server = MockServer::start().await;
+            let response = if streaming {
+                ResponseTemplate::new(200).set_body_string("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+            } else {
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}),
+                )
+            };
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let id = "b".repeat(64);
+            let (context, receiver) = AttemptContext::single_attempt("execution", &id).unwrap();
+            let forwarder =
+                RawForwarder::new(ProviderFamily::OpenAiCompat, server.uri(), "fixture")
+                    .with_metered_attempt_context("fixture", Some("model".into()), context);
+            if streaming {
+                let mut result = forwarder
+                    .forward_stream_qualified_with_headers(
+                        "/chat/completions",
+                        Bytes::from_static(b"{}"),
+                        None,
+                        None,
+                        &HeaderMap::new(),
+                    )
+                    .await
+                    .unwrap();
+                while let Some(chunk) = result.stream.next().await {
+                    chunk.unwrap();
+                }
+            } else {
+                let result = forwarder
+                    .forward_qualified_with_headers(
+                        "/chat/completions",
+                        Bytes::from_static(b"{}"),
+                        None,
+                        None,
+                        &HeaderMap::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(result.usage.is_ok());
+            }
+            assert!(matches!(
+                forwarder
+                    .forward_qualified_with_headers(
+                        "/chat/completions",
+                        Bytes::from_static(b"{}"),
+                        None,
+                        None,
+                        &HeaderMap::new()
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                forwarder
+                    .forward_stream_qualified_with_headers(
+                        "/chat/completions",
+                        Bytes::from_static(b"{}"),
+                        None,
+                        None,
+                        &HeaderMap::new()
+                    )
+                    .await,
+                Err(ProviderError::InvalidRequest(_))
+            ));
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let events = receiver.drain();
+            assert_eq!(events.len(), 2);
+            assert!(events
+                .iter()
+                .all(|e| e.attempt_id == id && e.attempt_ordinal == 1));
+            assert!(matches!(events[0].phase, AttemptPhase::Dispatch));
+            assert!(matches!(events[1].phase, AttemptPhase::Terminal { .. }));
+        }
     }
 
     #[tokio::test]

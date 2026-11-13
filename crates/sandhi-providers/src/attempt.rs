@@ -23,8 +23,8 @@ use sandhi_core::UsageCompleteness;
 pub const ATTEMPT_OBSERVATION_VERSION: u8 = 1;
 
 const MAX_EXECUTION_ID_BYTES: usize = 192;
-const MAX_PROVIDER_BYTES: usize = 96;
-const MAX_MODEL_BYTES: usize = 256;
+const MAX_PROVIDER_BYTES: usize = 128;
+const MAX_MODEL_BYTES: usize = 512;
 const MAX_PROVIDER_REQUEST_ID_BYTES: usize = 256;
 const MAX_CHANNEL_CAPACITY: usize = 65_536;
 
@@ -100,6 +100,22 @@ struct SharedAttemptContext {
     sender: SyncSender<AttemptObservation>,
     next_ordinal: AtomicU64,
     dropped: AtomicU64,
+    single_attempt_id: Option<String>,
+    qualified_response: OnceLock<QualifiedResponseEvidence>,
+}
+
+/// Strict counts from one completed JSON response, independent of subsequent
+/// codec/projection success. Numeric evidence only; no provider body is retained.
+#[derive(Debug, Clone)]
+pub struct QualifiedBufferedEvidence {
+    pub endpoint: sandhi_core::EndpointFamilyV1,
+    pub upstream_request_id: Option<String>,
+    pub usage: Result<sandhi_core::UsageV2, sandhi_core::usage::BufferedUsageError>,
+}
+
+enum QualifiedResponseEvidence {
+    Buffered(Box<QualifiedBufferedEvidence>),
+    Stream(crate::raw::QualifiedStreamObservation),
 }
 
 struct AttemptCancellation {
@@ -110,6 +126,7 @@ struct AttemptCancellation {
 /// Per-execution context carried outside provider bodies and headers.
 #[derive(Clone)]
 pub struct AttemptContext {
+    configured_provider: Option<Arc<str>>,
     shared: Arc<SharedAttemptContext>,
     cancellation: Arc<AttemptCancellation>,
 }
@@ -142,12 +159,15 @@ impl AttemptContext {
         let (sender, receiver) = sync_channel(capacity);
         Ok((
             Self {
+                configured_provider: None,
                 shared: Arc::new(SharedAttemptContext {
                     execution_id,
                     nonce,
                     sender,
                     next_ordinal: AtomicU64::new(0),
                     dropped: AtomicU64::new(0),
+                    single_attempt_id: None,
+                    qualified_response: OnceLock::new(),
                 }),
                 cancellation: Arc::new(AttemptCancellation {
                     reason: AtomicU8::new(CANCELLED),
@@ -158,16 +178,96 @@ impl AttemptContext {
         ))
     }
 
+    /// Bind one retry-free transport invocation to an already persisted attempt
+    /// identity. This is correlation, not a credential or dispatch permit. Reuse
+    /// is refused before constructing/polling another transport future.
+    pub fn single_attempt(
+        execution_id: impl Into<String>,
+        attempt_id: impl Into<String>,
+    ) -> Result<(Self, AttemptReceiver), AttemptContextError> {
+        let attempt_id = attempt_id.into();
+        if attempt_id.len() != 64
+            || !attempt_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(AttemptContextError::InvalidAttemptId);
+        }
+        let (mut context, receiver) = Self::channel(execution_id, 2)?;
+        Arc::get_mut(&mut context.shared)
+            .expect("new private context")
+            .single_attempt_id = Some(attempt_id);
+        Ok((context, receiver))
+    }
+
+    /// Factory/handle-owned diagnostic label, never caller wire metadata or dispatch authority.
+    pub(crate) fn with_configured_provider(mut self, provider: &str) -> Self {
+        self.configured_provider = Some(Arc::from(bounded_label(provider, MAX_PROVIDER_BYTES)));
+        self
+    }
+
+    pub(crate) fn begin_checked(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+    ) -> Result<Option<AttemptGuard>, ProviderError> {
+        let guard = self.begin(provider, model);
+        if guard.is_none() && self.shared.single_attempt_id.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "single physical-attempt context has already been consumed".into(),
+            ));
+        }
+        if guard.is_none() {
+            tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+        }
+        Ok(guard)
+    }
+
     /// Observations dropped because the bounded channel was full or disconnected.
     #[must_use]
     pub fn dropped_observations(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
     }
 
+    /// Gateway dispatches observed by this context, distinct from authorized
+    /// attempt slots or provider execution/billing. Counts do not authorize settlement.
+    pub fn dispatch_count(&self) -> u64 {
+        self.shared.next_ordinal.load(Ordering::Relaxed)
+    }
+
+    /// Source-qualified evidence survives decoder errors and stream drop. Only
+    /// the built-in physical transport can attach it, once, to a tracked attempt.
+    pub fn qualified_stream_evidence(&self) -> Option<crate::raw::QualifiedStreamEvidence> {
+        match self.shared.qualified_response.get()? {
+            QualifiedResponseEvidence::Stream(observed) => Some(observed.evidence()),
+            QualifiedResponseEvidence::Buffered(_) => None,
+        }
+    }
+
+    pub fn qualified_buffered_evidence(&self) -> Option<QualifiedBufferedEvidence> {
+        match self.shared.qualified_response.get()? {
+            QualifiedResponseEvidence::Buffered(observed) => Some(observed.as_ref().clone()),
+            QualifiedResponseEvidence::Stream(_) => None,
+        }
+    }
+
+    pub(crate) fn attach_qualified_stream(
+        &self,
+        observation: crate::raw::QualifiedStreamObservation,
+    ) {
+        if self.shared.single_attempt_id.is_some() {
+            let _ = self
+                .shared
+                .qualified_response
+                .set(QualifiedResponseEvidence::Stream(observation));
+        }
+    }
+
     /// Give one retry/setup future an independent cancellation reason while retaining execution
     /// identity and the shared monotonic attempt ordinal.
     pub(crate) fn fresh_call(&self) -> Self {
         Self {
+            configured_provider: self.configured_provider.clone(),
             shared: self.shared.clone(),
             cancellation: Arc::new(AttemptCancellation {
                 reason: AtomicU8::new(CANCELLED),
@@ -192,17 +292,31 @@ impl AttemptContext {
     }
 
     pub(crate) fn begin(&self, provider: &str, model: Option<&str>) -> Option<AttemptGuard> {
-        let ordinal = self
-            .shared
-            .next_ordinal
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(1)
-            })
-            .ok()?
-            .saturating_add(1);
-        let provider = bounded_label(provider, MAX_PROVIDER_BYTES);
+        let ordinal = if self.shared.single_attempt_id.is_some() {
+            self.shared
+                .next_ordinal
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .ok()?;
+            1
+        } else {
+            self.shared
+                .next_ordinal
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                })
+                .ok()?
+                .saturating_add(1)
+        };
+        let provider = bounded_label(
+            self.configured_provider.as_deref().unwrap_or(provider),
+            MAX_PROVIDER_BYTES,
+        );
         let model = model.map(|value| bounded_label(value, MAX_MODEL_BYTES));
-        let attempt_id = format!("att_{}_{ordinal:016x}", hex(&self.shared.nonce));
+        let attempt_id = self
+            .shared
+            .single_attempt_id
+            .clone()
+            .unwrap_or_else(|| format!("att_{}_{ordinal:016x}", hex(&self.shared.nonce)));
         let guard = AttemptGuard {
             context: self.clone(),
             attempt_id,
@@ -221,6 +335,7 @@ impl AttemptContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttemptContextError {
     InvalidExecutionId,
+    InvalidAttemptId,
     InvalidCapacity,
     EntropyUnavailable,
 }
@@ -229,6 +344,7 @@ impl fmt::Display for AttemptContextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidExecutionId => write!(f, "invalid attempt execution id"),
+            Self::InvalidAttemptId => write!(f, "invalid persisted attempt id"),
             Self::InvalidCapacity => write!(f, "attempt channel capacity must be 1..=65536"),
             Self::EntropyUnavailable => write!(f, "attempt id entropy unavailable"),
         }
@@ -252,7 +368,10 @@ pub(crate) struct AttemptGuard {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AttemptResponseFacts(Arc<OnceLock<ResponseFactValues>>);
+pub(crate) struct AttemptResponseFacts(
+    Arc<OnceLock<ResponseFactValues>>,
+    Arc<OnceLock<sandhi_core::UsageConventionV1>>,
+);
 
 #[derive(Debug, Clone, Default)]
 struct ResponseFactValues {
@@ -261,15 +380,38 @@ struct ResponseFactValues {
 }
 
 impl AttemptResponseFacts {
+    pub(crate) fn record_usage_convention(&self, value: Option<sandhi_core::UsageConventionV1>) {
+        if let Some(value) = value {
+            let _ = self.1.set(value);
+        }
+    }
     pub(crate) fn record_headers(
         &self,
         status: u16,
         headers: &http::HeaderMap,
         vendor_request_id_header: Option<&str>,
     ) {
+        self.record_peer_headers(
+            sandhi_core::PeerRoleV1::Provider,
+            status,
+            headers,
+            vendor_request_id_header,
+        );
+    }
+    pub(crate) fn record_peer_headers(
+        &self,
+        role: sandhi_core::PeerRoleV1,
+        status: u16,
+        headers: &http::HeaderMap,
+        vendor_request_id_header: Option<&str>,
+    ) {
         let _ = self.0.set(ResponseFactValues {
             provider_status: Some(status),
-            provider_request_id: crate::provider_request_id(headers, vendor_request_id_header),
+            provider_request_id: crate::peer::response_request_id(
+                role,
+                headers,
+                vendor_request_id_header,
+            ),
         });
     }
 
@@ -314,25 +456,20 @@ impl AttemptGuard {
         }
     }
 
-    /// Complete the opt-in qualified stream without downgrading an observed
-    /// request-total measurement when delivery fails. Qualification errors remain
-    /// on the stream snapshot; diagnostic events alone cannot authorize settlement.
+    /// Complete the opt-in stream with its canonical measurement completeness.
+    /// Delivery failure and measurement completeness remain independent facts.
     pub(crate) fn finish_qualified_stream(
         &mut self,
         outcome: AttemptOutcome,
-        usage: Option<ParsedUsage>,
+        usage: Option<&sandhi_core::UsageV2>,
     ) {
         let (status, request_id) = self.response_values();
         self.finish(
             outcome,
             status,
             request_id,
-            usage,
-            if usage.is_some() {
-                UsageCompleteness::Final
-            } else {
-                UsageCompleteness::Unavailable
-            },
+            usage.map(Into::into),
+            usage.map_or(UsageCompleteness::Unavailable, |usage| usage.completeness),
         );
     }
 
@@ -360,6 +497,11 @@ impl AttemptGuard {
         let (outcome, status, request_id) = match error {
             ProviderError::Auth => (AttemptOutcome::ProviderRejected, None, None),
             ProviderError::RateLimited => (AttemptOutcome::ProviderRejected, Some(429), None),
+            ProviderError::GatewayFailure(failure) => (
+                AttemptOutcome::ProviderRejected,
+                failure.http_status,
+                failure.request_id.clone(),
+            ),
             ProviderError::Upstream {
                 status, request_id, ..
             } => (
@@ -371,6 +513,7 @@ impl AttemptGuard {
             ),
             ProviderError::Timeout(_) => (AttemptOutcome::Timeout, None, None),
             ProviderError::InvalidRequest(_)
+            | ProviderError::OutputProjection(_)
             | ProviderError::Transport(_)
             | ProviderError::CircuitOpen => (AttemptOutcome::TransportError, None, None),
         };
@@ -459,12 +602,13 @@ where
     F: std::future::Future<Output = Result<(T, Option<ParsedUsage>), ProviderError>>,
 {
     let facts = AttemptResponseFacts::default();
+    let guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
     let future = make_future(facts.clone());
-    let Some(context) = context else {
-        return future.await.map(|(response, _)| response);
-    };
-    let Some(mut guard) = context.begin(provider, model) else {
-        tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+    let Some(mut guard) = guard else {
         return future.await.map(|(response, _)| response);
     };
     guard.set_response_facts(&facts);
@@ -488,6 +632,7 @@ where
 }
 
 /// Provider-response specialization of [`observe_value`].
+#[cfg(test)]
 pub(crate) async fn observe_complete<Make, F>(
     context: Option<AttemptContext>,
     provider: &str,
@@ -499,6 +644,80 @@ where
     F: std::future::Future<Output = Result<(ProviderResponse, Option<ParsedUsage>), ProviderError>>,
 {
     observe_value(context, provider, model, make_future).await
+}
+
+/// Qualify one built-in JSON response at its physical boundary, before a typed
+/// codec can refuse it. Legacy calls/channels retain their existing behavior.
+pub(crate) async fn observe_complete_qualified<Make, F>(
+    context: Option<AttemptContext>,
+    provider: &str,
+    model: Option<&str>,
+    endpoint: sandhi_core::EndpointFamilyV1,
+    profile: sandhi_core::usage::AnthropicUsageProfile,
+    make_future: Make,
+) -> Result<ProviderResponse, ProviderError>
+where
+    Make: FnOnce(AttemptResponseFacts) -> F,
+    F: std::future::Future<Output = Result<(ProviderResponse, Option<ParsedUsage>), ProviderError>>,
+{
+    use sandhi_core::{usage::AnthropicUsageProfile as A, EndpointFamilyV1 as E};
+    if !matches!(
+        endpoint,
+        E::OpenaiChatCompletions
+            | E::OpenaiResponses
+            | E::AnthropicMessages
+            | E::GeminiGenerateContent
+            | E::CohereChat
+            | E::OllamaChat
+    ) || (profile != A::SeparateCacheWrites && endpoint != E::AnthropicMessages)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "buffered usage profile does not match endpoint".into(),
+        ));
+    }
+    let tracked = context
+        .clone()
+        .filter(|context| context.shared.single_attempt_id.is_some());
+    observe_value(context, provider, model, move |facts| {
+        let response_facts = facts.clone();
+        let future = make_future(facts);
+        async move {
+            let (response, usage) = future.await?;
+            if let Some(context) = tracked {
+                let facts = response_facts.values();
+                let request_id = facts.provider_request_id.map(|id| bounded_label(&id, 256));
+                let counts = if facts.provider_status != Some(response.status)
+                    || !(200..300).contains(&response.status)
+                {
+                    Err(sandhi_core::usage::BufferedUsageError::InvalidResponse)
+                } else {
+                    sandhi_core::usage::qualify_buffered_usage_with_profile(
+                        endpoint,
+                        response
+                            .usage_convention
+                            .map_or(profile, |value| value.anthropic_profile()),
+                        &response.body,
+                    )
+                }
+                .map(|mut usage| {
+                    usage.upstream_request_id = request_id.clone();
+                    usage
+                });
+                let _ = context
+                    .shared
+                    .qualified_response
+                    .set(QualifiedResponseEvidence::Buffered(Box::new(
+                        QualifiedBufferedEvidence {
+                            endpoint,
+                            upstream_request_id: request_id,
+                            usage: counts,
+                        },
+                    )));
+            }
+            Ok((response, usage))
+        }
+    })
+    .await
 }
 
 /// Observe stream setup and retain the lifecycle guard until the stream terminates or is dropped.
@@ -513,12 +732,13 @@ where
     F: std::future::Future<Output = Result<ByteStream, ProviderError>>,
 {
     let facts = AttemptResponseFacts::default();
+    let guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
     let future = make_future(facts.clone());
-    let Some(context) = context else {
-        return future.await;
-    };
-    let Some(mut guard) = context.begin(provider, model) else {
-        tracing::error!("physical-attempt ordinal exhausted; observation disabled for call");
+    let Some(mut guard) = guard else {
         return future.await;
     };
     guard.set_response_facts(&facts);
@@ -534,6 +754,84 @@ where
 struct ObservedStream {
     inner: ByteStream,
     guard: Option<AttemptGuard>,
+}
+
+/// One guard at the actual HTTP response boundary; usage comes from the strict
+/// complete-event observer, independently of the typed decoder or diagnostics.
+pub(crate) async fn observe_qualified_stream<Make, F>(
+    context: Option<AttemptContext>,
+    provider: &str,
+    model: Option<&str>,
+    endpoint: sandhi_core::EndpointFamilyV1,
+    profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+    anthropic_profile: sandhi_core::usage::AnthropicUsageProfile,
+    make_future: Make,
+) -> Result<crate::QualifiedProviderStream, ProviderError>
+where
+    Make: FnOnce(AttemptResponseFacts) -> F,
+    F: std::future::Future<
+        Output = Result<(crate::raw::RawChunkStream, Option<String>), ProviderError>,
+    >,
+{
+    // Validate conventions before creating an attempt or performing HTTP I/O.
+    let observer =
+        crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+            endpoint,
+            profile,
+            anthropic_profile,
+        )
+        .map_err(|_| {
+            ProviderError::InvalidRequest("stream usage profile does not match endpoint".into())
+        })?;
+    let facts = AttemptResponseFacts::default();
+    let mut guard = context
+        .as_ref()
+        .map(|context| context.begin_checked(provider, model))
+        .transpose()?
+        .flatten();
+    if let Some(guard) = &mut guard {
+        guard.set_response_facts(&facts);
+    }
+    let (raw, request_id) = match make_future(facts.clone()).await {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some(guard) = &mut guard {
+                guard.finish_error(&error);
+            }
+            return Err(error);
+        }
+    };
+    let observer = if let Some(convention) = facts.1.get() {
+        crate::stream_usage::ProtocolStreamUsageObserver::for_endpoint_with_usage_profiles(
+            endpoint,
+            convention.chat_profile(),
+            convention.anthropic_profile(),
+        )
+        .map_err(|_| ProviderError::OutputProjection("invalid gateway usage convention".into()))?
+        .with_gateway_peer()
+    } else {
+        observer
+    };
+    let (raw, observation) =
+        crate::raw::qualified_stream::observe_response(raw, guard, observer, request_id);
+    if let Some(context) = context {
+        context.attach_qualified_stream(observation.clone());
+    }
+    use futures_util::StreamExt;
+    let metadata = observation.clone();
+    Ok(crate::QualifiedProviderStream {
+        stream: Box::pin(raw.map(move |chunk| {
+            chunk.map(|data| StreamChunk {
+                data,
+                usage: None,
+                usage_running: None,
+                cache_read_observation: metadata.cache_read_observation(),
+                attempts: 1,
+                terminal: false,
+            })
+        })),
+        observation,
+    })
 }
 
 impl Stream for ObservedStream {
@@ -598,7 +896,7 @@ fn validate_label(value: &str, max_bytes: usize) -> Result<(), ()> {
     Ok(())
 }
 
-fn bounded_label(value: &str, max_bytes: usize) -> String {
+pub(crate) fn bounded_label(value: &str, max_bytes: usize) -> String {
     let mut output = String::with_capacity(value.len().min(max_bytes));
     for character in value.chars() {
         let sanitized = if character.is_control() {
@@ -642,6 +940,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_attempt_reuse_refuses_before_constructing_any_transport_future() {
+        let id = "a".repeat(64);
+        let (context, receiver) = AttemptContext::single_attempt("execution", &id).unwrap();
+        observe_value(Some(context.fresh_call()), "provider", None, |_| async {
+            Ok(((), None))
+        })
+        .await
+        .unwrap();
+        let result = observe_value(Some(context.fresh_call()), "provider", None, |_| {
+            panic!("second transport future must never be constructed");
+            #[allow(unreachable_code)]
+            async {
+                Ok(((), None))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+        let result = observe_stream(Some(context.fresh_call()), "provider", None, |_| {
+            panic!("stream future must never be constructed after consuming a unary attempt");
+            #[allow(unreachable_code)]
+            async {
+                Ok(Box::pin(stream::empty()) as ByteStream)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+        let events = receiver.drain();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|e| e.attempt_id == id && e.attempt_ordinal == 1));
+        assert_eq!(context.dropped_observations(), 0);
+        assert!(AttemptContext::single_attempt("exec", "invalid").is_err());
+    }
+
+    #[tokio::test]
     async fn complete_emits_dispatch_and_bounded_terminal_measurement() {
         let (context, receiver) = context();
         let usage = ParsedUsage {
@@ -651,6 +985,7 @@ mod tests {
             ..ParsedUsage::default()
         };
         let response = ProviderResponse {
+            usage_convention: None,
             status: 200,
             body: serde_json::json!({}),
             usage,
@@ -963,5 +1298,111 @@ mod tests {
             .store(u64::MAX, Ordering::Relaxed);
         assert!(context.begin("provider", Some("model")).is_none());
         assert!(receiver.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_stream_profiles_refuse_before_attempt_authorization_or_http_setup() {
+        use sandhi_core::usage::{AnthropicUsageProfile as A, OpenAiStreamUsageProfile as O};
+        use sandhi_core::EndpointFamilyV1 as E;
+        for (endpoint, openai, anthropic) in [
+            (E::OpenaiChatCompletions, O::Standard, A::ImplicitCache),
+            (
+                E::AnthropicMessages,
+                O::TerminalChunk,
+                A::SeparateCacheWrites,
+            ),
+            (E::BedrockConverse, O::Standard, A::SeparateCacheWrites),
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("invalid-profile", "e".repeat(64)).unwrap();
+            let result = observe_qualified_stream(
+                Some(context.clone()),
+                "fixture",
+                Some("fixture"),
+                endpoint,
+                openai,
+                anthropic,
+                |_| async {
+                    panic!("invalid profile reached physical HTTP setup");
+                    #[allow(unreachable_code)]
+                    Ok((
+                        Box::pin(futures_util::stream::empty()) as crate::raw::RawChunkStream,
+                        None,
+                    ))
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+            assert_eq!(context.dispatch_count(), 0);
+            assert!(receiver.drain().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_buffered_profiles_refuse_before_authorization_and_http_setup() {
+        use sandhi_core::{usage::AnthropicUsageProfile as A, EndpointFamilyV1 as E};
+        for (endpoint, profile) in [
+            (E::OpenaiChatCompletions, A::ImplicitCache),
+            (E::BedrockConverse, A::SeparateCacheWrites),
+        ] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("invalid-buffer-profile", "a".repeat(64)).unwrap();
+            let result = observe_complete_qualified(
+                Some(context.clone()),
+                "fixture",
+                Some("fixture"),
+                endpoint,
+                profile,
+                |_| async {
+                    panic!("invalid buffered profile reached HTTP setup");
+                    #[allow(unreachable_code)]
+                    Ok((
+                        ProviderResponse {
+                            usage_convention: None,
+                            status: 200,
+                            body: serde_json::json!({}),
+                            usage: Default::default(),
+                            attempts: 1,
+                        },
+                        None,
+                    ))
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(ProviderError::InvalidRequest(_))));
+            assert_eq!(context.dispatch_count(), 0);
+            assert!(context.qualified_buffered_evidence().is_none());
+            assert!(receiver.drain().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_source_evidence_survives_diagnostic_loss_and_requires_response_facts() {
+        use sandhi_core::{EndpointFamilyV1 as E, UsageCompleteness};
+        for headers in [false, true] {
+            let (context, receiver) =
+                AttemptContext::single_attempt("buffered-facts", "b".repeat(64)).unwrap();
+            drop(receiver);
+            observe_complete_qualified(Some(context.clone()),"fixture",Some("fixture"),E::OpenaiChatCompletions,Default::default(),
+                |facts|async move {
+                    if headers {facts.record_headers(200,&Default::default(),None);}
+                    Ok((ProviderResponse{usage_convention:None,status:200,body:serde_json::json!({"usage":{"prompt_tokens":8,"completion_tokens":4,
+                        "prompt_tokens_details":{"cached_tokens":6},"completion_tokens_details":{"reasoning_tokens":0}}}),
+                        usage:Default::default(),attempts:1},None))
+                }).await.unwrap();
+            let evidence = context.qualified_buffered_evidence().unwrap();
+            assert!(context.qualified_stream_evidence().is_none());
+            assert_eq!(evidence.usage.is_ok(), headers);
+            if let Ok(usage) = evidence.usage {
+                assert_eq!(
+                    (usage.tokens_in, usage.cache_read_tokens, usage.tokens_out),
+                    (2, 6, 4)
+                );
+                assert_eq!(usage.reasoning_tokens, Some(0));
+                assert_eq!(usage.completeness, UsageCompleteness::Final);
+            }
+            assert_eq!(context.dispatch_count(), 1);
+            assert_eq!(context.dropped_observations(), 2);
+        }
     }
 }
