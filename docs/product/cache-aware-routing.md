@@ -6,11 +6,10 @@ usage accounting at the gateway, alongside [local egress policy](../operator/pol
 and [embedded ONNX evaluation](../operator/embedded-onnx.md).
 
 !!! info "Release and qualification scope"
-    Sandhi **0.17.1** is the published baseline. This guide also describes the
-    **0.18 source candidate**; Victor **0.29.0** remains a coordinated source
-    candidate. Use the [release notes](../releases/v0.17.1.md) when selecting an
-    installed version. A configured backend or successful docs build does not
-    establish deployment, cache lifecycle or subscription acceptance.
+    Sandhi **0.18.0** is the published gateway baseline, and Victor **0.29.1**
+    pins its verified official SDK. Use the [0.18 release notes](../releases/v0.18.0.md)
+    when selecting an installed version. A configured backend or successful docs
+    build does not establish deployment, cache lifecycle or subscription acceptance.
 
 ## One operator workflow
 

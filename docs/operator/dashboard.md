@@ -1,6 +1,6 @@
 # Operator console
 
-Status: 0.18.0 source candidate; not a published release. Open `/dashboard` on your gateway. The
+Status: shipped in Sandhi 0.18.0. Open `/dashboard` on your gateway. The
 console uses the gateway's existing APIs and serves local assets; no separate
 frontend build or service is required. Production identity and TLS configuration
 follow the [identity guide](oidc-sso.md).
@@ -8,7 +8,7 @@ follow the [identity guide](oidc-sso.md).
 ![Local starter dashboard with shared access and synthetic token usage](../assets/identity/starter-dashboard.png)
 
 *Real browser capture from a disposable local gateway running the 0.18 starter
-candidate. Browser checks exercised navigation, reads and a budget write without
+profile. Browser checks exercised navigation, reads and a budget write without
 client credentials. The model usage is synthetic; this capture does not establish
 OIDC login, public deployment or live-provider cache behavior.*
 
