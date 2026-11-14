@@ -132,7 +132,7 @@ contracts, design history and co-design snapshots.
 | Inspect usage, routing and management in one console | [Operator console](operator/dashboard.md) · open `/dashboard` on your gateway |
 | Reuse agent context and understand cache marker/token semantics | [Cache-aware routing](product/cache-aware-routing.md) · [backend configuration](operator/backends.md) |
 | Evaluate outgoing text locally before provider dispatch | [Embedded ONNX](operator/embedded-onnx.md) · [sensitive-text policy](operator/sensitive-policy.md) |
-| Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [groups and delegated keys](operator/identity-groups.md) |
+| Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [credential lifetimes](operator/credential-lifetimes.md) · [groups and delegated keys](operator/identity-groups.md) |
 | Set global, endpoint or model deadlines | [Buffered calls](operator/buffered-deadlines.md) · [streaming](operator/streaming-deadlines.md) |
 | Understand cache counts and missing measurements | [Cache reporting](adr/0010-cache-read-reporting-availability.md) |
 | Rehearse restart and restore safely | [Recovery drill](operator/recovery-drill.md) |

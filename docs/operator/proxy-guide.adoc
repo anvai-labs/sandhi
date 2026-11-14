@@ -17,16 +17,16 @@ attributed while the real upstream key never leaves the server.
 [NOTE]
 ====
 Sandhi emits **neutral units only** (tokens, the cache-creation/read split, GPU-seconds).
-Pricing, billing, and tier policy are downstream concerns owned by the AnvaiOps control
+Pricing, billing, and tier policy are downstream concerns owned by the downstream control
 plane — nothing here involves dollars.
 ====
 
 
 == How it fits
 
-The 0.18 source candidate defaults to a credential-free loopback starter with
+Sandhi 0.18.0 defaults to a credential-free loopback starter with
 one shared identity and budget. Tokens and OIDC are optional profiles. Follow
-link:oidc-sso.md[access profiles and Anvai Identity integration]
+link:oidc-sso.md[access profiles and OIDC integration]
 for browser login, role assignment and short-lived agent access tokens. The virtual-key
 bootstrap examples below require explicitly selecting `SANDHI_AUTH_MODE=tokens`; they do not
 override an OIDC failure or grant access to an OIDC deployment.
@@ -330,7 +330,7 @@ streams is tracked separately; restart the process to replace the identity in th
 
 ==== Upgrade credential-bearing HTTP deployments
 
-Earlier sources warned about plaintext listeners. The 0.18 candidate now refuses them by
+Earlier sources warned about plaintext listeners. Sandhi 0.18.0 refuses them by
 default for token/OIDC mode, an optional admin token, or a client-credentials registry.
 Configure `tls.cert`/`tls.key`, remove `SANDHI_HTTP_BIND`, and update clients to the verified
 HTTPS URL before restarting. Do not disable authentication to restore an old HTTP route.
