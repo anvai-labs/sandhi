@@ -56,12 +56,11 @@ dispatch. Pricing and billing belong to downstream systems.
 
 </div>
 
-!!! info "Published baseline and source documentation"
-    Sandhi **0.17.1** is published. This development site also describes the
-    **0.18 source candidate** and coordinated Victor **0.29.0** integration.
-    Check [release notes](releases/v0.17.1.md) before configuring an installed
-    version. Live qualification applies to its recorded endpoint and source;
-    documentation, source integration and deployment acceptance are separate.
+!!! info "Published baseline"
+    Sandhi **0.18.0** and the coordinated Victor **0.29.1** client are
+    published. Check the [0.18 release notes](releases/v0.18.0.md) before
+    configuring an installed version. Live qualification applies to its recorded
+    endpoint and source; publication and deployment acceptance are separate.
 
 ## One request, two responsibilities
 
