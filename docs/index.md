@@ -57,12 +57,11 @@ dispatch. Pricing and billing belong to downstream systems.
 </div>
 
 !!! info "Published baseline"
-    Sandhi **0.19.0** is the reviewed source candidate for model-scoped
-    OIDC budgets; **0.18.0** and Victor **0.29.1** remain the published
-    baseline. Check the [0.19 release guide](releases/v0.19.0.md) and
-    [0.18 release notes](releases/v0.18.0.md) before configuring an installation.
-    Live qualification applies to its recorded endpoint and source; publication and
-    deployment acceptance are separate.
+    Sandhi **0.19.0** is published with model-scoped OIDC budgets.
+    Check the [0.19 release guide](releases/v0.19.0.md) before configuring an
+    installation, and use the coordinated Victor consumer release that pins the
+    verified `sandhi-gateway==0.19.0` binding. Publication and deployment
+    acceptance remain separate.
 
 ## One request, two responsibilities
 
