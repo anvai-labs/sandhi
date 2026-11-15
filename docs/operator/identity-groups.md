@@ -159,6 +159,37 @@ credential, verify it, then revoke the old public ID. Rotating does not reset th
 shared owner/grant budget or rate bucket. Revocation and owner mapping persist
 across gateway restart.
 
+### Model-scoped budgets
+
+A grant normally has one front budget scope. When one grant intentionally exposes
+models backed by distinct plans, configure `model_budget_scope` with exactly one
+`{model}` token:
+
+```json
+{
+  "upstream": "route/coding",
+  "models": ["coding-fast", "coding-reasoning", "coding-open"],
+  "budget_scope": "coding/shared",
+  "model_budget_scope": "coding/{model}",
+  "rate_limit_per_min": 30
+}
+```
+
+The user still selects only a logical model. Sandhi selects the hidden backend
+and credential, then charges that request against the matching configured
+scope. The shared `budget_scope` remains the fallback semantics for grants that
+do not opt into this template.
+
+A literal `{model}` in a grant's ordinary `budget_scope` remains that exact
+fixed scope. Only the explicit `model_budget_scope` field activates dynamic
+model-derived accounting.
+
+Each derived scope can have its own limit, window, alert threshold and `warn` or
+`block` policy. A blocked or exhausted model does not deny the other models; the
+user can deliberately choose another still-authorized model. A warning records
+the threshold event and continues. The template is validated at startup, cannot
+use the reserved `upstream:` scope, and cannot introduce another placeholder.
+
 ## Membership freshness and failure
 
 Existing delegated keys retain their verified membership evidence until their

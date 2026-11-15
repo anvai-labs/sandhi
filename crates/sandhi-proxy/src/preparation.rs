@@ -89,7 +89,7 @@ pub(super) async fn prepare(
     policy_receipt: &Mutex<Option<String>>,
 ) -> Result<PreparedRequest, Response> {
     let ResolvedRoute {
-        vk,
+        mut vk,
         provider,
         rate_identity,
         policy_identity,
@@ -241,6 +241,13 @@ pub(super) async fn prepare(
         (_, Some(provider)) => provider,
         _ => unreachable!("selected logical or fixed backend"),
     };
+    let selected_logical_model = selected
+        .as_ref()
+        .map(|selected| selected.plan.requested_model.clone())
+        .unwrap_or_else(|| request.model.clone());
+    if let Some(scope) = crate::model_budget_scope(&vk, &selected_logical_model) {
+        vk.budget_scope = Some(scope);
+    }
     if !context.count_only && !provider.reference_credential_is_current() {
         return Err(crate::provider_error(
             &sandhi_providers::ProviderError::Auth,

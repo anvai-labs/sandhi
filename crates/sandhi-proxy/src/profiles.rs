@@ -136,6 +136,7 @@ async fn mint_profile_virtual_key(
             upstream_ref: upstream.to_string(),
             models: record.models.clone(),
             budget_scope: None,
+            model_budget_scope: None,
             expires_at: None,
             rate_limit_per_min: None,
         })
@@ -154,6 +155,7 @@ async fn mint_profile_virtual_key(
         upstream_ref: minted.record.upstream_ref.clone(),
         models: Some(minted.record.model_list()),
         budget_scope: minted.record.budget_scope.clone(),
+        model_budget_scope: minted.record.model_budget_scope.clone(),
         expires_at: minted.record.expires_at.clone(),
         rate_limit_per_min: minted.record.rate_limit_per_min,
     };

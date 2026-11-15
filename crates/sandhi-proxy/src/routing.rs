@@ -255,7 +255,7 @@ pub(crate) async fn select(
     let plan = DispatchPlan {
         route_id: record.definition.id.clone(),
         route_revision: record.revision,
-        requested_model: requested,
+        requested_model: model.id.clone(),
         backend_id: binding.id.clone(),
         provider_label: binding.provider.clone(),
         backend_revision: binding.revision,

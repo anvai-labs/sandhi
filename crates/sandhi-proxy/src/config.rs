@@ -502,6 +502,7 @@ mod tests {
             group_id: group.map(String::from),
             models: None,
             budget_scope: None,
+            model_budget_scope: None,
             expires_at: None,
             rate_limit_per_min: None,
             created_at: "2026-01-01T00:00:00Z".into(),

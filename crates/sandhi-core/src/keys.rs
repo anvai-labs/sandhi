@@ -38,6 +38,10 @@ pub struct VirtualKey {
     /// Explicit budget scope (e.g. `user:alice`, `group:platform`). Overrides the default
     /// group/vk-derived scope when set.
     pub budget_scope: Option<String>,
+    /// Optional budget-scope template derived from the authorized logical model. It is kept
+    /// separate from `budget_scope` so a legacy literal scope can never silently become dynamic.
+    #[doc(hidden)]
+    pub model_budget_scope: Option<String>,
     /// RFC 3339 expiry timestamp. A presented key past this instant is rejected.
     pub expires_at: Option<String>,
     /// Optional rate limit in requests/minute.

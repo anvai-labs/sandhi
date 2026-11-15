@@ -947,6 +947,7 @@ pub(crate) async fn share_key(
         upstream_ref: upstream.clone(),
         models: req.models.clone().unwrap_or_default(),
         budget_scope: req.budget_scope.clone(),
+        model_budget_scope: None,
         expires_at: req.expires_at.clone(),
         rate_limit_per_min: req.rate_limit_per_min,
     };
@@ -969,6 +970,7 @@ pub(crate) async fn share_key(
         upstream_ref: minted.record.upstream_ref.clone(),
         models: Some(minted.record.model_list()),
         budget_scope: minted.record.budget_scope.clone(),
+        model_budget_scope: minted.record.model_budget_scope.clone(),
         expires_at: minted.record.expires_at.clone(),
         rate_limit_per_min: minted.record.rate_limit_per_min,
     };
@@ -1711,6 +1713,7 @@ pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &VirtualKeyStore) {
             upstream_ref: rec.upstream_ref.clone(),
             models: Some(rec.model_list()),
             budget_scope: rec.budget_scope.clone(),
+            model_budget_scope: rec.model_budget_scope.clone(),
             expires_at: rec.expires_at.clone(),
             rate_limit_per_min: rec.rate_limit_per_min,
         };
@@ -2443,6 +2446,7 @@ mod mutation_lifecycle_tests {
                 group_id: None,
                 models: Vec::new(),
                 budget_scope: None,
+                model_budget_scope: None,
                 expires_at: None,
                 rate_limit_per_min: None,
             })

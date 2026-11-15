@@ -91,6 +91,10 @@ pub struct Grant {
     pub models: Vec<String>,
     pub group: Option<String>,
     pub budget_scope: Option<String>,
+    /// Optional template that derives a front budget scope from the selected
+    /// logical model. The template must contain exactly one `{model}` token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_budget_scope: Option<String>,
     pub rate_limit_per_min: Option<u32>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -216,6 +220,48 @@ impl Config {
                         "grant '{name}' budget_scope '{scope}' uses the reserved 'upstream:' prefix: back-leg per-provider caps are gateway-managed, not per-grant (ADR-0015)"
                     ));
                 }
+                if let Some(template) = g.model_budget_scope.as_deref() {
+                    let model_has_braces = g
+                        .models
+                        .iter()
+                        .any(|model| model.contains('{') || model.contains('}'));
+                    let model_shape = g.models.iter().all(|model| {
+                        !model.is_empty()
+                            && model.len() <= 512
+                            && !model.chars().any(|c| c.is_whitespace() || c.is_control())
+                    });
+                    let bounded_model_count = g.models.len() <= 128;
+                    let unique_model_identity = g.models.iter().enumerate().all(|(i, model)| {
+                        g.models
+                            .iter()
+                            .skip(i + 1)
+                            .all(|other| !model.eq_ignore_ascii_case(other))
+                    });
+                    let literal_parts = template.replace("{model}", "");
+                    let valid_shape = !template.is_empty()
+                        && template.len() <= 512
+                        && template.matches("{model}").count() == 1
+                        && !literal_parts.contains('{')
+                        && !literal_parts.contains('}')
+                        && literal_parts
+                            .chars()
+                            .all(|c| !c.is_whitespace() && !c.is_control())
+                        && model_shape
+                        && bounded_model_count
+                        && unique_model_identity
+                        && !model_has_braces
+                        && g.models.iter().all(|model| {
+                            let scope = template.replace("{model}", model);
+                            !scope.is_empty()
+                                && scope.len() <= 1024
+                                && !scope.starts_with("upstream:")
+                        });
+                    if !valid_shape || template.starts_with("upstream:") {
+                        return Err(format!(
+                            "grant '{name}' model_budget_scope must contain exactly one {{model}} token, use no other braces or whitespace, stay bounded, and avoid the reserved 'upstream:' prefix"
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -288,6 +334,7 @@ impl Config {
             upstream_ref: g.upstream.clone(),
             models: Some(g.models.clone()),
             budget_scope: g.budget_scope.clone(),
+            model_budget_scope: g.model_budget_scope.clone(),
             rate_limit_per_min: g.rate_limit_per_min,
             expires_at: None,
         })
@@ -1194,6 +1241,43 @@ fn default_delegation_ttl() -> u32 {
     120
 }
 
+fn canonical_delegation_models(
+    grant: &sandhi_core::VirtualKey,
+    requested: &[String],
+) -> Option<Vec<String>> {
+    if requested.len() > 128
+        || requested
+            .iter()
+            .any(|model| model.is_empty() || model.len() > 256 || model.contains(','))
+    {
+        return None;
+    }
+    let allowed = grant.models.as_deref().unwrap_or(&[]);
+    let selected = if requested.is_empty() {
+        allowed.to_vec()
+    } else {
+        requested
+            .iter()
+            .map(|model| {
+                allowed
+                    .iter()
+                    .find(|allowed| allowed.eq_ignore_ascii_case(model))
+                    .cloned()
+            })
+            .collect::<Option<Vec<_>>>()?
+    };
+    selected
+        .iter()
+        .enumerate()
+        .all(|(index, model)| {
+            selected
+                .iter()
+                .skip(index + 1)
+                .all(|other| !model.eq_ignore_ascii_case(other))
+        })
+        .then_some(selected)
+}
+
 /// Exchange a verified access token for an attenuated agent key.
 /// Lifetimes above 120 seconds require an explicitly configured durable subject grant.
 /// Delegated keys cannot mint more keys or access administration endpoints.
@@ -1250,14 +1334,9 @@ pub(crate) async fn delegate_key(
     else {
         return failure(StatusCode::FORBIDDEN, "no matching inference grant");
     };
-    if body.models.len() > 128
-        || body
-            .models
-            .iter()
-            .any(|m| m.is_empty() || m.len() > 256 || m.contains(',') || !grant.permits_model(m))
-    {
+    let Some(delegation_models) = canonical_delegation_models(&grant, &body.models) else {
         return failure(StatusCode::FORBIDDEN, "delegation exceeds model grant");
-    }
+    };
     let Some(vkeys) = state.vkeys.clone() else {
         return unavailable();
     };
@@ -1291,12 +1370,9 @@ pub(crate) async fn delegate_key(
         subject_id: grant.subject_id,
         group_id: grant.group_id,
         upstream_ref: grant.upstream_ref,
-        models: if body.models.is_empty() {
-            grant.models.unwrap_or_default()
-        } else {
-            body.models
-        },
+        models: delegation_models,
         budget_scope: grant.budget_scope,
+        model_budget_scope: grant.model_budget_scope,
         expires_at: Some(expires),
         rate_limit_per_min: grant.rate_limit_per_min,
     };
@@ -1406,14 +1482,27 @@ impl Oidc {
         if grant.upstream_ref != record.upstream_ref
             || grant.group_id != record.group_id
             || grant.budget_scope != record.budget_scope
+            || grant.model_budget_scope != record.model_budget_scope
         {
             return Err(StatusCode::FORBIDDEN);
         }
-        let models: Vec<_> = record
-            .model_list()
-            .into_iter()
-            .filter(|m| grant.permits_model(m))
-            .collect();
+        let allowed_models = grant.models.clone().unwrap_or_default();
+        let mut models: Vec<String> = Vec::new();
+        for requested in record.model_list() {
+            let Some(canonical) = allowed_models
+                .iter()
+                .find(|allowed| allowed.eq_ignore_ascii_case(&requested))
+                .cloned()
+            else {
+                continue;
+            };
+            if !models
+                .iter()
+                .any(|selected| selected.eq_ignore_ascii_case(&canonical))
+            {
+                models.push(canonical);
+            }
+        }
         if models.is_empty() {
             return Err(StatusCode::FORBIDDEN);
         }

@@ -3667,6 +3667,19 @@ fn budget_scope(vk: &VirtualKey) -> String {
     }
 }
 
+pub(crate) fn model_budget_scope(vk: &VirtualKey, model: &str) -> Option<String> {
+    let template = vk.model_budget_scope.as_deref()?;
+    let canonical = vk
+        .models
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|allowed| allowed.eq_ignore_ascii_case(model))
+        .cloned()
+        .unwrap_or_else(|| model.to_string());
+    Some(template.replace("{model}", &canonical))
+}
+
 enum VirtualKeyResolution {
     Found(Box<VirtualKey>, String, sandhi_core::policy::Identity),
     NotFound,

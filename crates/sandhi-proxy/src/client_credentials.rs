@@ -325,6 +325,7 @@ pub(crate) async fn client_token(
         upstream_ref: upstream.clone(),
         models: entry.models.clone(),
         budget_scope: entry.budget_scope.clone(),
+        model_budget_scope: None,
         expires_at: Some(expires_at),
         rate_limit_per_min: entry.rate_limit_per_min,
     };
@@ -344,6 +345,7 @@ pub(crate) async fn client_token(
         upstream_ref: minted.record.upstream_ref.clone(),
         models: Some(minted.record.model_list()),
         budget_scope: minted.record.budget_scope.clone(),
+        model_budget_scope: minted.record.model_budget_scope.clone(),
         expires_at: minted.record.expires_at.clone(),
         rate_limit_per_min: minted.record.rate_limit_per_min,
     };
