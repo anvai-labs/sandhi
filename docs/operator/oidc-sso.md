@@ -1,14 +1,13 @@
-# Optional authentication and Anvai Identity integration
+# Optional authentication and OIDC integration
 
-**Sandhi 0.18 release candidate.** The new starter has no client authentication.
-Token and OIDC profiles are optional. Published 0.17.1 retains its earlier startup
-behavior and does not include the resource-audience override described here.
+**Sandhi 0.18.0.** The starter has no client authentication. Token and OIDC are
+optional explicit profiles; invalid configured authentication never falls back to
+a weaker profile.
 
-!!! success "Verified native Agent access through Sandhi's optional OIDC profile"
-    OAuth code/S256, authoritative HTTPS OpenID UserInfo and resource-token
-    access supported a real Victor read-tool loop through the protected gateway. See the
-    [28-token accounting and scope](#public-development-issuer-verified-agent-flow).
-    Separate browser checks cover local roles and an actual HTTPS admin session below.
+!!! tip "Separate login from inference"
+    Browser SSO, resource access tokens and delegated virtual keys have different
+    lifetimes and purposes. Follow the [credential lifetime guide](credential-lifetimes.md)
+    before configuring an unattended agent.
 
 ## Choose an access mode
 
@@ -106,138 +105,54 @@ Use an isolated listener and private test state. Keep signing keys, client
 secrets, token files and detailed operational evidence outside public documentation.
 Never guess an introspection endpoint or select weaker authentication after failure.
 
-<a id="public-development-issuer-verified-agent-flow"></a>
+## Agent integration pattern
 
-## Verified Agent integration
-
-A recorded Anvai Identity integration used a real development issuer, a protected
-local gateway and a synthetic model backend. It demonstrates the identity and
-accounting contract; it is not a hosted-service setup recipe.
+The following is the supported abstract flow. Substitute your qualified identity
+provider, agent client, gateway origin, resource audience, and model grant.
 
 ```mermaid
 sequenceDiagram
-    participant P as Public PKCE client
-    participant I as Public Anvai Identity
-    participant V as Victor Agent
-    participant S as Protected Sandhi
-    participant M as Synthetic model
-    P->>I: OAuth code + S256, HTTPS OpenID UserInfo and resource grant
-    I-->>P: Resource token, 300-second lifetime
-    P->>V: Private token file, mode 0600
-    loop Two Agent requests using the same resource token
-        V->>S: Bearer token and conversation
-        S->>I: Introspect as a separate confidential consumer
-        I-->>S: Active token and intended resource authority
-        S->>M: One physical attempt
-        M-->>S: Original source usage
-        S-->>V: Response and 14-token paired receipt
-    end
+    participant O as Operator
+    participant I as Identity provider
+    participant C as Agent client
+    participant S as Sandhi
+    participant P as Approved backend
+    O->>I: Register distinct origin and consumer clients
+    I-->>C: Audience-bound access token
+    C->>S: Bearer token or delegated key
+    S->>I: Validate token and intended resource
+    S->>S: Apply subject grant, model, rate, egress and budget policy
+    S->>P: One authorized dispatch
+    P-->>S: Response and source usage
+    S-->>C: Response, request ID and neutral usage evidence
 ```
 
-| Verified boundary | Observed result |
+| Boundary | Required result |
 | --- | --- |
-| Registration | Genuine owner/passkey approval; public native Victor origin and a distinct confidential Sandhi introspection consumer |
-| Identity | Public OAuth code/S256 PKCE and authoritative HTTPS OpenID UserInfo; subject matched the owner-authorized registration |
-| Resource | Custom advertised resource-access grant, `online_gateway`, `gateway.access`, 300 seconds; an explicitly registered gateway audience |
-| Gateway route | Protected loopback **HTTP** listener; the audience URI is a resource identifier |
-| Client credential | One resource token in a private `0600` file, reused for both calls |
-| Agent | Real Victor read tool returned content matching the owned test file |
-| Provenance | Request identities, durable usage records and issuer receipts matched |
-
-| Synthetic source units | Request 1 | Request 2 | Total |
-| --- | ---: | ---: | ---: |
-| Physical model attempts | 1 | 1 | **2** |
-| Fresh input tokens | 2 | 2 | 4 |
-| Cache-read tokens | 6 | 6 | 12 |
-| Cache-creation tokens | 2 | 2 | 4 |
-| Output tokens | 4 | 4 | 8 |
-| Paired settled tokens | **14** | **14** | **28** |
-
-The cache categories are included in each 14-token total. Synthetic counts test
-accounting conservation; provider cache reuse, pricing and savings were not measured.
-
-| Acceptance scope | Boundary |
-| --- | --- |
-| Qualified stack | Reviewed Victor source, official published SDK **0.17.1**, and Sandhi **0.18 source candidate** |
-| Sandhi authority | Disposable local administrator binding and a fixture-only inference grant were explicit; `gateway.access` conferred no dashboard or AnvaiOps role |
-| Live coverage | Two successful requests; no additional live expiry, ACL-removal or revocation controls were performed |
-| Separate local evidence | Browser SSO/roles and lifecycle refusals below retain their own fixture provenance |
-| Not exercised in this recorded Agent run | Automatic renewal, deployed browser SSO and paid-provider traffic; separate browser coverage is described below |
-
-The recorded run used an explicitly isolated loopback transport. Authenticated
-network listeners require the TLS configuration described above. The acceptance
-summary is in the [release verification record](../reviews/post-0.17.0-pr-train.md#public-issuer-agent-acceptance).
-
-<a id="local-co-design-victor-sandhi-and-anvaiops-development-idm"></a>
-
-## Integration example: Anvai Identity and Victor
-
-![Locally tested identity, Agent and gateway flow](../assets/identity/local-codesign.svg)
-
-| Component | Responsibility |
-| --- | --- |
-| Anvai Identity | HTTPS login, consent, PKCE, issuance receipts, resource grants and live revocation |
-| Victor | Originating OAuth client; private token-file credential; real Agent/tool execution |
-| Sandhi | Separate introspection consumer; resource-audience and subject/grant checks; durable accounting |
-| Model backend | Synthetic loopback model for repeatable protocol and usage assertions |
-
-### Verified local contract
-
-| Check | Evidence |
-| --- | --- |
-| Operator setup | Supported owner review → passkey approval → apply; resource and consumer ACLs |
-| Positive flow | Real HTTPS login/PKCE, two actual Agent requests and a successful read-tool result |
-| Credential lifecycle | Rotation between requests; introspection and revocation checks |
-| Receipt provenance | Actual wire bearer hashes and returned request IDs joined to IDM issuance receipts and Sandhi's original ledger |
-| Refusals | UserInfo token, ID token, wrong resource, private-file expiry, signed-token expiry and logout |
-| Scope | Disposable local state and synthetic provider; not a live-service deployment |
-
-### Browser SSO and role enforcement
-
-The role matrix below is local-fixture coverage. A separate deployed admin session
-also passed HTTPS login, CSRF enforcement and logout checks.
-
-![OIDC admin session displaying a test token budget](../assets/identity/oidc-dashboard.png)
-
-*Actual OIDC admin session showing a test neutral-token budget; identity redacted.
-No inference usage is shown.*
-
-| Local browser profile | Read budget | Write budget | Read configuration | Cookie-only inference |
-| --- | --- | --- | --- | --- |
-| Admin | 200 | 200 | 200 | 401 |
-| Operator | 200 | 200 | 403 | 401 |
-| Viewer | 200 | 403 | 403 | 401 |
-| Unassigned subject | No dashboard session | Denied | Denied | No inference grant |
-
-Local fixtures verified PKCE/callback processing, Secure/HttpOnly/host-only
-cookies, exact-origin/CSRF refusals, mixed-credential refusal and session-cookie
-replay refusal after logout. The separate deployed admin check verified login,
-CSRF enforcement, logout and subsequent access denial over trusted HTTPS; it did
-not replay a copied cookie or test other live roles.
-
-### Accounting interpretation
-
-The [recorded Agent flow](#public-development-issuer-verified-agent-flow) settled
-28 neutral token units across two requests. Cache categories are included in that
-total. Synthetic usage verifies accounting conservation, not provider pricing,
-cache-hit rates or savings.
+| Browser login | Produces a dashboard session, not an agent inference credential |
+| Access token | Exact issuer, audience, subject and lifetime are accepted |
+| Delegated key | Current grant, model scope, rate/budget scope, expiry and revocation are accepted |
+| Agent call | The selected model succeeds through the intended gateway route |
+| Accounting | Request ID, usage, cache split, budget and source evidence join exactly |
+| Failure | Expiry, denial, revocation and gateway failure never select a direct provider fallback |
 
 ### Validate your deployment
 
 1. Sign in through the dashboard and confirm the intended account and role.
 2. Check an allowed read and a denied write for that role.
-3. Run an agent request with a correctly scoped access token and explicit inference grant.
+3. Run an agent request with a correctly scoped access token or delegated key.
 4. Correlate the returned request identifier with usage and budget records.
-5. Test expiry, logout/revocation and restart before relying on unattended operation.
+5. Exercise expiry, revocation, renewal, restart and operator recovery before relying on unattended operation.
 
-Fixture results do not establish your deployment's admission, roles, token renewal
-or provider access. Qualify those against your own issuer and configuration.
+Fixture or staging results do not establish your deployment's admission, roles,
+token renewal or provider access. Qualify those against your own issuer,
+registrations, listener and configuration.
 
 ## OAuth client identity and access-token resource audience
 
 | Identity | Meaning |
 | --- | --- |
-| Victor origin client | Requests the resource token; may appear as `client_id` in introspection |
+| Agent origin client | Requests the resource token; may appear as `client_id` in introspection |
 | Sandhi consumer `client_id` | Authenticates Sandhi's introspection request; remains the browser ID-token audience |
 | `access_token_audience` | Exact resource identifier intended for Sandhi; defaults to consumer `client_id` only when omitted |
 | Verified subject | Stable `sub` under the configured issuer; not an email, display name or caller header |
@@ -323,9 +238,8 @@ setup does not provision them or move existing spend to a new database.
 | Confidential consumer | Configured secret plus advertised Basic introspection support |
 
 Token-endpoint authentication methods do not stand in for introspection methods.
-A signed JWT still goes through Sandhi's configured introspection path. The local
-Anvai Identity fixture exercises this contract; another provider needs its own
-qualification. References: [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
+A signed JWT still goes through Sandhi's configured introspection path. Qualify
+this contract against your selected provider. References: [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
 and [token introspection](https://www.rfc-editor.org/rfc/rfc7662.html).
 
 ## Roles and agent access
@@ -393,8 +307,9 @@ Qualification applies to the specific issuer and client registration. Recheck
 discovery and supported authentication methods when configuring a deployment;
 do not copy another installation's endpoints or credentials.
 
-The Anvai Identity example qualified the advertised code/PKCE, UserInfo,
-resource-token and introspection paths. Other providers need equivalent checks.
+Qualify the advertised code/PKCE, UserInfo, resource-token and introspection paths
+for your selected provider. Another deployment’s evidence does not substitute for
+that check.
 Browser SSO acceptance and agent-resource acceptance are separate tests: passing
 one does not establish the other's permissions or lifecycle behavior.
 

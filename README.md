@@ -125,7 +125,7 @@ are added when they pass, never in advance.
 > prompt text. Compatible native controls and ordered input are preserved on both
 > forwarding planes; explicit cache policy can apply bounded native patches or
 > typed encoding. Required incompatible cache controls are refused before dispatch.
-> The unreleased [backend/cache policy](docs/operator/backends.md) supports scoped
+> The published [backend/cache policy](docs/operator/backends.md) supports scoped
 > OpenAI keys and exact declared lifetimes; it does not guarantee a provider hit,
 > physical isolation or transferable KV state. Logical switching and backend/account
 > affinity remain [active work](docs/td/TD-0034-protocol-neutral-router-cache-accounting.md).
@@ -207,7 +207,7 @@ routing are workspace candidates tracked in TD-0034.
 
 ## Operating it
 
-The 0.18 source candidate defaults to a credential-free local starter on
+Sandhi 0.18.0 defaults to a credential-free local starter on
 `127.0.0.1:8787`. Callers share one accounting identity and budget. Tokens and
 OIDC are optional profiles; invalid configured authentication prevents startup.
 Use an authenticated profile for the public development integration. Follow the

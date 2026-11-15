@@ -111,6 +111,82 @@ async fn tracked_logical_dispatch_persists_selection_and_cache_policy_with_its_i
 }
 
 #[tokio::test]
+async fn model_budget_scopes_isolate_logical_models() {
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(reply(Family::OpenaiChatCompletions, false))
+        .expect(1)
+        .mount(&origin)
+        .await;
+    let handle = provider(&origin, "primary", Family::OpenaiChatCompletions, 1, 1);
+    let definition: RouteDefinition = serde_json::from_value(json!({
+        "id":"coding",
+        "models":[
+            {"id":"Agent","targets":[{"backend":"primary","model":"physical"}]},
+            {"id":"alternate","targets":[{"backend":"primary","model":"physical"}]}
+        ]
+    }))
+    .unwrap();
+    let keys = KeyStore::new();
+    keys.insert(VirtualKey {
+        id: "vk_models".into(),
+        upstream_ref: "route/coding".into(),
+        models: Some(vec!["Agent".into(), "alternate".into()]),
+        budget_scope: None,
+        model_budget_scope: Some("coding/{model}".into()),
+        ..Default::default()
+    });
+    let mut ledger = support::Ledger::new();
+    ledger
+        .set_budget("coding/Agent", Some(0), Window::Total, Policy::Block)
+        .unwrap();
+    ledger
+        .set_budget(
+            "coding/alternate",
+            Some(100_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
+    ledger
+        .set_budget(
+            handle.upstream_budget_scope(),
+            Some(100_000),
+            Window::Total,
+            Policy::Block,
+        )
+        .unwrap();
+    let sink = Arc::new(InMemorySink::new());
+    let mut state = support::state(
+        keys,
+        ledger,
+        sink.clone(),
+        HashMap::from([("backend/primary".into(), handle)]),
+        None,
+    );
+    let routes = RouteStore::in_memory().unwrap();
+    routes.put(&definition, None).unwrap();
+    state.routes = Some(Arc::new(routes));
+    let state = Arc::new(state);
+
+    let (path, mut denied) = body(Family::OpenaiChatCompletions, false);
+    denied["model"] = json!("AGENT");
+    assert_eq!(
+        call(&state, &path, denied.clone(), "vk_models", "denied")
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    denied["model"] = json!("alternate");
+    assert_eq!(
+        call(&state, &path, denied, "vk_models", "allowed").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+    assert_eq!(sink.events().len(), 1);
+}
+
+#[tokio::test]
 async fn ambiguous_json_is_refused_before_fixed_or_logical_dispatch() {
     let origin = MockServer::start().await;
     Mock::given(method("POST"))

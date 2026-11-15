@@ -25,6 +25,7 @@ pub struct VirtualKeyRecord {
     pub upstream_ref: String,
     pub models: Option<String>,
     pub budget_scope: Option<String>,
+    pub model_budget_scope: Option<String>,
     pub expires_at: Option<String>,
     pub rate_limit_per_min: Option<u32>,
     /// SHA-256 hex of the presented secret.
@@ -66,6 +67,7 @@ pub struct MintRequest {
     pub upstream_ref: String,
     pub models: Vec<String>,
     pub budget_scope: Option<String>,
+    pub model_budget_scope: Option<String>,
     pub expires_at: Option<String>,
     pub rate_limit_per_min: Option<u32>,
 }
@@ -81,6 +83,7 @@ impl VirtualKeyStore {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::init(&conn)?;
+        Self::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -90,6 +93,7 @@ impl VirtualKeyStore {
     pub fn in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init(&conn)?;
+        Self::migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -104,6 +108,7 @@ impl VirtualKeyStore {
                 upstream_ref       TEXT NOT NULL,
                 models             TEXT,
                 budget_scope       TEXT,
+                model_budget_scope TEXT,
                 expires_at         TEXT,
                 rate_limit_per_min INTEGER,
                 secret_hash        TEXT NOT NULL UNIQUE,
@@ -120,6 +125,22 @@ impl VirtualKeyStore {
                 identity_json TEXT NOT NULL
             );",
         )
+    }
+
+    fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+        let has_model_budget_scope: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('virtual_keys') \
+             WHERE name='model_budget_scope')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_model_budget_scope {
+            conn.execute(
+                "ALTER TABLE virtual_keys ADD COLUMN model_budget_scope TEXT",
+                [],
+            )?;
+        }
+        Ok(())
     }
 
     /// Mint a new virtual key. The plaintext secret is generated, returned once, and only its
@@ -165,6 +186,7 @@ impl VirtualKeyStore {
             upstream_ref: req.upstream_ref,
             models: models_csv,
             budget_scope: req.budget_scope,
+            model_budget_scope: req.model_budget_scope,
             expires_at: req.expires_at,
             rate_limit_per_min: req.rate_limit_per_min,
             secret_hash: hash.clone(),
@@ -175,9 +197,10 @@ impl VirtualKeyStore {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO virtual_keys \
-             (id, subject_id, group_id, upstream_ref, models, budget_scope, expires_at, \
-              rate_limit_per_min, secret_hash, created_at, revoked_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,NULL)",
+             (id, subject_id, group_id, upstream_ref, models, budget_scope, \
+              model_budget_scope, expires_at, rate_limit_per_min, secret_hash, created_at, \
+              revoked_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL)",
             params![
                 record.id,
                 record.subject_id,
@@ -185,6 +208,7 @@ impl VirtualKeyStore {
                 record.upstream_ref,
                 record.models,
                 record.budget_scope,
+                record.model_budget_scope,
                 record.expires_at,
                 record.rate_limit_per_min,
                 record.secret_hash,
@@ -214,8 +238,9 @@ impl VirtualKeyStore {
     pub fn find_by_hash(&self, hash: &str) -> rusqlite::Result<Option<VirtualKeyRecord>> {
         let conn = self.conn.lock().expect("vkey conn poisoned");
         conn.query_row(
-            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, expires_at, \
-             rate_limit_per_min, secret_hash, created_at, revoked_at \
+            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, \
+             model_budget_scope, expires_at, rate_limit_per_min, secret_hash, created_at, \
+             revoked_at \
              FROM virtual_keys WHERE secret_hash = ?1 AND revoked_at IS NULL",
             params![hash],
             record_from_row,
@@ -227,8 +252,9 @@ impl VirtualKeyStore {
     pub fn find_by_id(&self, id: &str) -> rusqlite::Result<Option<VirtualKeyRecord>> {
         let conn = self.conn.lock().expect("vkey conn poisoned");
         conn.query_row(
-            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, expires_at, \
-             rate_limit_per_min, secret_hash, created_at, revoked_at \
+            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, \
+             model_budget_scope, expires_at, rate_limit_per_min, secret_hash, created_at, \
+             revoked_at \
              FROM virtual_keys WHERE id = ?1",
             params![id],
             record_from_row,
@@ -240,8 +266,9 @@ impl VirtualKeyStore {
     pub fn list(&self) -> rusqlite::Result<Vec<VirtualKeyRecord>> {
         let conn = self.conn.lock().expect("vkey conn poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, expires_at, \
-             rate_limit_per_min, secret_hash, created_at, revoked_at \
+            "SELECT id, subject_id, group_id, upstream_ref, models, budget_scope, \
+             model_budget_scope, expires_at, rate_limit_per_min, secret_hash, created_at, \
+             revoked_at \
              FROM virtual_keys ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], record_from_row)?;
@@ -267,11 +294,12 @@ fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VirtualKeyRecord> 
         upstream_ref: r.get(3)?,
         models: r.get(4)?,
         budget_scope: r.get(5)?,
-        expires_at: r.get(6)?,
-        rate_limit_per_min: r.get(7)?,
-        secret_hash: r.get(8)?,
-        created_at: r.get(9)?,
-        revoked_at: r.get(10)?,
+        model_budget_scope: r.get(6)?,
+        expires_at: r.get(7)?,
+        rate_limit_per_min: r.get(8)?,
+        secret_hash: r.get(9)?,
+        created_at: r.get(10)?,
+        revoked_at: r.get(11)?,
     })
 }
 
@@ -317,6 +345,7 @@ mod tests {
             upstream_ref: upstream.into(),
             models: vec!["claude-x".into()],
             budget_scope: Some("group:platform".into()),
+            model_budget_scope: None,
             expires_at: None,
             rate_limit_per_min: Some(60),
         }
@@ -456,6 +485,37 @@ mod tests {
             "plaintext secret must never be persisted/serialized"
         );
         assert!(serialized.contains(resolved.secret_hash.as_str()));
+    }
+
+    #[test]
+    fn delegated_model_budget_templates_survive_store_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vkeys.db");
+        let minted = {
+            let store = VirtualKeyStore::open(path.to_str().unwrap()).unwrap();
+            store
+                .mint_delegated(
+                    MintRequest {
+                        subject_id: None,
+                        group_id: None,
+                        upstream_ref: "route/coding".into(),
+                        models: vec!["coding-fast".into()],
+                        budget_scope: Some("coding/shared".into()),
+                        model_budget_scope: Some("coding/{model}".into()),
+                        expires_at: None,
+                        rate_limit_per_min: None,
+                    },
+                    "{}",
+                )
+                .unwrap()
+        };
+        let reopened = VirtualKeyStore::open(path.to_str().unwrap()).unwrap();
+        let record = reopened
+            .find_by_secret(&minted.secret)
+            .unwrap()
+            .expect("template key survives reopen");
+        assert_eq!(record.budget_scope.as_deref(), Some("coding/shared"));
+        assert_eq!(record.model_budget_scope.as_deref(), Some("coding/{model}"));
     }
 
     #[test]

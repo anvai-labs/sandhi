@@ -56,12 +56,13 @@ dispatch. Pricing and billing belong to downstream systems.
 
 </div>
 
-!!! info "Published baseline and source documentation"
-    Sandhi **0.17.1** is published. This development site also describes the
-    **0.18 source candidate** and coordinated Victor **0.29.0** integration.
-    Check [release notes](releases/v0.17.1.md) before configuring an installed
-    version. Live qualification applies to its recorded endpoint and source;
-    documentation, source integration and deployment acceptance are separate.
+!!! info "Published baseline"
+    Sandhi **0.19.0** is the reviewed source candidate for model-scoped
+    OIDC budgets; **0.18.0** and Victor **0.29.1** remain the published
+    baseline. Check the [0.19 release guide](releases/v0.19.0.md) and
+    [0.18 release notes](releases/v0.18.0.md) before configuring an installation.
+    Live qualification applies to its recorded endpoint and source; publication and
+    deployment acceptance are separate.
 
 ## One request, two responsibilities
 
@@ -133,7 +134,7 @@ contracts, design history and co-design snapshots.
 | Inspect usage, routing and management in one console | [Operator console](operator/dashboard.md) · open `/dashboard` on your gateway |
 | Reuse agent context and understand cache marker/token semantics | [Cache-aware routing](product/cache-aware-routing.md) · [backend configuration](operator/backends.md) |
 | Evaluate outgoing text locally before provider dispatch | [Embedded ONNX](operator/embedded-onnx.md) · [sensitive-text policy](operator/sensitive-policy.md) |
-| Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [groups and delegated keys](operator/identity-groups.md) |
+| Let people sign in and assign roles | [OIDC setup](operator/oidc-sso.md) · [credential lifetimes](operator/credential-lifetimes.md) · [groups and delegated keys](operator/identity-groups.md) |
 | Set global, endpoint or model deadlines | [Buffered calls](operator/buffered-deadlines.md) · [streaming](operator/streaming-deadlines.md) |
 | Understand cache counts and missing measurements | [Cache reporting](adr/0010-cache-read-reporting-availability.md) |
 | Rehearse restart and restore safely | [Recovery drill](operator/recovery-drill.md) |

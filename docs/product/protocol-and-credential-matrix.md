@@ -6,14 +6,14 @@ while selecting an authorized backend and compiling its declared cache intent
 once. [Cache routing and token efficiency](cache-aware-routing.md) complements
 [local ONNX egress policy](../operator/embedded-onnx.md).
 
-!!! info "Current source candidate"
-    This matrix describes implementation and synthetic acceptance boundaries.
-    It does not establish publication, deployment or live acceptance for every
-    provider. The recorded [Z.AI evidence](../reviews/zai-router-live-2026-11-11.md)
+!!! info "Published implementation and qualification boundaries"
+    This matrix is part of published Sandhi 0.18.0, but synthetic acceptance
+    does not establish deployment or live acceptance for every provider. The
+    recorded [Z.AI evidence](../reviews/zai-router-live-2026-11-11.md)
     applies to its exact endpoints and configuration. Supported source-issued native
     ownership initializes on the original ledger; externally created resources still
-    have no implicit adoption workflow. Exact-source public CI, release/deployment
-    and broader provider lifecycle qualification remain in [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
+    have no implicit adoption workflow. Broader deployment and provider-lifecycle
+    qualification remain in [TD-0034](../td/TD-0034-protocol-neutral-router-cache-accounting.md).
 
 ## Client APIs stay independent of backend selection
 
