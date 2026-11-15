@@ -302,7 +302,7 @@ enum BudgetAction {
         scope: String,
         #[arg(group = "budget-shape")]
         limit_tokens: Option<u64>,
-        #[arg(long)]
+        #[arg(long, requires = "limit_tokens")]
         window: Option<String>,
         /// Optional hierarchy limits; each is a trailing-window token cap.
         #[arg(long, group = "budget-shape")]
