@@ -86,3 +86,6 @@ the existing 2026-11-18 deadline. Independent exact-source review and security
 CI remain required before adoption.
 
 The postrelease integration binds this review to the exact adapter with the explicit resource-audience selector. This changes introspection audience matching only; independent combined-source reassessment is required before adoption.
+
+
+The 2026-11-15 model-budget amendment was independently reassessed. Its adapter changes are confined to grant-template validation, fixed/model scope separation, delegated model canonicalization, and budget-scope propagation. Production token exchange, ID-token verification, introspection authentication, JWKS/public-key operations, private signing/decryption, JWE/client assertions, manifests, and lockfiles are unchanged. The adapter fingerprint is updated; the existing 2026-11-18 deadline and advisory status are unchanged.

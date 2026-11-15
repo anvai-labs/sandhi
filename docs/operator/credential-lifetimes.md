@@ -79,6 +79,13 @@ flowchart LR
 - The replacement shares the owner/grant budget and rate bucket; rotation does
   not reset consumption.
 
+For one identity exposing multiple independently metered models, use a
+model-derived budget template rather than separate client-visible grants. The
+caller selects a logical model such as `coding-fast` or `coding-reasoning`;
+Sandhi derives the matching model budget scope after route selection. A warning
+or block applies to the selected model without consuming the other models'
+allowances.
+
 ## OIDC delegated keys
 
 OIDC mode does not accept ordinary virtual keys retained from a token-mode

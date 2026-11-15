@@ -72,6 +72,141 @@ fn configuration_rejects_an_upstream_prefixed_grant_budget_scope() {
 }
 
 #[test]
+fn configuration_validates_model_budget_scope_templates() {
+    let original = serde_json::to_value(config()).unwrap();
+    let set_scope = |value: serde_json::Value| {
+        let mut data = original.clone();
+        data["subjects"]["agent-id"]["grants"]["local"]["model_budget_scope"] = value;
+        serde_json::from_value::<Config>(data).unwrap().validate()
+    };
+
+    assert!(set_scope(json!("coding/{model}")).is_ok());
+    for template in [
+        json!("coding/model"),
+        json!("coding/{model}/{model}"),
+        json!("coding/{scope}"),
+        json!("coding/{ model }"),
+        json!("coding/{model} extra"),
+        json!(""),
+        json!("upstream:{model}"),
+    ] {
+        assert!(
+            set_scope(template.clone()).is_err(),
+            "unexpectedly accepted {template}"
+        );
+    }
+}
+
+#[test]
+fn configuration_rejects_a_materialized_reserved_model_scope() {
+    let mut oidc = offline_oidc();
+    let grant = oidc
+        .config
+        .subjects
+        .get_mut("agent-id")
+        .unwrap()
+        .grants
+        .get_mut("local")
+        .unwrap();
+    grant.models = vec!["upstream:primary".into()];
+    grant.model_budget_scope = Some("{model}".into());
+    assert!(oidc.config.validate().is_err());
+}
+
+#[test]
+fn legacy_fixed_budget_scopes_do_not_become_model_templates() {
+    let mut oidc = offline_oidc();
+    let grant = oidc
+        .config
+        .subjects
+        .get_mut("agent-id")
+        .unwrap()
+        .grants
+        .get_mut("local")
+        .unwrap();
+    grant.budget_scope = Some("literal/{model}".into());
+    oidc.config.validate().unwrap();
+    let direct = oidc
+        .config
+        .grant("agent-id", Some("local"))
+        .expect("legacy fixed-scope grant");
+    assert_eq!(direct.budget_scope.as_deref(), Some("literal/{model}"));
+    assert!(direct.model_budget_scope.is_none());
+}
+
+#[tokio::test]
+async fn model_budget_templates_flow_to_direct_and_delegated_oidc_keys() {
+    let mut oidc = offline_oidc();
+    oidc.config.allow_delegated_keys = true;
+    oidc.config
+        .subjects
+        .get_mut("agent-id")
+        .unwrap()
+        .grants
+        .get_mut("local")
+        .unwrap()
+        .model_budget_scope = Some("coding/{model}".into());
+    oidc.config.validate().unwrap();
+
+    let direct = oidc
+        .config
+        .grant("agent-id", Some("local"))
+        .expect("direct OIDC inference grant");
+    assert!(direct.budget_scope.is_none());
+    assert_eq!(direct.model_budget_scope.as_deref(), Some("coding/{model}"));
+
+    let store = Arc::new(sandhi_store::VirtualKeyStore::in_memory().unwrap());
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::in_memory(),
+        Arc::new(sandhi_core::InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.vkeys = Some(store.clone());
+    let minted = store
+        .mint_delegated(
+            sandhi_store::MintRequest {
+                subject_id: Some("agent-id".into()),
+                group_id: Some("team-a".into()),
+                upstream_ref: "inferflux:local".into(),
+                models: vec!["qwen3-coder-30b".into()],
+                budget_scope: None,
+                model_budget_scope: Some("coding/{model}".into()),
+                expires_at: Some("2090-01-01T00:00:00Z".into()),
+                rate_limit_per_min: None,
+            },
+            &serde_json::to_string(&Delegation {
+                issuer: oidc.config.issuer.clone(),
+                identity: Identity {
+                    groups_known: false,
+                    subject: "agent-id".into(),
+                    groups: vec![],
+                    expires_at: unix_now() + 60,
+                },
+                grant: "local".into(),
+                subject_key: false,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", minted.secret).parse().unwrap(),
+    );
+    let (delegated, _) = oidc
+        .delegated_key(&state, &minted.secret, &headers)
+        .await
+        .unwrap();
+    assert_eq!(delegated.budget_scope.as_deref(), Some("group:team-a"));
+    assert_eq!(
+        delegated.model_budget_scope.as_deref(),
+        Some("coding/{model}")
+    );
+}
+
+#[test]
 fn access_token_audience_configuration_requires_an_exact_bounded_string() {
     let original = serde_json::to_value(config()).unwrap();
     for audience in [
@@ -1120,6 +1255,7 @@ async fn multi_provider_grants_use_existing_accounting_and_correlation_path() {
             models: vec!["glm-5.3".into()],
             group: Some("team-a".into()),
             budget_scope: None,
+            model_budget_scope: None,
             rate_limit_per_min: None,
         },
     );
@@ -1430,6 +1566,143 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
     );
 }
 
+#[tokio::test]
+async fn delegated_keys_use_configured_model_spelling_for_budgets() {
+    use tower::ServiceExt;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    let authority = Authority::start().await;
+    authority.state.lock().unwrap().tokens.insert(
+        "member-access".into(),
+        json!({"active":true,"iss":authority.config.issuer,"aud":"sandhi","sub":"agent-id","groups":[],"exp":unix_now()+300,"token_type":"Bearer"}),
+    );
+    let mut document = serde_json::to_value(&authority.config).unwrap();
+    document["allow_delegated_keys"] = json!(true);
+    document["subjects"]["agent-id"]["grants"]["local"] = json!({
+        "upstream": "openai:subscription",
+        "models": ["Agent"],
+        "group": "engineering",
+        "model_budget_scope": "coding/{model}",
+        "rate_limit_per_min": 20
+    });
+    let config: Config = serde_json::from_value(document).expect("model-based configuration");
+    config.validate().unwrap();
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"fixture","model":"Agent",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],
+            "usage":{"prompt_tokens":50,"completion_tokens":35,"total_tokens":85}
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let sink = Arc::new(sandhi_core::InMemorySink::new());
+    let mut state = ProxyState::new(
+        sandhi_core::KeyStore::new(),
+        crate::ProxyLedger::durable(directory.path().join("usage.db").to_str().unwrap(), 1)
+            .unwrap(),
+        sink,
+        HashMap::from([(
+            "openai:subscription".into(),
+            sandhi_providers::ProviderRuntime::new().openai_compat(
+                "openai",
+                upstream.uri(),
+                "upstream-only",
+                HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            ),
+        )]),
+        None,
+    );
+    state
+        .ledger
+        .lock()
+        .unwrap()
+        .set_budget(
+            "coding/Agent",
+            Some(85),
+            sandhi_core::Window::Total,
+            sandhi_core::Policy::Block,
+        )
+        .unwrap();
+    state.oidc = Some(Arc::new(Oidc::new(config).await.unwrap()));
+    state.vkeys = Some(Arc::new(
+        sandhi_store::VirtualKeyStore::in_memory().unwrap(),
+    ));
+    let state = Arc::new(state);
+    let app = crate::build_app(state.clone());
+    let request = |route: &str, token: &str, body: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(route)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    };
+    let body =
+        json!({"model":"aGeNt","max_tokens":35,"messages":[{"role":"user","content":"hello"}]});
+    let direct = app
+        .clone()
+        .oneshot(request(
+            "/v1/chat/completions",
+            "member-access",
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(direct.status(), StatusCode::OK);
+    axum::body::to_bytes(direct.into_body(), 8192)
+        .await
+        .unwrap();
+
+    let minted = app
+        .clone()
+        .oneshot(request(
+            "/auth/keys",
+            "member-access",
+            json!({"grant":"local","models":["AGENT"],"ttl_seconds":60}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::CREATED);
+    let minted: Value = serde_json::from_slice(
+        &axum::body::to_bytes(minted.into_body(), 8192)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let key = minted["virtual_key"].as_str().unwrap();
+    let delegated = app
+        .oneshot(request("/v1/chat/completions", key, body))
+        .await
+        .unwrap();
+    assert_eq!(delegated.status(), StatusCode::TOO_MANY_REQUESTS);
+    axum::body::to_bytes(delegated.into_body(), 8192)
+        .await
+        .unwrap();
+
+    {
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.spent("coding/Agent"), 85);
+        assert_eq!(ledger.spent("coding/AGENT"), 0);
+    }
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        1,
+        "the delegated call must be refused by the same model budget"
+    );
+}
+
 #[test]
 fn group_claims_are_strict_and_conflicting_policy_does_not_escalate() {
     let mut oidc = offline_oidc();
@@ -1491,6 +1764,7 @@ async fn delegated_keys_bind_issuer_subject_expiry_policy_and_rate_identity() {
             upstream_ref: "inferflux:local".into(),
             models: vec!["qwen3-coder-30b".into()],
             budget_scope: None,
+            model_budget_scope: None,
             expires_at: Some("2090-01-01T00:00:00Z".into()),
             rate_limit_per_min: Some(1),
         };
