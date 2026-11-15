@@ -117,14 +117,15 @@ mechanism, not a durable guaranteed notification channel.
 
 ## Long-running clients: choose renewable OIDC or durable user keys
 
-For group-driven access, prefer a renewable OIDC `TokenCredential`. Victor's
-OpenAI gateway path accepts that protocol directly, or an `oidc` configuration
-pointing to a private access-token file maintained by an external broker. It
+For group-driven access, prefer a renewable OIDC `TokenCredential`. An agent
+client can use that protocol directly, or an `oidc` configuration pointing to a
+private access-token file maintained by an external broker. It
 re-reads the file before each model request, pins issuer/audience/subject, rejects
 expired or malformed output, and retires handles holding old tokens. It never
 refreshes the upstream OpenAI subscription credential. The broker owns OIDC
 login/refresh and must publish atomically; the file reader does not perform login.
-See Victor's `docs/architecture/sandhi-subscription-gateway.md` for the contract.
+See [credential lifetimes](credential-lifetimes.md) for the recommended lifetime
+and rotation model.
 
 For an unattended client that needs a durable virtual key, explicitly set
 `max_subject_key_ttl_seconds` in the OIDC configuration (default `0`, disabled;
@@ -178,19 +179,18 @@ controlled recovery admin binding; do not create a second password database.
 
 ## Validation and remaining work
 
-TDD covers group-based inference, attenuated key issuance, shared budget exhaustion,
-alert firing, model denial, inability to delegate again or administer, explicit
-revocation, wrong issuer/subject, expiry, conflicting/malformed groups, key-level
-attribution, shared rate identity and UserInfo subject mismatch. Durable-key
-tests cover lifetime limits, group-only denial, persistence/reopen, revocation,
-subject-policy removal and global disable. Victor tests exercise rotated tokens,
-stale tokens, private-file permissions, symlinks, identity pinning, redacted
-acquisition failures, and member-agent credential propagation. Existing signed
-OIDC login, CSRF, roles, discovery and direct-provider suites remain regression gates.
+Published tests cover group-based inference, attenuated key issuance, shared budget
+exhaustion, alert firing, model denial, inability to delegate again or administer,
+explicit revocation, wrong issuer/subject, expiry, conflicting/malformed groups,
+key-level attribution, shared rate identity and UserInfo subject mismatch.
+Durable-key tests cover lifetime limits, group-only denial, persistence/reopen,
+revocation, subject-policy removal and global disable. Client-side tests cover
+rotated tokens, stale tokens, private-file permissions, symlinks, identity pinning,
+redacted acquisition failures and member-agent credential propagation. Signed OIDC
+login, CSRF, roles, discovery and direct-provider suites remain regression gates.
 
 Deployment must additionally verify actual provider group claims, member removal,
-agent key renewal, restart, and operator recovery against the configured issuer.
-The source changes are a reviewable candidate, not evidence of a live migration.
+agent key renewal, restart and operator recovery against the configured issuer.
 Opt-in prompt inspection and metadata audit now have a [candidate MVP](policy-evaluation.md).
 Redaction, richer audit workflows and group administration UI remain deferred. Agent tool/egress
 permissions remain distinct from model access; no group grants arbitrary tools.
