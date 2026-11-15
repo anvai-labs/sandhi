@@ -536,10 +536,18 @@ function loadBudgets() {
 }
 async function setBudget() {
   document.getElementById("b-result").replaceChildren();
+  const fields = ["hourly", "daily", "weekly", "monthly", "total"];
+  const limits = Object.fromEntries(fields.flatMap(field => {
+    const raw = document.getElementById(`b-${field}`).value.trim();
+    return raw ? [[field, Number(raw)]] : [];
+  }));
+  if (!Object.keys(limits).length || Object.values(limits).some(limit => !Number.isSafeInteger(limit) || limit < 0)) {
+    document.getElementById("b-result").innerHTML = '<div class="callout err">Enter at least one non-negative integer window limit.</div>';
+    return;
+  }
   const body = {
     scope: document.getElementById("b-scope").value.trim(),
-    limit_tokens: Number(document.getElementById("b-limit").value || 0),
-    window: document.getElementById("b-window").value,
+    limits,
     policy: document.getElementById("b-policy").value,
   };
   const data = await adminCall("POST", "/admin/budget", body);

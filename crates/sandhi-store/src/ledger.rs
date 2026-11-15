@@ -67,8 +67,8 @@ impl SqliteLedger {
 
     /// Open (creating if needed) a ledger at `path` (`:memory:` for a volatile one).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
-        Self::setup(&conn)?;
+        let mut conn = Connection::open(path)?;
+        Self::setup(&mut conn)?;
         Ok(Self { conn })
     }
 
@@ -80,13 +80,13 @@ impl SqliteLedger {
         path: &str,
         synchronous: crate::Synchronous,
     ) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         crate::apply_durable_pragmas(&conn, synchronous)?;
-        Self::init(&conn)?;
+        Self::init(&mut conn)?;
         Ok(Self { conn })
     }
 
-    fn setup(conn: &Connection) -> rusqlite::Result<()> {
+    fn setup(conn: &mut Connection) -> rusqlite::Result<()> {
         // FULL: a cap/lease commit must survive a power loss (ADR-0005 C2/C3). WAL + busy_timeout
         // also stop the concurrent store writes from colliding with reserve/settle on the same file
         // (the proxy opens both against one store path).
@@ -94,7 +94,7 @@ impl SqliteLedger {
         Self::init(conn)
     }
 
-    fn init(conn: &Connection) -> rusqlite::Result<()> {
+    fn init(conn: &mut Connection) -> rusqlite::Result<()> {
         // `spent`/`reserved` are SUMs over (scope, settled) whose payloads are actual/ceiling —
         // the old two-column index still paid a row fetch per matching row, so admission cost
         // grew with the scope's settled history (design audit A5). The covering index makes both
@@ -135,21 +135,53 @@ impl SqliteLedger {
                  PRIMARY KEY (vkey, idem_key)
              );",
         )?;
+        Self::migrate_budget_limits_to_windows(conn)?;
         evidence::init(conn)
     }
 
-    /// The inclusive start (unix seconds) of the current window for `window`, calendar-aligned in
-    /// UTC (the store is the clock authority, ADR-0005 D5). `Total` returns 0 (all-time).
+    /// Upgrade one budget per scope to one budget per `(scope, window)`. Existing rows are copied
+    /// verbatim. A two-column primary key marks an already-upgraded database.
+    fn migrate_budget_limits_to_windows(conn: &mut Connection) -> rusqlite::Result<()> {
+        let pk_columns: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('budget_limit') WHERE pk > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        if pk_columns == 2 {
+            return Ok(());
+        }
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE budget_limit_windows (
+                 scope        TEXT NOT NULL,
+                 limit_tokens INTEGER,
+                 window       TEXT NOT NULL,
+                 policy       TEXT NOT NULL DEFAULT 'block',
+                 PRIMARY KEY (scope, window)
+             );
+             INSERT INTO budget_limit_windows (scope, limit_tokens, window, policy)
+                 SELECT scope, limit_tokens, window, policy FROM budget_limit;
+             DROP TABLE budget_limit;
+             ALTER TABLE budget_limit_windows RENAME TO budget_limit;",
+        )?;
+        tx.commit()
+    }
+
+    /// The exclusive lower bound (unix seconds) of a fixed trailing window. `Total` returns -1 so
+    /// every durable timestamp is included. Old consumption leaves continuously as time advances.
     fn window_start_ts(now: OffsetDateTime, window: Window) -> i64 {
         match window {
-            Window::Total => 0,
-            Window::Daily => now.replace_time(time::Time::MIDNIGHT).unix_timestamp(),
-            Window::Monthly => now
-                .replace_day(1)
-                .unwrap_or(now)
-                .replace_time(time::Time::MIDNIGHT)
-                .unix_timestamp(),
+            Window::Total => -1,
+            Window::Hourly => now.unix_timestamp().saturating_sub(3_600),
+            Window::Daily => now.unix_timestamp().saturating_sub(86_400),
+            Window::Weekly => now.unix_timestamp().saturating_sub(86_400 * 7),
+            Window::Monthly => now.unix_timestamp().saturating_sub(86_400 * 30),
         }
+    }
+
+    fn window_order_sql() -> &'static str {
+        "CASE window WHEN 'hourly' THEN 0 WHEN 'daily' THEN 1 WHEN 'weekly' THEN 2
+             WHEN 'monthly' THEN 3 ELSE 4 END, window"
     }
 
     /// Set (or clear the cap with `limit = None`) a scope's durable budget: cap + window + policy.
@@ -166,14 +198,45 @@ impl SqliteLedger {
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         self.conn.execute(
-            "INSERT INTO budget_limit (scope, limit_tokens, window, policy) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope) DO UPDATE SET
+            "INSERT INTO budget_limit (scope, window, limit_tokens, policy) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope, window) DO UPDATE SET
                  limit_tokens = excluded.limit_tokens,
-                 window = excluded.window,
                  policy = excluded.policy",
-            params![scope, limit, window.as_str(), policy.as_str()],
+            params![scope, window.as_str(), limit, policy.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Atomically install every `(window, limit, policy)` row for one scope. A later storage
+    /// failure cannot publish a partially replaced hierarchy.
+    pub fn set_limits_durable(
+        &mut self,
+        scope: &str,
+        limits: &[(Option<u64>, Window, Policy)],
+    ) -> rusqlite::Result<()> {
+        if limits.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "budget hierarchy must not be empty".into(),
+            ));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (limit, window, policy) in limits {
+            let limit = limit
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            tx.execute(
+                "INSERT INTO budget_limit (scope, window, limit_tokens, policy)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(scope, window) DO UPDATE SET
+                     limit_tokens = excluded.limit_tokens,
+                     policy = excluded.policy",
+                params![scope, window.as_str(), limit, policy.as_str()],
+            )?;
+        }
+        tx.commit()
     }
 
     /// The configured window for a scope (defaults to `Total` when unset).
@@ -181,7 +244,10 @@ impl SqliteLedger {
         let w: Option<String> = self
             .conn
             .query_row(
-                "SELECT window FROM budget_limit WHERE scope = ?1",
+                &format!(
+                    "SELECT window FROM budget_limit WHERE scope = ?1 ORDER BY {} LIMIT 1",
+                    Self::window_order_sql()
+                ),
                 [scope],
                 |row| row.get(0),
             )
@@ -194,7 +260,7 @@ impl SqliteLedger {
         let p: Option<String> = self
             .conn
             .query_row(
-                "SELECT policy FROM budget_limit WHERE scope = ?1",
+                "SELECT policy FROM budget_limit WHERE scope = ?1 AND policy = 'block' LIMIT 1",
                 [scope],
                 |row| row.get(0),
             )
@@ -248,44 +314,45 @@ impl SqliteLedger {
             params![scope, now_ts],
         )?;
 
-        let budget: Option<(Option<i64>, String, String)> = tx
-            .query_row(
-                "SELECT limit_tokens, window, policy FROM budget_limit WHERE scope = ?1",
-                [scope],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
+        let mut budget_stmt = tx.prepare(&format!(
+            "SELECT limit_tokens, window, policy FROM budget_limit WHERE scope = ?1 ORDER BY {}",
+            Self::window_order_sql()
+        ))?;
+        let budgets: Vec<(Option<i64>, String, String)> = budget_stmt
+            .query_map([scope], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(budget_stmt);
 
-        if let Some((Some(limit), window, policy)) = budget {
-            // Spend is measured over the scope's current window (calendar-aligned); in-flight
-            // reservations (unsettled ceilings) are always counted.
-            let start = Self::window_start_ts(now, Window::parse(&window));
-            let spent: i64 = tx.query_row(
-                "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
-                 WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
-                params![scope, start],
-                |row| row.get(0),
-            )?;
+        if !budgets.is_empty() {
             let reserved = sum_i64(
                 tx,
                 "SELECT COALESCE(SUM(ceiling), 0) FROM budget_reservation WHERE scope = ?1 AND settled = 0",
                 scope,
             )?;
-            // `Warn` is a **soft cap** (ADR-0005 D6): it never denies admission — the lease is still
-            // created below so spend keeps accruing for threshold alerts and the dashboard. Only
-            // `Block` hard-refuses a ceiling that would breach the cap.
-            if Policy::parse(&policy) == Policy::Block
-                && i128::from(spent) + i128::from(reserved) + i128::from(ceiling)
-                    > i128::from(limit)
-            {
-                // Transaction rolls back on drop — nothing reserved.
-                return Ok(ReserveOutcome::Denied(Denied {
-                    scope: scope.to_string(),
-                    limit: limit.max(0) as u64,
-                    spent: spent.max(0) as u64,
-                    reserved: reserved.max(0) as u64,
-                    requested_ceiling: ceiling,
-                }));
+            for (limit, window, policy) in budgets {
+                let Some(limit) = limit else { continue };
+                let start = Self::window_start_ts(now, Window::parse(&window));
+                let spent: i64 = tx.query_row(
+                    "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
+                     WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) > ?2",
+                    params![scope, start],
+                    |row| row.get(0),
+                )?;
+                // `Warn` is a soft cap: it never denies admission. Every hard window is checked
+                // independently against its own trailing consumption and shared in-flight holds.
+                if Policy::parse(&policy) == Policy::Block
+                    && i128::from(spent) + i128::from(reserved) + i128::from(ceiling)
+                        > i128::from(limit)
+                {
+                    // Transaction rolls back on drop — nothing reserved.
+                    return Ok(ReserveOutcome::Denied(Denied {
+                        scope: scope.to_string(),
+                        limit: limit.max(0) as u64,
+                        spent: spent.max(0) as u64,
+                        reserved: reserved.max(0) as u64,
+                        requested_ceiling: ceiling,
+                    }));
+                }
             }
         }
 
@@ -342,9 +409,11 @@ impl SqliteLedger {
         policy: &str,
     ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO budget_limit (scope, limit_tokens, window, policy)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![scope, limit_tokens, window, policy],
+            "INSERT INTO budget_limit (scope, window, limit_tokens, policy) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope, window) DO UPDATE SET
+                 limit_tokens = excluded.limit_tokens,
+                 policy = excluded.policy",
+            rusqlite::params![scope, window, limit_tokens, policy],
         )?;
         Ok(())
     }
@@ -468,7 +537,7 @@ impl SqliteLedger {
         let limit: Option<i64> = self
             .conn
             .query_row(
-                "SELECT limit_tokens FROM budget_limit WHERE scope = ?1",
+                "SELECT MIN(limit_tokens) FROM budget_limit WHERE scope = ?1",
                 [scope],
                 |row| row.get(0),
             )
@@ -477,18 +546,21 @@ impl SqliteLedger {
         Ok(limit.map(|v| v.max(0) as u64))
     }
 
-    /// Settled spend in the scope's **current window** (calendar-aligned). Uses the store as the
-    /// clock authority (ADR-0005 D5/D6); a restart re-derives the window from the durable rows.
-    pub fn spent_durable(&self, scope: &str) -> rusqlite::Result<u64> {
-        let start =
-            Self::window_start_ts(OffsetDateTime::now_utc(), self.window_of_durable(scope)?);
+    /// Settled spend in one configured trailing window. Uses the store as the clock authority.
+    pub fn spent_for_window_durable(&self, scope: &str, window: Window) -> rusqlite::Result<u64> {
+        let start = Self::window_start_ts(OffsetDateTime::now_utc(), window);
         let spent: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
-             WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) >= ?2",
+             WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) > ?2",
             params![scope, start],
             |row| row.get(0),
         )?;
         Ok(spent.max(0) as u64)
+    }
+
+    /// Compatibility view: settled spend in the scope's shortest configured trailing window.
+    pub fn spent_durable(&self, scope: &str) -> rusqlite::Result<u64> {
+        self.spent_for_window_durable(scope, self.window_of_durable(scope)?)
     }
 
     /// Held (unsettled) ceilings. May transiently include not-yet-reclaimed expired leases — a
@@ -506,9 +578,10 @@ impl SqliteLedger {
     /// budget metadata on startup (ADR-0005 D3). The durable spend/caps already survive a restart;
     /// this recovers the policy/window/limit the dashboard + alert subsystem read.
     pub fn list_budgets_durable(&self) -> rusqlite::Result<Vec<BudgetRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT scope, limit_tokens, window, policy FROM budget_limit ORDER BY scope",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT scope, limit_tokens, window, policy FROM budget_limit ORDER BY scope, {}",
+            Self::window_order_sql()
+        ))?;
         let rows = stmt.query_map([], |row| {
             let scope: String = row.get(0)?;
             let limit: Option<i64> = row.get(1)?;
@@ -973,18 +1046,178 @@ mod tests {
             .set_limit_durable("g", Some(7), Window::Daily, Policy::Block)
             .unwrap();
         assert!(ledger
-            .set_limit_durable("g", Some(u64::MAX), Window::Total, Policy::Warn)
+            .set_limit_durable("g", Some(u64::MAX), Window::Daily, Policy::Warn)
             .is_err());
         let rows = ledger.list_budgets_durable().unwrap();
         assert_eq!(rows[0].limit, Some(7));
         assert_eq!(rows[0].window, Window::Daily);
         assert_eq!(rows[0].policy, Policy::Block);
         ledger
-            .set_limit_durable("g", Some(i64::MAX as u64), Window::Total, Policy::Block)
+            .set_limit_durable("g", Some(i64::MAX as u64), Window::Daily, Policy::Block)
             .unwrap();
         assert_eq!(
             ledger.list_budgets_durable().unwrap()[0].limit,
             Some(i64::MAX as u64)
+        );
+    }
+
+    #[test]
+    fn legacy_one_window_budget_schema_upgrades_without_losing_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ledger.db");
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE budget_limit (
+                 scope TEXT PRIMARY KEY,
+                 limit_tokens INTEGER,
+                 window TEXT NOT NULL DEFAULT 'total',
+                 policy TEXT NOT NULL DEFAULT 'block'
+             );
+             INSERT INTO budget_limit VALUES ('group:legacy', 1234, 'weekly', 'warn');",
+        )
+        .unwrap();
+        drop(raw);
+
+        let ledger = SqliteLedger::open(path.to_str().unwrap()).unwrap();
+        let pk_columns: i64 = ledger
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('budget_limit') WHERE pk > 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pk_columns, 2);
+        assert_eq!(
+            ledger.list_budgets_durable().unwrap(),
+            vec![BudgetRow {
+                scope: "group:legacy".into(),
+                limit: Some(1234),
+                window: Window::Weekly,
+                policy: Policy::Warn,
+            }]
+        );
+    }
+
+    #[test]
+    fn hierarchical_windows_roll_independently_and_capacity_returns_with_time() {
+        let mut ledger = mem();
+        for (window, limit) in [
+            (Window::Hourly, 100),
+            (Window::Daily, 500),
+            (Window::Weekly, 700),
+            (Window::Monthly, 1200),
+        ] {
+            ledger
+                .set_limit_durable("group:h", Some(limit), window, Policy::Block)
+                .unwrap();
+        }
+
+        let now = OffsetDateTime::now_utc();
+        for (seconds_ago, actual) in [
+            (3_600 * 2, 399),       // hourly out; daily/weekly/monthly in
+            (86_400 + 1, 20),       // daily out; weekly/monthly in
+            (86_400 * 7 + 1, 400),  // weekly out; monthly in
+            (86_400 * 30 + 1, 500), // monthly out
+        ] {
+            ledger
+                .conn
+                .execute(
+                    "INSERT INTO budget_reservation
+                        (scope, ceiling, actual, settled, settled_at, expires_at)
+                     VALUES ('group:h', ?1, ?1, 1, ?2, 0)",
+                    rusqlite::params![actual, now.unix_timestamp() - seconds_ago],
+                )
+                .unwrap();
+        }
+
+        // Rolling sums at this instant are hourly 0, daily 399, weekly 419, monthly 890.
+        let admission = ledger.reserve_durable("group:h", 100, now, ttl()).unwrap();
+        let reservation = match admission {
+            ReserveOutcome::Admitted(reservation) => reservation,
+            ReserveOutcome::Denied(denied) => panic!("expected admission: {denied:?}"),
+        };
+        ledger.settle_durable(reservation.id, 100).unwrap();
+        assert!(
+            matches!(
+                ledger.reserve_durable("group:h", 1, now, ttl()).unwrap(),
+                ReserveOutcome::Denied(_)
+            ),
+            "the current hourly window is full"
+        );
+
+        // One second after the hourly boundary the old 100-token settlement is outside hourly,
+        // but remains in daily. Hourly capacity returns without a calendar-day reset.
+        let later = now + Duration::seconds(3_601);
+        assert!(matches!(
+            ledger.reserve_durable("group:h", 1, later, ttl()).unwrap(),
+            ReserveOutcome::Admitted(_)
+        ));
+        let daily_start = SqliteLedger::window_start_ts(later, Window::Daily);
+        let daily_spent: i64 = ledger
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
+                 WHERE scope = 'group:h' AND settled = 1
+                   AND COALESCE(settled_at, 0) > ?1",
+                [daily_start],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let reserved: i64 = ledger
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(ceiling), 0) FROM budget_reservation
+                 WHERE scope = 'group:h' AND settled = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((daily_spent, reserved), (499, 1));
+        assert!(
+            matches!(
+                ledger
+                .reserve_durable("group:h", 1, later, ttl())
+                    .unwrap(),
+                ReserveOutcome::Denied(denied) if denied.limit == 500
+            ),
+            "the daily hierarchy remains binding while hourly capacity has rolled"
+        );
+    }
+
+    #[test]
+    fn hierarchy_commit_is_atomic_when_a_later_window_fails() {
+        let mut ledger = mem();
+        ledger
+            .set_limit_durable("group:atomic", Some(7), Window::Total, Policy::Block)
+            .unwrap();
+        ledger
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_second_hierarchy_row
+                 BEFORE INSERT ON budget_limit
+                 WHEN NEW.scope = 'group:atomic' AND NEW.window = 'daily'
+                 BEGIN SELECT RAISE(ABORT, 'synthetic rejection'); END;",
+            )
+            .unwrap();
+
+        let result = ledger.set_limits_durable(
+            "group:atomic",
+            &[
+                (Some(11), Window::Hourly, Policy::Block),
+                (Some(22), Window::Daily, Policy::Block),
+            ],
+        );
+        assert!(result.is_err());
+        let rows = ledger.list_budgets_durable().unwrap();
+        assert_eq!(
+            rows,
+            vec![BudgetRow {
+                scope: "group:atomic".into(),
+                limit: Some(7),
+                window: Window::Total,
+                policy: Policy::Block,
+            }]
         );
     }
 

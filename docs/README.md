@@ -125,6 +125,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0042](adr/0042-provider-identity-and-budget-namespace.md) | Diagnostic labels separate from immutable persisted budget namespace; old caps/spend/holds/pins preserved |
 | [0043](adr/0043-mandatory-durable-http-execution.md) | Required original single-file HTTP owner, defaults, paired liability and ledger-free FFI boundary |
 | [0044](adr/0044-native-reference-ownership.md) | Same-ledger source-issued native proof, original request/shutdown bounds and no implicit external adoption |
+| [0046](adr/0046-hierarchical-rolling-token-budgets.md) | Independent hourly/daily/weekly/monthly/lifetime caps per scope using immutable trailing settlement time |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |

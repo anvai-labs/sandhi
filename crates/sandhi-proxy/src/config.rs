@@ -87,7 +87,11 @@ pub struct ProviderEntry {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct BudgetEntry {
     pub scope: String,
-    pub limit_tokens: u64,
+    pub limit_tokens: Option<u64>,
+    /// Optional hierarchy: one limit for each of `hourly`, `daily`, `weekly`, `monthly` and/or
+    /// `total`. Mutually exclusive with the legacy singular `limit_tokens`/`window` shape.
+    #[serde(default)]
+    pub limits: Option<std::collections::BTreeMap<String, u64>>,
     #[serde(default)]
     pub window: Option<String>,
     #[serde(default)]
@@ -256,7 +260,7 @@ mod tests {
             Some(std::path::Path::new("/run/tls/fullchain.pem"))
         );
         assert_eq!(cfg.providers.len(), 1);
-        assert_eq!(cfg.budgets[0].limit_tokens, 1_000_000);
+        assert_eq!(cfg.budgets[0].limit_tokens, Some(1_000_000));
         assert_eq!(cfg.alerts[0].threshold_pct, 90);
         assert_eq!(cfg.vkeys[0].subject.as_deref(), Some("alice"));
     }
@@ -272,9 +276,28 @@ mod tests {
         let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.budgets.len(), 1);
         assert_eq!(cfg.budgets[0].scope, "upstream:inferflux");
-        assert_eq!(cfg.budgets[0].limit_tokens, 250_000);
+        assert_eq!(cfg.budgets[0].limit_tokens, Some(250_000));
         assert_eq!(cfg.budgets[0].window.as_deref(), Some("monthly"));
         assert_eq!(cfg.budgets[0].policy.as_deref(), Some("warn"));
+    }
+
+    #[test]
+    fn declarative_budgets_accept_a_rolling_hierarchy() {
+        let json = r#"{
+            "budgets": [{
+                "scope": "coding/shared",
+                "policy": "warn",
+                "limits": {
+                    "hourly": 1000,
+                    "daily": 10000,
+                    "weekly": 50000,
+                    "monthly": 200000
+                }
+            }]
+        }"#;
+        let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.budgets[0].limit_tokens, None);
+        assert_eq!(cfg.budgets[0].limits.as_ref().unwrap()["weekly"], 50_000);
     }
 
     #[test]

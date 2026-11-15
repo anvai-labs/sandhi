@@ -128,6 +128,34 @@ impl ProxyLedger {
         }
     }
 
+    /// Atomically publish every cap for one scope. The durable arm commits all rows in one SQLite
+    /// transaction; the volatile arm is not an HTTP execution surface and installs its simple
+    /// single-window projection without claiming durable hierarchy semantics.
+    pub fn set_budget_hierarchy(
+        &mut self,
+        scope: &str,
+        limits: &[(Option<u64>, Window, Policy)],
+    ) -> Result<(), String> {
+        match self {
+            Self::Memory(l) => {
+                for (limit, window, policy) in limits {
+                    // The legacy volatile ledger has a single limit projection and no durable
+                    // hierarchy; HTTP execution never uses this arm.
+                    let _ = (window, policy);
+                    let enforced = match policy {
+                        Policy::Block => *limit,
+                        Policy::Warn => None,
+                    };
+                    l.set_limit(scope, enforced);
+                }
+                Ok(())
+            }
+            Self::Durable(l) => l
+                .set_limits_durable(scope, limits)
+                .map_err(|e| e.to_string()),
+        }
+    }
+
     /// Admit a call by reserving `ceiling` tokens as a lease valid for [`RESERVATION_TTL_SECS`].
     /// Applies ADR-0005 D6 on a durable backend error: `Warn` fails open ([`Admission::Unmetered`]),
     /// `Block` fails closed ([`Admission::Denied`]). An over-cap ceiling is [`Admission::Denied`]
@@ -198,6 +226,18 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => Ok(l.spent(scope)),
             Self::Durable(l) => l.spent_durable(scope).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Fallible window-specific observation for the dashboard and alerts. The volatile arm is not
+    /// an HTTP execution surface and retains only one in-process window, so it reports that
+    /// current counter rather than inventing historical windows.
+    pub fn try_spent_for_window(&self, scope: &str, window: Window) -> Result<u64, String> {
+        match self {
+            Self::Memory(l) => Ok(l.spent(scope)),
+            Self::Durable(l) => l
+                .spent_for_window_durable(scope, window)
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -1135,9 +1175,10 @@ mod tests {
         crate::rehydrate_budgets(&reopened, &budgets);
         let map = budgets.lock().unwrap();
         let spec = map.get("g").expect("budget rehydrated");
-        assert_eq!(spec.limit_tokens, 1000);
-        assert_eq!(spec.window, "daily");
-        assert_eq!(spec.policy, "block");
+        assert_eq!(spec.windows.len(), 1);
+        assert_eq!(spec.windows[0].limit_tokens, 1000);
+        assert_eq!(spec.windows[0].window, "daily");
+        assert_eq!(spec.windows[0].policy, "block");
 
         let _ = std::fs::remove_file(path);
     }

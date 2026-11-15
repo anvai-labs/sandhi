@@ -105,8 +105,12 @@ pub mod admin {
     #[derive(Debug, Clone, Deserialize)]
     pub struct SetBudgetRequest {
         pub scope: String,
-        pub limit_tokens: u64,
-        /// `daily` / `monthly` / `total` (P2). Defaults to `total`.
+        pub limit_tokens: Option<u64>,
+        /// Optional per-window hierarchy. Keys are `hourly`, `daily`, `weekly`, `monthly` and/or
+        /// `total`; each value is that trailing window's neutral-token cap.
+        #[serde(default)]
+        pub limits: Option<std::collections::BTreeMap<String, u64>>,
+        /// Legacy singular window. Defaults to `total`; mutually exclusive with `limits`.
         pub window: Option<String>,
         /// `block` / `warn` (P2). Defaults to `block`.
         pub policy: Option<String>,
@@ -172,6 +176,14 @@ pub mod admin {
 #[derive(Debug, Clone, Serialize)]
 pub struct BudgetSpec {
     pub scope: String,
+    pub limit_tokens: u64,
+    pub window: String,
+    pub policy: String,
+    pub windows: Vec<BudgetWindowSpec>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetWindowSpec {
     pub limit_tokens: u64,
     pub window: String,
     pub policy: String,
@@ -1146,14 +1158,12 @@ pub(crate) async fn set_budget(
             "alert store not configured; budget unchanged",
         );
     }
-    let spec = BudgetSpec {
-        scope: req.scope.clone(),
-        limit_tokens: req.limit_tokens,
-        window: req.window.unwrap_or_else(|| "total".into()),
-        policy: req.policy.unwrap_or_else(|| "block".into()),
-    };
-    if let Err(error) = apply_budget(&state.ledger, &state.budgets, &spec) {
-        tracing::error!(%error, "budget commit failed");
+    let policy = req.policy.clone().unwrap_or_else(|| "block".into());
+    let windows = requested_budget_windows(&req, &policy)
+        .expect("set_budget validates its request before commit");
+    if let Err(error) = apply_budget_hierarchy(&state.ledger, &state.budgets, &req.scope, &windows)
+    {
+        tracing::error!(%error, "budget hierarchy commit failed");
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "budget commit failed; budget unchanged",
@@ -1180,10 +1190,11 @@ pub(crate) async fn set_budget(
     let mut payload = json!({
         "ok": complete,
         "budget_applied": true,
-        "scope": spec.scope,
-        "limit_tokens": spec.limit_tokens,
-        "window": spec.window,
-        "policy": spec.policy,
+        "scope": req.scope.clone(),
+        "limits": windows,
+        "limit_tokens": windows.first().map(|window| window.limit_tokens),
+        "window": windows.first().map(|window| window.window.clone()),
+        "policy": policy,
         "alerts_created": created_alerts,
         "alerts_failed": failed_alerts,
     });
@@ -1240,14 +1251,48 @@ pub(crate) async fn budget_usage(
         .expect("budgets poisoned")
         .get(scope)
         .cloned();
-    let limit = spec.as_ref().map(|s| s.limit_tokens);
+    let windows = spec
+        .as_ref()
+        .map(|spec| {
+            spec.windows
+                .iter()
+                .map(|window| {
+                    let spent = state
+                        .ledger
+                        .lock()
+                        .expect("ledger poisoned")
+                        .try_spent_for_window(scope, Window::parse(&window.window))
+                        .unwrap_or(0);
+                    json!({
+                        "limit_tokens": window.limit_tokens,
+                        "spent": spent,
+                        "remaining": window.limit_tokens.saturating_sub(spent),
+                        "window": window.window,
+                        "policy": window.policy,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let binding = spec.as_ref().and_then(|spec| spec.windows.first().cloned());
+    let limit = binding.as_ref().map(|window| window.limit_tokens);
     Json(json!({
         "scope": scope,
         "limit_tokens": limit,
-        "spent": spent,
+        "spent": if let Some(window) = &binding {
+            state
+                .ledger
+                .lock()
+                .expect("ledger poisoned")
+                .try_spent_for_window(scope, Window::parse(&window.window))
+                .unwrap_or(0)
+        } else {
+            spent
+        },
         "remaining": limit.map(|l| l.saturating_sub(spent)),
-        "policy": spec.as_ref().map(|s| s.policy.clone()),
-        "window": spec.as_ref().map(|s| s.window.clone()),
+        "policy": binding.as_ref().map(|window| window.policy.clone()),
+        "window": binding.as_ref().map(|window| window.window.clone()),
+        "windows": windows,
     }))
     .into_response()
 }
@@ -1449,14 +1494,40 @@ fn validate_budget(req: &admin::SetBudgetRequest) -> Result<(), &'static str> {
     if req.scope.trim().is_empty() {
         return Err("budget scope must not be empty");
     }
-    if req.limit_tokens > i64::MAX as u64 {
+    let has_hierarchy = req.limits.is_some();
+    let has_legacy_limit = req.limit_tokens.is_some();
+    if has_hierarchy == has_legacy_limit {
+        return Err("provide exactly one of limit_tokens or limits");
+    }
+    if has_hierarchy && req.window.is_some() {
+        return Err("window applies only to the singular limit_tokens shape");
+    }
+    if req.limit_tokens.unwrap_or(0) > i64::MAX as u64
+        || req
+            .limits
+            .as_ref()
+            .is_some_and(|limits| limits.values().any(|limit| *limit > i64::MAX as u64))
+    {
         return Err("budget limit exceeds the supported signed 64-bit range");
     }
     if !matches!(
         req.window.as_deref(),
-        None | Some("total" | "daily" | "monthly")
+        None | Some("total" | "hourly" | "daily" | "weekly" | "monthly")
     ) {
-        return Err("window must be total, daily or monthly");
+        return Err("window must be hourly, daily, weekly, monthly or total");
+    }
+    if let Some(limits) = &req.limits {
+        if limits.is_empty() {
+            return Err("limits must contain at least one window");
+        }
+        if limits.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "hourly" | "daily" | "weekly" | "monthly" | "total"
+            )
+        }) {
+            return Err("limits keys must be hourly, daily, weekly, monthly or total");
+        }
     }
     if !matches!(req.policy.as_deref(), None | Some("block" | "warn")) {
         return Err("policy must be block or warn");
@@ -1467,21 +1538,101 @@ fn validate_budget(req: &admin::SetBudgetRequest) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn apply_budget(
+fn requested_budget_windows(
+    req: &admin::SetBudgetRequest,
+    policy: &str,
+) -> Result<Vec<BudgetWindowSpec>, &'static str> {
+    validate_budget(req)?;
+    let policy = policy.to_owned();
+    if let Some(limits) = &req.limits {
+        Ok(limits
+            .iter()
+            .map(|(window, limit_tokens)| BudgetWindowSpec {
+                limit_tokens: *limit_tokens,
+                window: window.clone(),
+                policy: policy.clone(),
+            })
+            .collect())
+    } else {
+        Ok(vec![BudgetWindowSpec {
+            limit_tokens: req.limit_tokens.expect("validated singular limit"),
+            window: req.window.clone().unwrap_or_else(|| "total".into()),
+            policy,
+        }])
+    }
+}
+
+fn apply_budget_hierarchy(
     ledger: &Mutex<ProxyLedger>,
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
-    spec: &BudgetSpec,
+    scope: &str,
+    requested: &[BudgetWindowSpec],
 ) -> Result<(), String> {
-    // Carry the cap + window + policy into the live lease ledger (ADR-0005). A `Warn` scope stays a
-    // soft cap (the ledger admits over it and tracks spend for alerts); `Block` hard-enforces.
-    let window = Window::parse(&spec.window);
-    let policy = Policy::parse(&spec.policy);
+    // Carry every cap + window + policy into the live lease ledger atomically (ADR-0046). A
+    // `Warn` window stays soft; a `Block` window hard-enforces.
     // Hold both locks through commit and publication: concurrent writers cannot publish
     // metadata in the opposite order from durable commits. Match dashboard lock ordering.
     let mut ledger = ledger.lock().map_err(|e| e.to_string())?;
     let mut budgets = budgets.lock().map_err(|e| e.to_string())?;
-    ledger.set_budget(&spec.scope, Some(spec.limit_tokens), window, policy)?;
-    budgets.insert(spec.scope.clone(), spec.clone());
+    let durable_limits = requested
+        .iter()
+        .map(|spec| {
+            (
+                Some(spec.limit_tokens),
+                Window::parse(&spec.window),
+                Policy::parse(&spec.policy),
+            )
+        })
+        .collect::<Vec<_>>();
+    ledger.set_budget_hierarchy(scope, &durable_limits)?;
+    let spec = budgets.get_mut(scope);
+    if let Some(spec) = spec {
+        for window_spec in requested {
+            if let Some(existing) = spec
+                .windows
+                .iter_mut()
+                .find(|existing| existing.window == window_spec.window)
+            {
+                *existing = window_spec.clone();
+            } else {
+                spec.windows.push(window_spec.clone());
+            }
+        }
+    } else {
+        budgets.insert(
+            scope.to_owned(),
+            BudgetSpec {
+                scope: scope.to_owned(),
+                limit_tokens: requested[0].limit_tokens,
+                window: requested[0].window.clone(),
+                policy: requested[0].policy.clone(),
+                windows: requested.to_vec(),
+            },
+        );
+    }
+    budgets
+        .get_mut(scope)
+        .expect("budget spec was just inserted or updated")
+        .windows
+        .sort_by_key(|spec| {
+            sandhi_core::Window::parse(&spec.window)
+                .duration()
+                .map_or(i64::MAX, |d| d.whole_seconds())
+        });
+    if let Some(first) = budgets
+        .get_mut(scope)
+        .expect("budget spec was just inserted or updated")
+        .windows
+        .first()
+    {
+        let first = first.clone();
+        let spec = budgets
+            .get_mut(scope)
+            .expect("budget spec publication cannot fail");
+        spec.limit_tokens = first.limit_tokens;
+        spec.window = first.window;
+        spec.policy = first.policy;
+    }
     Ok(())
 }
 
@@ -1727,14 +1878,35 @@ pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &VirtualKeyStore) {
 /// for the volatile in-memory ledger (it has nothing persisted).
 pub fn rehydrate_budgets(ledger: &ProxyLedger, budgets: &Mutex<HashMap<String, BudgetSpec>>) {
     let mut map = budgets.lock().expect("budgets poisoned");
+    map.clear();
+    let mut grouped: std::collections::BTreeMap<String, Vec<BudgetWindowSpec>> =
+        std::collections::BTreeMap::new();
     for row in ledger.budgets() {
-        let spec = BudgetSpec {
-            scope: row.scope.clone(),
-            limit_tokens: row.limit.unwrap_or(0),
-            window: row.window.as_str().to_string(),
-            policy: row.policy.as_str().to_string(),
-        };
-        map.insert(row.scope, spec);
+        grouped
+            .entry(row.scope.clone())
+            .or_default()
+            .push(BudgetWindowSpec {
+                limit_tokens: row.limit.unwrap_or(0),
+                window: row.window.as_str().to_string(),
+                policy: row.policy.as_str().to_string(),
+            });
+    }
+    for (scope, windows) in grouped {
+        let legacy = windows.first().cloned().unwrap_or(BudgetWindowSpec {
+            limit_tokens: 0,
+            window: "total".into(),
+            policy: "block".into(),
+        });
+        map.insert(
+            scope.clone(),
+            BudgetSpec {
+                scope,
+                limit_tokens: legacy.limit_tokens,
+                window: legacy.window,
+                policy: legacy.policy,
+                windows,
+            },
+        );
     }
 }
 
@@ -1876,7 +2048,7 @@ pub(crate) async fn config_preview(
             } else {
                 "create"
             };
-            json!({ "scope": b.scope, "limit_tokens": b.limit_tokens, "action": action })
+            json!({ "scope": b.scope, "limit_tokens": b.limit_tokens, "limits": b.limits, "action": action })
         })
         .collect();
     let alerts_plan: Vec<Value> = cfg
@@ -1996,6 +2168,7 @@ pub(crate) async fn config_apply(
         let req = admin::SetBudgetRequest {
             scope: b.scope.clone(),
             limit_tokens: b.limit_tokens,
+            limits: b.limits.clone(),
             window: b.window.clone(),
             policy: b.policy.clone(),
             alert_thresholds: b.alert_thresholds.clone(),
@@ -2139,13 +2312,16 @@ pub(crate) async fn config_apply(
         let req = admin::SetBudgetRequest {
             scope: b.scope.clone(),
             limit_tokens: b.limit_tokens,
+            limits: b.limits.clone(),
             window: b.window.clone(),
             policy: b.policy.clone(),
             alert_thresholds: None, // handled below, so it shares the same dedup + reporting as cfg.alerts
         };
         let resp = set_budget(State(state.clone()), headers.clone(), Json(req)).await;
         if resp.status().is_success() {
-            budgets_applied.push(json!({ "scope": b.scope, "limit_tokens": b.limit_tokens }));
+            budgets_applied.push(
+                json!({ "scope": b.scope, "limit_tokens": b.limit_tokens, "limits": b.limits }),
+            );
         } else {
             failures.push(
                 config_component_failure(

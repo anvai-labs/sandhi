@@ -173,10 +173,11 @@
   <details class="actions"><summary>Set a budget</summary>
     <div class="form-row">
       <div class="field"><label for="b-scope">Scope</label><input id="b-scope" placeholder="group:platform"></div>
-      <div class="field"><label for="b-limit">Limit (tokens)</label><input id="b-limit" type="number" placeholder="1000000"></div>
-      <div class="field"><label for="b-window">Window</label>
-        <select id="b-window"><option value="total">total</option><option value="daily">daily</option>
-          <option value="monthly" selected>monthly</option></select></div>
+      <div class="field"><label for="b-hourly">Hourly limit</label><input id="b-hourly" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-daily">Daily limit</label><input id="b-daily" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-weekly">Weekly limit</label><input id="b-weekly" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-monthly">Monthly limit</label><input id="b-monthly" type="number" placeholder="1000000"></div>
+      <div class="field"><label for="b-total">Lifetime limit</label><input id="b-total" type="number" placeholder="optional"></div>
       <div class="field"><label for="b-policy">Policy</label>
         <select id="b-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <button class="btn primary" data-needs-token data-action="setBudget">Set budget</button>

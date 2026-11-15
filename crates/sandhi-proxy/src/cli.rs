@@ -297,11 +297,24 @@ enum VkeysAction {
 #[derive(Subcommand, Debug)]
 enum BudgetAction {
     /// Set a neutral-token budget on a scope.
+    #[command(group(clap::ArgGroup::new("budget-shape").required(true).multiple(false)))]
     Set {
         scope: String,
-        limit_tokens: u64,
-        #[arg(long, default_value = "total")]
-        window: String,
+        #[arg(group = "budget-shape")]
+        limit_tokens: Option<u64>,
+        #[arg(long)]
+        window: Option<String>,
+        /// Optional hierarchy limits; each is a trailing-window token cap.
+        #[arg(long, group = "budget-shape")]
+        hourly: Option<u64>,
+        #[arg(long, group = "budget-shape")]
+        daily: Option<u64>,
+        #[arg(long, group = "budget-shape")]
+        weekly: Option<u64>,
+        #[arg(long, group = "budget-shape")]
+        monthly: Option<u64>,
+        #[arg(long, group = "budget-shape")]
+        total: Option<u64>,
         #[arg(long, default_value = "block")]
         policy: String,
         /// Threshold percentages (0–100) that each create a log-channel alert rule (P2). Repeatable.
@@ -480,13 +493,39 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                     scope,
                     limit_tokens,
                     window,
+                    hourly,
+                    daily,
+                    weekly,
+                    monthly,
+                    total,
                     policy,
                     alert,
                 },
         } => {
+            let mut limits = serde_json::Map::new();
+            for (name, value) in [
+                ("hourly", hourly),
+                ("daily", daily),
+                ("weekly", weekly),
+                ("monthly", monthly),
+                ("total", total),
+            ] {
+                if let Some(value) = value {
+                    limits.insert(name.into(), json!(value));
+                }
+            }
+            let hierarchical = !limits.is_empty();
+            let singular = limit_tokens.is_some() || window.is_some();
+            if hierarchical && singular {
+                panic!("use either singular limit/window or the hourly/daily/weekly/monthly/total flags");
+            }
+            if !hierarchical && !singular {
+                panic!("provide a limit or at least one window flag");
+            }
             let body = json!({
                 "scope": scope,
                 "limit_tokens": limit_tokens,
+                "limits": if hierarchical { Some(Value::Object(limits)) } else { None },
                 "window": window,
                 "policy": policy,
                 "alert_thresholds": if alert.is_empty() { None } else { Some(alert) },
@@ -731,10 +770,40 @@ fn render(command: &Command, response: &Value, _base_url: &str) {
         Command::Usage { format, .. } => render_usage(response, format),
         Command::Budget {
             action: BudgetAction::List,
-        } => render_rows(
-            response.get("budgets").cloned().unwrap_or(Value::Null),
-            &["scope", "limit_tokens", "window", "policy"],
-        ),
+        } => {
+            let rows = response
+                .get("budgets")
+                .and_then(Value::as_array)
+                .map(|budgets| {
+                    budgets
+                        .iter()
+                        .flat_map(|budget| {
+                            let scope = budget.get("scope").cloned().unwrap_or(Value::Null);
+                            budget
+                                .get("windows")
+                                .and_then(Value::as_array)
+                                .map(|windows| {
+                                    windows
+                                        .iter()
+                                        .map(|window| {
+                                            let mut row = window.clone();
+                                            if let Some(object) = row.as_object_mut() {
+                                                object.insert("scope".into(), scope.clone());
+                                            }
+                                            row
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_else(|| vec![budget.clone()])
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            render_rows(
+                Value::Array(rows),
+                &["scope", "limit_tokens", "window", "policy"],
+            )
+        }
         Command::Alerts {
             action: AlertsAction::List { .. },
         } => render_rows(
@@ -1160,8 +1229,13 @@ mod tests {
         let set_cmd = Command::Budget {
             action: BudgetAction::Set {
                 scope: "group:platform".into(),
-                limit_tokens: 1000,
-                window: "total".into(),
+                limit_tokens: Some(1000),
+                window: Some("total".into()),
+                hourly: None,
+                daily: None,
+                weekly: None,
+                monthly: None,
+                total: None,
                 policy: "block".into(),
                 alert: Vec::new(),
             },
@@ -1191,8 +1265,13 @@ mod tests {
         let set_cmd = Command::Budget {
             action: BudgetAction::Set {
                 scope: "group:platform".into(),
-                limit_tokens: 1000,
-                window: "daily".into(),
+                limit_tokens: Some(1000),
+                window: Some("daily".into()),
+                hourly: None,
+                daily: None,
+                weekly: None,
+                monthly: None,
+                total: None,
                 policy: "warn".into(),
                 alert: vec![80, 100],
             },
@@ -1202,6 +1281,38 @@ mod tests {
         assert_eq!(body["window"], "daily");
         assert_eq!(body["policy"], "warn");
         assert_eq!(body["alert_thresholds"], json!([80, 100]));
+    }
+
+    #[test]
+    fn budget_set_emits_a_rolling_window_hierarchy() {
+        let set_cmd = Command::Budget {
+            action: BudgetAction::Set {
+                scope: "group:platform".into(),
+                limit_tokens: None,
+                window: None,
+                hourly: Some(1000),
+                daily: Some(10_000),
+                weekly: Some(50_000),
+                monthly: Some(200_000),
+                total: Some(1_000_000),
+                policy: "block".into(),
+                alert: Vec::new(),
+            },
+        };
+        let req = admin_request(url(), &set_cmd);
+        let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body["limits"],
+            json!({
+                "hourly": 1000,
+                "daily": 10_000,
+                "weekly": 50_000,
+                "monthly": 200_000,
+                "total": 1_000_000
+            })
+        );
+        assert!(body.get("limit_tokens").unwrap().is_null());
+        assert!(body.get("window").unwrap().is_null());
     }
 
     #[test]

@@ -706,9 +706,93 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
     let spec = rehydrated
         .get("upstream:inferflux")
         .expect("upstream scope rehydrated");
-    assert_eq!(spec.limit_tokens, 5000);
-    assert_eq!(spec.window, "monthly");
-    assert_eq!(spec.policy, "block");
+    assert_eq!(spec.windows.len(), 1);
+    assert_eq!(spec.windows[0].limit_tokens, 5000);
+    assert_eq!(spec.windows[0].window, "monthly");
+    assert_eq!(spec.windows[0].policy, "block");
+}
+
+#[tokio::test]
+async fn budget_hierarchy_round_trips_every_rolling_window() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let sink: Arc<dyn Sink> = store.clone();
+    let mut unshared_state = support::state(
+        KeyStore::new(),
+        ProxyLedger::durable(":memory:", 1).unwrap(),
+        sink,
+        HashMap::new(),
+        Some(store),
+    );
+    unshared_state.admin_token = Some(TOKEN.into());
+    let state = Arc::new(unshared_state);
+    let app = build_app(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:hierarchy",
+                "policy": "block",
+                "limits": {
+                    "hourly": 1_000,
+                    "daily": 10_000,
+                    "weekly": 50_000,
+                    "monthly": 200_000,
+                    "total": 1_000_000
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value = body_json(response).await;
+    assert_eq!(value["limits"].as_array().unwrap().len(), 5);
+
+    let list = body_json(
+        app.clone()
+            .oneshot(req("GET", "/admin/budget", Some(TOKEN), None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let budget = list["budgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|budget| budget["scope"] == "group:hierarchy")
+        .expect("hierarchical budget listed")
+        .clone();
+    assert_eq!(budget["windows"].as_array().unwrap().len(), 5);
+    assert_eq!(budget["window"], "hourly");
+
+    let usage = body_json(
+        app.oneshot(req(
+            "GET",
+            "/admin/budget/usage?scope=group:hierarchy",
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(usage["windows"].as_array().unwrap().len(), 5);
+    assert_eq!(usage["window"], "hourly");
+
+    let budgets = state.budgets.lock().unwrap();
+    let spec = budgets
+        .get("group:hierarchy")
+        .expect("budget grouped by scope");
+    assert_eq!(
+        spec.windows
+            .iter()
+            .map(|window| window.window.as_str())
+            .collect::<Vec<_>>(),
+        vec!["hourly", "daily", "weekly", "monthly", "total"]
+    );
 }
 
 #[tokio::test]

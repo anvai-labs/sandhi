@@ -28,7 +28,7 @@ appearance, keyboard navigation and reduced-motion preferences are supported.
 | Overview | Inspect the execution contract/readiness snapshot, volume, neutral token categories, cache-read reporting coverage, latency and attribution by subject/group/provider/model. Filter attribution rows without changing aggregate totals. |
 | Backends & routes | Inspect backend revisions, provider label, immutable budget scope, endpoint family/profile, declared models/cache capabilities and logical target mappings. Manage definitions through CLI or Configuration. |
 | Keys & credentials | Inspect references, mint scoped virtual keys and use supported credential operations. Newly minted secrets have one-time visibility. |
-| Budgets | Inspect scope limits, spent/remaining units and configure supported budget windows/policies. |
+| Budgets | Inspect scope limits, spent/remaining units and configure independent rolling hourly/daily/weekly/monthly/lifetime windows and policies. |
 | Alerts | Inspect rules and acknowledge supported notifications. |
 | Run explorer | Look up one exact run ID and compare each step's own/subtree neutral usage. |
 | Usage evidence | Query bounded persisted rows by exact request, session or run ID; inspect fresh/read/write/output counts and evidence limits. |
