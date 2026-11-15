@@ -19,6 +19,29 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.19.0] — Source candidate, 2026-11-15
+
+- Add explicit `model_budget_scope` templates for OIDC inference grants. One verified
+  subject can expose multiple logical models while Sandhi derives a separate front
+  budget from the selected logical model. Direct OIDC calls and delegated keys share
+  the configured model budget.
+- Keep fixed `budget_scope` semantics unchanged. A literal `{model}` in an ordinary
+  scope remains fixed; only the explicit model template expands. Startup validates
+  every materialized scope and rejects the reserved `upstream:` namespace.
+- Canonicalize logical-model accounting to configured grant spelling. Authorization
+  remains case-insensitive where model IDs are case-insensitive, but delegation mint,
+  durable replay, logical routes and budget settlement cannot create a separate
+  unbudgeted scope by changing ASCII case.
+- Persist delegated-key model templates in an additive SQLite column and preserve
+  them across restart. Existing databases migrate on reopen; ordinary grants and keys
+  retain their previous budget behavior.
+- Keep model selection deliberate. `warn` records the threshold and continues; `block`
+  refuses only the selected model. Other exposed models remain available and Sandhi
+  never substitutes or falls back automatically.
+- Add a public optional `VirtualKey.model_budget_scope` field. Rust callers that
+  exhaustively construct this public struct must add the field; this is the reason for
+  the minor version. See the [0.19 guide](docs/releases/v0.19.0.md).
+
 ## [0.18.0] — Published 2026-11-14
 
 - Default the standalone gateway to a credential-free loopback starter with one
@@ -1836,7 +1859,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/anvai-labs/sandhi/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/anvai-labs/sandhi/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/anvai-labs/sandhi/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/anvai-labs/sandhi/compare/v0.16.2...v0.17.0
