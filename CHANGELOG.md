@@ -19,7 +19,7 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.19.0] — Source candidate, 2026-11-15
+## [0.19.0] — Published 2026-11-15
 
 - Add explicit `model_budget_scope` templates for OIDC inference grants. One verified
   subject can expose multiple logical models while Sandhi derives a separate front
