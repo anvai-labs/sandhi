@@ -126,8 +126,11 @@ impl ShardedLedger {
         &self,
         scope: &str,
         limits: &[(Option<u64>, Window, Policy)],
+        replace: bool,
     ) -> rusqlite::Result<()> {
-        self.with_shard(scope, |ledger| ledger.set_limits_durable(scope, limits))
+        self.with_shard(scope, |ledger| {
+            ledger.set_limits_durable(scope, limits, replace)
+        })
     }
 
     pub fn reserve_durable(

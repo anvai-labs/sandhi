@@ -1142,6 +1142,17 @@ pub(crate) async fn set_budget(
     headers: HeaderMap,
     Json(req): Json<admin::SetBudgetRequest>,
 ) -> Response {
+    set_budget_impl(State(state), headers, Json(req), true).await
+}
+
+/// Direct operator requests replace the scope's complete hierarchy. Declarative config apply uses
+/// the same implementation with additive semantics so omission cannot revoke a live budget.
+async fn set_budget_impl(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Json(req): Json<admin::SetBudgetRequest>,
+    replace: bool,
+) -> Response {
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Operate, true).await {
         return r;
     }
@@ -1161,7 +1172,8 @@ pub(crate) async fn set_budget(
     let policy = req.policy.clone().unwrap_or_else(|| "block".into());
     let windows = requested_budget_windows(&req, &policy)
         .expect("set_budget validates its request before commit");
-    if let Err(error) = apply_budget_hierarchy(&state.ledger, &state.budgets, &req.scope, &windows)
+    if let Err(error) =
+        apply_budget_hierarchy(&state.ledger, &state.budgets, &req.scope, &windows, replace)
     {
         tracing::error!(%error, "budget hierarchy commit failed");
         return err(
@@ -1567,6 +1579,7 @@ fn apply_budget_hierarchy(
     budgets: &Mutex<HashMap<String, BudgetSpec>>,
     scope: &str,
     requested: &[BudgetWindowSpec],
+    replace: bool,
 ) -> Result<(), String> {
     // Carry every cap + window + policy into the live lease ledger atomically (ADR-0046). A
     // `Warn` window stays soft; a `Block` window hard-enforces.
@@ -1584,9 +1597,12 @@ fn apply_budget_hierarchy(
             )
         })
         .collect::<Vec<_>>();
-    ledger.set_budget_hierarchy(scope, &durable_limits)?;
+    ledger.set_budget_hierarchy(scope, &durable_limits, replace)?;
     let spec = budgets.get_mut(scope);
     if let Some(spec) = spec {
+        if replace {
+            spec.windows.clear();
+        }
         for window_spec in requested {
             if let Some(existing) = spec
                 .windows
@@ -2317,7 +2333,7 @@ pub(crate) async fn config_apply(
             policy: b.policy.clone(),
             alert_thresholds: None, // handled below, so it shares the same dedup + reporting as cfg.alerts
         };
-        let resp = set_budget(State(state.clone()), headers.clone(), Json(req)).await;
+        let resp = set_budget_impl(State(state.clone()), headers.clone(), Json(req), false).await;
         if resp.status().is_success() {
             budgets_applied.push(
                 json!({ "scope": b.scope, "limit_tokens": b.limit_tokens, "limits": b.limits }),

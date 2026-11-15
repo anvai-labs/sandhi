@@ -442,7 +442,9 @@ hard cap is checked independently over its fixed trailing interval; old settled 
 leaves that interval continuously, returning capacity without waiting for a calendar reset. The
 route validates a nonempty scope, a `block`/`warn` policy, limits from zero through
 `9223372036854775807`, and any alert thresholds from zero through 100. Unknown spellings are
-errors, not fallback policy choices. A rejected
+errors, not fallback policy choices. A direct request defines the complete hierarchy and removes
+omitted windows atomically; declarative config apply remains additive and omission never revokes
+an existing budget. A rejected
 budget request returns 400 before writing. Config apply validates all declared budget and alert
 intent before touching any backend. Other component errors are reported as apply failures.
 

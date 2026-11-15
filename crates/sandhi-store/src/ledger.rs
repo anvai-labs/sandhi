@@ -207,12 +207,14 @@ impl SqliteLedger {
         Ok(())
     }
 
-    /// Atomically install every `(window, limit, policy)` row for one scope. A later storage
-    /// failure cannot publish a partially replaced hierarchy.
+    /// Atomically install every `(window, limit, policy)` row for one scope. With `replace`, the
+    /// scope's omitted rows are removed first; otherwise this is an additive upsert used by
+    /// declarative apply. A later storage failure cannot publish a partial result.
     pub fn set_limits_durable(
         &mut self,
         scope: &str,
         limits: &[(Option<u64>, Window, Policy)],
+        replace: bool,
     ) -> rusqlite::Result<()> {
         if limits.is_empty() {
             return Err(rusqlite::Error::InvalidParameterName(
@@ -222,6 +224,9 @@ impl SqliteLedger {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if replace {
+            tx.execute("DELETE FROM budget_limit WHERE scope = ?1", [scope])?;
+        }
         for (limit, window, policy) in limits {
             let limit = limit
                 .map(i64::try_from)
@@ -1207,6 +1212,7 @@ mod tests {
                 (Some(11), Window::Hourly, Policy::Block),
                 (Some(22), Window::Daily, Policy::Block),
             ],
+            true,
         );
         assert!(result.is_err());
         let rows = ledger.list_budgets_durable().unwrap();
@@ -1218,6 +1224,38 @@ mod tests {
                 window: Window::Total,
                 policy: Policy::Block,
             }]
+        );
+
+        ledger
+            .conn
+            .execute_batch("DROP TRIGGER reject_second_hierarchy_row")
+            .unwrap();
+        ledger
+            .set_limits_durable(
+                "group:atomic",
+                &[
+                    (Some(11), Window::Hourly, Policy::Block),
+                    (Some(22), Window::Daily, Policy::Block),
+                ],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.list_budgets_durable().unwrap(),
+            vec![
+                BudgetRow {
+                    scope: "group:atomic".into(),
+                    limit: Some(11),
+                    window: Window::Hourly,
+                    policy: Policy::Block,
+                },
+                BudgetRow {
+                    scope: "group:atomic".into(),
+                    limit: Some(22),
+                    window: Window::Daily,
+                    policy: Policy::Block,
+                },
+            ]
         );
     }
 

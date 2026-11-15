@@ -769,30 +769,57 @@ async fn budget_hierarchy_round_trips_every_rolling_window() {
     assert_eq!(budget["window"], "hourly");
 
     let usage = body_json(
-        app.oneshot(req(
-            "GET",
-            "/admin/budget/usage?scope=group:hierarchy",
-            Some(TOKEN),
-            None,
-        ))
-        .await
-        .unwrap(),
+        app.clone()
+            .oneshot(req(
+                "GET",
+                "/admin/budget/usage?scope=group:hierarchy",
+                Some(TOKEN),
+                None,
+            ))
+            .await
+            .unwrap(),
     )
     .await;
     assert_eq!(usage["windows"].as_array().unwrap().len(), 5);
     assert_eq!(usage["window"], "hourly");
 
+    {
+        let budgets = state.budgets.lock().unwrap();
+        let spec = budgets
+            .get("group:hierarchy")
+            .expect("budget grouped by scope");
+        assert_eq!(
+            spec.windows
+                .iter()
+                .map(|window| window.window.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hourly", "daily", "weekly", "monthly", "total"]
+        );
+    }
+
+    // A direct singular update defines the complete scope hierarchy and removes omitted windows.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:hierarchy",
+                "limit_tokens": 1_000_000,
+                "window": "total",
+                "policy": "block"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     let budgets = state.budgets.lock().unwrap();
     let spec = budgets
         .get("group:hierarchy")
-        .expect("budget grouped by scope");
-    assert_eq!(
-        spec.windows
-            .iter()
-            .map(|window| window.window.as_str())
-            .collect::<Vec<_>>(),
-        vec!["hourly", "daily", "weekly", "monthly", "total"]
-    );
+        .expect("replacement remains grouped by scope");
+    assert_eq!(spec.windows.len(), 1);
+    assert_eq!(spec.windows[0].window, "total");
 }
 
 #[tokio::test]

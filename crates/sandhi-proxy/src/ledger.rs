@@ -135,6 +135,7 @@ impl ProxyLedger {
         &mut self,
         scope: &str,
         limits: &[(Option<u64>, Window, Policy)],
+        replace: bool,
     ) -> Result<(), String> {
         match self {
             Self::Memory(l) => {
@@ -151,7 +152,7 @@ impl ProxyLedger {
                 Ok(())
             }
             Self::Durable(l) => l
-                .set_limits_durable(scope, limits)
+                .set_limits_durable(scope, limits, replace)
                 .map_err(|e| e.to_string()),
         }
     }

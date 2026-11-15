@@ -33,10 +33,12 @@ paired usage remains held and does not disappear at a window boundary. The exist
 reservation/settlement receipt continues to charge all applicable front and upstream scopes once.
 
 The legacy one-row-per-scope `budget_limit` table is migrated in place to a composite
-`(scope, window)` primary key and existing rows are preserved. Updating one window does not delete
-another window; declarative apply remains additive. Operator metadata groups all rows by scope,
-while list/usage responses expose the full `windows` array and retain the shortest configured
-window in the legacy top-level fields for older clients.
+`(scope, window)` primary key and existing rows are preserved. A direct `POST /admin/budget`
+or CLI update defines the scope's complete hierarchy and atomically removes omitted windows;
+the singular legacy shape therefore replaces a previous hierarchy just as it replaced the scope's
+single old row. Declarative config apply remains additive: omission does not revoke a live budget.
+Operator metadata groups all rows by scope, while list/usage responses expose the full `windows`
+array and retain the shortest configured window in the legacy top-level fields for older clients.
 
 Alert thresholds are evaluated for every configured window with that window's limit and spend. A
 scope's existing threshold rule can therefore fire on its hourly utilization even when its monthly

@@ -297,7 +297,7 @@ enum VkeysAction {
 #[derive(Subcommand, Debug)]
 enum BudgetAction {
     /// Set a neutral-token budget on a scope.
-    #[command(group(clap::ArgGroup::new("budget-shape").required(true).multiple(false)))]
+    #[command(group(clap::ArgGroup::new("budget-shape").required(true).multiple(true)))]
     Set {
         scope: String,
         #[arg(group = "budget-shape")]
@@ -581,6 +581,39 @@ fn csv_to_list(csv: &str) -> Vec<String> {
         .collect()
 }
 
+fn validate_command(command: &Command) -> Result<(), String> {
+    let Command::Budget {
+        action:
+            BudgetAction::Set {
+                limit_tokens,
+                window,
+                hourly,
+                daily,
+                weekly,
+                monthly,
+                total,
+                ..
+            },
+    } = command
+    else {
+        return Ok(());
+    };
+    let hierarchical = [hourly, daily, weekly, monthly, total]
+        .into_iter()
+        .any(Option::is_some);
+    let singular = limit_tokens.is_some() || window.is_some();
+    if hierarchical && singular {
+        return Err(
+            "use either singular limit/window or the hourly/daily/weekly/monthly/total flags"
+                .into(),
+        );
+    }
+    if !hierarchical && !singular {
+        return Err("provide a limit or at least one window flag".into());
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     let cli = match Cli::try_parse_from(&args) {
@@ -595,6 +628,10 @@ fn main() -> ExitCode {
             error.exit();
         }
     };
+    if let Err(error) = validate_command(&cli.command) {
+        eprintln!("error: {error}");
+        return ExitCode::from(2);
+    }
 
     let token = cli.admin_token.as_deref();
 
@@ -1285,6 +1322,25 @@ mod tests {
 
     #[test]
     fn budget_set_emits_a_rolling_window_hierarchy() {
+        let cli = Cli::try_parse_from([
+            "sandhi",
+            "budget",
+            "set",
+            "group:platform",
+            "--hourly",
+            "1000",
+            "--daily",
+            "10000",
+            "--weekly",
+            "50000",
+            "--monthly",
+            "200000",
+            "--total",
+            "1000000",
+        ])
+        .unwrap();
+        validate_command(&cli.command).unwrap();
+
         let set_cmd = Command::Budget {
             action: BudgetAction::Set {
                 scope: "group:platform".into(),
