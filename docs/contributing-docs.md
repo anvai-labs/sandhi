@@ -12,8 +12,9 @@ The `Documentation` workflow checks links and builds the site for every PR and f
 pushes to `develop` and `main`. Enable Pages with **GitHub Actions** as the source
 and allow the `github-pages` environment to deploy `main`. PR and develop builds have
 read-only permissions and cannot deploy; publication happens only after the reviewed
-develop-to-main promotion. The banner labels this as development documentation;
-publishing it does not promote a runtime release.
+develop-to-main promotion. The published banner identifies the selected release
+state; publishing documentation does not certify a managed deployment or
+live-provider soak.
 
 ## One source, several views
 

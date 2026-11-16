@@ -19,7 +19,7 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.20.0] — Source candidate, 2026-11-16
+## [0.20.0] — Published 2026-11-16
 
 - Add hierarchical `hourly`, `daily`, `weekly`, `monthly` and `total` neutral-token
   budgets. Each window has its own cap and `warn` or `block` policy, so a short
