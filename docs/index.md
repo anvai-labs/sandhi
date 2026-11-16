@@ -57,7 +57,7 @@ dispatch. Pricing and billing belong to downstream systems.
 </div>
 
 !!! info "Published baseline"
-    Sandhi **0.20.0** is staged with hierarchical rolling budgets and per-window
+    Sandhi **0.20.0** is published with hierarchical rolling budgets and per-window
     warn/block policy. Check the [0.20 release guide](releases/v0.20.0.md) before
     configuring an installation. Victor 0.29.2's verified `sandhi-gateway==0.19.0`
     pin remains the currently qualified consumer binding.
