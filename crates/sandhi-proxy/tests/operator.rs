@@ -593,7 +593,7 @@ async fn budget_set_list_usage_and_enforcement() {
             "POST",
             "/admin/budget",
             Some(TOKEN),
-            Some(json!({ "scope": "group:platform", "limit_tokens": 50 })),
+            Some(json!({ "scope": "group:platform", "limits": { "total": { "limit_tokens": 50, "policy": "block" } } })),
         ))
         .await
         .unwrap();
@@ -607,7 +607,7 @@ async fn budget_set_list_usage_and_enforcement() {
         .unwrap();
     let list = body_json(r).await;
     assert_eq!(list["budgets"][0]["scope"], "group:platform");
-    assert_eq!(list["budgets"][0]["limit_tokens"], 50);
+    assert_eq!(list["budgets"][0]["windows"][0]["limit_tokens"], 50);
 
     // Record some spend directly via the ledger, then read usage.
     record_spend(&mut state.ledger.lock().unwrap(), "group:platform", 30);
@@ -622,9 +622,9 @@ async fn budget_set_list_usage_and_enforcement() {
         .await
         .unwrap();
     let usage = body_json(r).await;
-    assert_eq!(usage["spent"], 30);
-    assert_eq!(usage["limit_tokens"], 50);
-    assert_eq!(usage["remaining"], 20);
+    assert_eq!(usage["windows"][0]["spent"], 30);
+    assert_eq!(usage["windows"][0]["limit_tokens"], 50);
+    assert_eq!(usage["windows"][0]["remaining"], 20);
 }
 
 /// ADR-0015: an `upstream:{provider}` back-leg scope is ordinary scope data — it round-trips
@@ -655,9 +655,7 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
             Some(TOKEN),
             Some(json!({
                 "scope": "upstream:inferflux",
-                "limit_tokens": 5000,
-                "window": "monthly",
-                "policy": "block"
+                "limits": { "monthly": { "limit_tokens": 5000, "policy": "block" } }
             })),
         ))
         .await
@@ -678,9 +676,9 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
         .find(|b| b["scope"] == "upstream:inferflux")
         .expect("upstream scope listed")
         .clone();
-    assert_eq!(budget["limit_tokens"], 5000);
-    assert_eq!(budget["window"], "monthly");
-    assert_eq!(budget["policy"], "block");
+    assert_eq!(budget["windows"][0]["limit_tokens"], 5000);
+    assert_eq!(budget["windows"][0]["window"], "monthly");
+    assert_eq!(budget["windows"][0]["policy"], "block");
 
     // Seeded spend reads back through the usage endpoint.
     record_spend(&mut state.ledger.lock().unwrap(), "upstream:inferflux", 120);
@@ -695,9 +693,9 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
         .await
         .unwrap();
     let usage = body_json(r).await;
-    assert_eq!(usage["spent"], 120);
-    assert_eq!(usage["limit_tokens"], 5000);
-    assert_eq!(usage["remaining"], 4880);
+    assert_eq!(usage["windows"][0]["spent"], 120);
+    assert_eq!(usage["windows"][0]["limit_tokens"], 5000);
+    assert_eq!(usage["windows"][0]["remaining"], 4880);
 
     // Restart rehydration (a fresh map, the way startup rebuilds it) carries the spec.
     let budgets = std::sync::Mutex::new(HashMap::new());
@@ -706,9 +704,155 @@ async fn upstream_scope_round_trips_budget_set_rehydration_and_usage() {
     let spec = rehydrated
         .get("upstream:inferflux")
         .expect("upstream scope rehydrated");
-    assert_eq!(spec.limit_tokens, 5000);
-    assert_eq!(spec.window, "monthly");
-    assert_eq!(spec.policy, "block");
+    assert_eq!(spec.windows.len(), 1);
+    assert_eq!(spec.windows[0].limit_tokens, 5000);
+    assert_eq!(spec.windows[0].window, "monthly");
+    assert_eq!(spec.windows[0].policy, "block");
+}
+
+#[tokio::test]
+async fn budget_hierarchy_round_trips_every_rolling_window() {
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let sink: Arc<dyn Sink> = store.clone();
+    let mut unshared_state = support::state(
+        KeyStore::new(),
+        ProxyLedger::durable(":memory:", 1).unwrap(),
+        sink,
+        HashMap::new(),
+        Some(store),
+    );
+    unshared_state.admin_token = Some(TOKEN.into());
+    let state = Arc::new(unshared_state);
+    let app = build_app(state.clone());
+
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:hierarchy",
+                "limits": {
+                    "hourly": { "limit_tokens": 1_000, "policy": "warn" },
+                    "daily": { "limit_tokens": 10_000, "policy": "warn" },
+                    "weekly": { "limit_tokens": 50_000, "policy": "block" },
+                    "monthly": { "limit_tokens": 200_000, "policy": "block" },
+                    "total": { "limit_tokens": 1_000_000, "policy": "block" }
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value = body_json(response).await;
+    assert_eq!(value["limits"].as_object().unwrap().len(), 5);
+
+    let list = body_json(
+        app.clone()
+            .oneshot(req("GET", "/admin/budget", Some(TOKEN), None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let budget = list["budgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|budget| budget["scope"] == "group:hierarchy")
+        .expect("hierarchical budget listed")
+        .clone();
+    assert_eq!(budget["windows"].as_array().unwrap().len(), 5);
+    assert_eq!(budget["windows"][0]["window"], "hourly");
+    assert_eq!(budget["windows"][0]["policy"], "warn");
+    assert_eq!(budget["windows"][2]["policy"], "block");
+
+    let usage = body_json(
+        app.clone()
+            .oneshot(req(
+                "GET",
+                "/admin/budget/usage?scope=group:hierarchy",
+                Some(TOKEN),
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(usage["windows"].as_array().unwrap().len(), 5);
+    assert_eq!(usage["windows"][0]["window"], "hourly");
+
+    {
+        let budgets = state.budgets.lock().unwrap();
+        let spec = budgets
+            .get("group:hierarchy")
+            .expect("budget grouped by scope");
+        assert_eq!(
+            spec.windows
+                .iter()
+                .map(|window| window.window.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hourly", "daily", "weekly", "monthly", "total"]
+        );
+    }
+
+    // A direct one-bucket update defines the complete scope hierarchy and removes omitted windows.
+    let response = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:hierarchy",
+                "limits": { "total": { "limit_tokens": 1_000_000, "policy": "block" } }
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let budgets = state.budgets.lock().unwrap();
+    let spec = budgets
+        .get("group:hierarchy")
+        .expect("replacement remains grouped by scope");
+    assert_eq!(spec.windows.len(), 1);
+    assert_eq!(spec.windows[0].window, "total");
+}
+
+#[tokio::test]
+async fn budget_set_rejects_removed_singular_and_global_policy_fields() {
+    let state = admin_state();
+    let app = build_app(state);
+    let legacy = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:platform",
+                "limit_tokens": 1000,
+                "window": "total"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let global_policy = app
+        .oneshot(req(
+            "POST",
+            "/admin/budget",
+            Some(TOKEN),
+            Some(json!({
+                "scope": "group:platform",
+                "limits": { "total": { "limit_tokens": 1000, "policy": "block" } },
+                "policy": "block"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(global_policy.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -896,11 +1040,14 @@ async fn scoped_setup(
 ) -> String {
     add_upstream(app, "openai", upstream_uri, "REAL-KEY").await;
     let (secret, _id) = mint_key(app, "openai:default", None).await;
+    let mut limits = serde_json::Map::new();
+    limits.insert(
+        window.to_string(),
+        json!({ "limit_tokens": limit_tokens, "policy": policy }),
+    );
     let mut body = json!({
         "scope": "group:platform",
-        "limit_tokens": limit_tokens,
-        "window": window,
-        "policy": policy,
+        "limits": limits,
     });
     if let Some(pct) = alert {
         body["alert_thresholds"] = json!([pct]);
@@ -957,9 +1104,7 @@ async fn budget_set_with_window_policy_and_alert_thresholds_creates_rules() {
             Some(TOKEN),
             Some(json!({
                 "scope": "group:platform",
-                "limit_tokens": 1000,
-                "window": "daily",
-                "policy": "warn",
+                "limits": { "daily": { "limit_tokens": 1000, "policy": "warn" } },
                 "alert_thresholds": [80, 100],
             })),
         ))
@@ -967,8 +1112,8 @@ async fn budget_set_with_window_policy_and_alert_thresholds_creates_rules() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let v = body_json(r).await;
-    assert_eq!(v["window"], "daily");
-    assert_eq!(v["policy"], "warn");
+    assert_eq!(v["limits"]["daily"]["limit_tokens"], 1000);
+    assert_eq!(v["limits"]["daily"]["policy"], "warn");
     let created = v["alerts_created"].as_array().unwrap();
     assert_eq!(created.len(), 2);
 
@@ -977,8 +1122,8 @@ async fn budget_set_with_window_policy_and_alert_thresholds_creates_rules() {
     {
         let budgets = state.budgets.lock().unwrap();
         let spec = budgets.get("group:platform").expect("budget recorded");
-        assert_eq!(spec.window, "daily");
-        assert_eq!(spec.policy, "warn");
+        assert_eq!(spec.windows[0].window, "daily");
+        assert_eq!(spec.windows[0].policy, "warn");
     }
 
     // Rules appear in /admin/alerts.
@@ -1254,7 +1399,7 @@ async fn dashboard_budgets_reports_spent_vs_limit() {
             "POST",
             "/admin/budget",
             Some(TOKEN),
-            Some(json!({ "scope": "group:platform", "limit_tokens": 1000, "window": "total", "policy": "block" })),
+            Some(json!({ "scope": "group:platform", "limits": { "total": { "limit_tokens": 1000, "policy": "block" } } })),
         ))
         .await
         .unwrap();

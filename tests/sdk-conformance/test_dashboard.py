@@ -112,8 +112,11 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                 time.sleep(0.05)
             if options.get("admin", True):
                 response = client.post("/admin/budget", headers=server.headers, json={
-                    "scope": "group:dashboard", "limit_tokens": 10000,
-                    "policy": "block" if options.get("scoped_budget") else "warn", "window": "total",
+                    "scope": "group:dashboard",
+                    "limits": {"total": {
+                        "limit_tokens": 10000,
+                        "policy": "block" if options.get("scoped_budget") else "warn",
+                    }},
                 })
                 assert response.status_code == 200, response.text
             response = client.post("/v1/chat/completions", headers={
@@ -258,7 +261,7 @@ def test_sso_browser_roles_cookie_mutations_and_logout(page, dashboard, oidc_aut
         expect(budget).to_be_disabled()
     else:
         page.get_by_label("Scope", exact=True).fill("group:sso-browser")
-        page.get_by_label("Limit (tokens)").fill("700")
+        page.get_by_label("Lifetime limit").fill("700")
         budget.click()
         expect(page.locator("#budgets")).to_contain_text("group:sso-browser")
     page.get_by_role("button", name="Sign out").click()
@@ -329,7 +332,7 @@ def test_authenticated_keyboard_journey_and_one_time_key(page, dashboard):
     page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     page.get_by_label("Scope", exact=True).fill("group:keyboard")
-    page.get_by_label("Limit (tokens)").fill("700")
+    page.get_by_label("Lifetime limit").fill("700")
     page.get_by_role("button", name="Set budget", exact=True).focus()
     page.keyboard.press("Enter")
     expect(page.locator("#budgets")).to_contain_text("group:keyboard")
@@ -718,7 +721,7 @@ def test_starter_dashboard_loads_and_operates_without_a_credential(page, dashboa
     nav.get_by_role("link", name="Budgets", exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     page.get_by_label("Scope", exact=True).fill("starter:shared:v1")
-    page.get_by_label("Limit (tokens)").fill("700")
+    page.get_by_label("Lifetime limit").fill("700")
     page.get_by_role("button", name="Set budget", exact=True).click()
     expect(page.locator("#budgets")).to_contain_text("starter:shared:v1")
     for name in ("Backends & routes", "Keys & credentials", "Routing & cache guide", "Overview"):

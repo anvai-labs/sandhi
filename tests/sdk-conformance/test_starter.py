@@ -126,7 +126,8 @@ def test_configured_operator_token_does_not_protect_starter_inference(starter_ga
 
 def test_none_control_plane_rejects_cross_origin_and_dns_rebinding(starter_gateway):
     with starter_gateway() as (_, client, _):
-        body = {"scope": SCOPE, "limit_tokens": 1000}
+        body = {"scope": SCOPE,
+                "limits": {"total": {"limit_tokens": 1000, "policy": "block"}}}
         for headers in [{"Origin": "http://attacker.invalid"}, {"Origin": "null"},
                         {"Host": "attacker.invalid", "Origin": "http://attacker.invalid"},
                         {"Sec-Fetch-Site": "cross-site"}, {"Referer": "http://attacker.invalid/page"}]:
@@ -190,10 +191,14 @@ def test_tokens_remains_explicit_and_cannot_fall_back_to_starter(starter_gateway
 def test_starter_budget_survives_restart_and_dummy_key_rotation(starter_gateway, gated_provider, tmp_path):
     database = tmp_path / "persistent.db"
     with starter_gateway(database=database) as (_, client, _):
-        assert client.post("/admin/budget", json={"scope": SCOPE, "limit_tokens": 1000}).status_code == 200
+        assert client.post("/admin/budget", json={
+            "scope": SCOPE, "limits": {"total": {"limit_tokens": 1000, "policy": "block"}},
+        }).status_code == 200
         assert client.post("/v1/chat/completions", json={**BODY, "max_tokens": 8}).status_code == 200
         # The fixture reports14 neutral tokens (including its cache-read split).
-        assert client.post("/admin/budget", json={"scope": SCOPE, "limit_tokens": 14}).status_code == 200
+        assert client.post("/admin/budget", json={
+            "scope": SCOPE, "limits": {"total": {"limit_tokens": 14, "policy": "block"}},
+        }).status_code == 200
     with starter_gateway(database=database) as (_, client, _):
         denied = client.post("/v1/chat/completions", json={**BODY, "max_tokens": 8},
                              headers={"Authorization": "Bearer a-new-dummy"})
@@ -226,7 +231,9 @@ def test_unknown_source_usage_keeps_both_starter_holds_through_restart(starter_g
         assert db.execute("SELECT count(*) FROM budget_settlement_outbox").fetchone() == (0,)
     ceiling = next(amount for scope, amount, _, _ in held if scope == SCOPE)
     with starter_gateway(database=database, extra=extra, expected_status=124) as (_, client, _):
-        assert client.post("/admin/budget", json={"scope": SCOPE, "limit_tokens": ceiling}).status_code == 200
+        assert client.post("/admin/budget", json={
+            "scope": SCOPE, "limits": {"total": {"limit_tokens": ceiling, "policy": "block"}},
+        }).status_code == 200
         assert client.post("/v1/chat/completions", json={**BODY, "max_tokens": 8},
                            headers={"Authorization": "Bearer cannot-replace-the-owner"}).status_code == 429
     with sqlite3.connect(database) as db:

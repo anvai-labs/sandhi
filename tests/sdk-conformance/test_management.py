@@ -33,15 +33,22 @@ def budgets(client):
 
 
 @pytest.mark.parametrize("changes", [
-    {"scope": " "}, {"window": "weekly"}, {"policy": "blok"},
-    {"limit_tokens": 2**63}, {"alert_thresholds": [50, 101]},
+    {"scope": " "},
+    {"limits": {}},
+    {"limits": {"yearly": {"limit_tokens": 50, "policy": "block"}}},
+    {"limits": {"total": {"limit_tokens": 50, "policy": "blok"}}},
+    {"limits": {"total": {"limit_tokens": 2**63, "policy": "block"}}},
+    {"alert_thresholds": [50, 101]},
 ])
 def test_invalid_budget_intent_has_no_side_effects(dashboard, changes):
     with httpx.Client(base_url=dashboard.base, headers=dashboard.headers) as client:
         before = budgets(client)
-        response = client.post("/admin/budget", json={
-            "scope": "group:dashboard", "limit_tokens": 50, **changes,
-        })
+        body = {
+            "scope": "group:dashboard",
+            "limits": {"total": {"limit_tokens": 50, "policy": "block"}},
+        }
+        body.update(changes)
+        response = client.post("/admin/budget", json=body)
         assert response.status_code == 400, response.text
         assert budgets(client) == before
         assert client.get("/admin/alerts").json()["alerts"] == []
@@ -49,7 +56,10 @@ def test_invalid_budget_intent_has_no_side_effects(dashboard, changes):
 
 @pytest.mark.parametrize("fault", [False, True])
 def test_budget_commit_and_failed_update_survive_restart(dashboard, proxy_binary, fault):
-    desired = {"scope": "group:dashboard", "limit_tokens": 71, "window": "daily", "policy": "block"}
+    desired = {
+        "scope": "group:dashboard",
+        "limits": {"daily": {"limit_tokens": 71, "policy": "block"}},
+    }
     with httpx.Client(base_url=dashboard.base, headers=dashboard.headers) as client:
         before = budgets(client)
         if fault:
@@ -58,7 +68,13 @@ def test_budget_commit_and_failed_update_survive_restart(dashboard, proxy_binary
         assert response.status_code == (503 if fault else 200), response.text
         assert "synthetic-write-failure" not in response.text
         live = budgets(client)
-        assert live == (before if fault else {"budgets": [desired]})
+        expected = {
+            "budgets": [{
+                "scope": "group:dashboard",
+                "windows": [{"limit_tokens": 71, "window": "daily", "policy": "block"}],
+            }]
+        }
+        assert live == (before if fault else expected)
     # Stop the actual server and boot a fresh process on the same database.
     dashboard.process.terminate()
     dashboard.process.communicate(timeout=10)
@@ -91,9 +107,11 @@ def test_budget_commit_and_failed_update_survive_restart(dashboard, proxy_binary
 
 def test_concurrent_budget_writers_publish_committed_order(dashboard):
     def update(i):
+        window = "daily" if i % 2 else "monthly"
+        policy = "warn" if i % 2 else "block"
         response = httpx.post(dashboard.base + "/admin/budget", headers=dashboard.headers, json={
-            "scope": "group:dashboard", "limit_tokens": i,
-            "window": "daily" if i % 2 else "monthly", "policy": "warn" if i % 2 else "block",
+            "scope": "group:dashboard",
+            "limits": {window: {"limit_tokens": i, "policy": policy}},
         })
         assert response.status_code == 200, response.text
     with ThreadPoolExecutor(max_workers=8) as workers:
@@ -103,14 +121,18 @@ def test_concurrent_budget_writers_publish_committed_order(dashboard):
             "SELECT limit_tokens, window, policy FROM budget_limit WHERE scope='group:dashboard'"
         ).fetchone()
     response = httpx.get(dashboard.base + "/admin/budget", headers=dashboard.headers)
-    assert response.json()["budgets"] == [{"scope": "group:dashboard", "limit_tokens": limit,
-                                            "window": window, "policy": policy}]
+    assert response.json()["budgets"] == [{"scope": "group:dashboard",
+                                            "windows": [{"limit_tokens": limit,
+                                                         "window": window,
+                                                         "policy": policy}]}]
 
 
 def test_inline_alert_failure_reports_committed_budget(dashboard):
     fail_inserts(dashboard, "alert_rules", "NEW.threshold_pct = 90")
     response = httpx.post(dashboard.base + "/admin/budget", headers=dashboard.headers, json={
-        "scope": "group:dashboard", "limit_tokens": 200, "alert_thresholds": [50, 90],
+        "scope": "group:dashboard",
+        "limits": {"total": {"limit_tokens": 200, "policy": "block"}},
+        "alert_thresholds": [50, 90],
     })
     assert response.status_code == 503
     data = response.json()
@@ -126,7 +148,8 @@ def test_cli_reports_partial_budget_and_exits_nonzero(dashboard, cli_binary):
     fail_inserts(dashboard, "alert_rules")
     result = subprocess.run([
         str(cli_binary), "--admin-url", dashboard.base,
-        "--admin-token", ADMIN_TOKEN, "budget", "set", "group:dashboard", "200", "--alert", "90",
+        "--admin-token", ADMIN_TOKEN, "budget", "set", "group:dashboard",
+        "--total", "200", "--alert", "90",
     ], capture_output=True, text=True, timeout=15)
     assert result.returncode == 1, result.stderr
     assert json.loads(result.stdout)["budget_applied"] is True
@@ -138,11 +161,11 @@ def test_failed_budget_ui_does_not_retain_previous_success(page, dashboard):
     page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name='Budgets', exact=True).click()
     page.get_by_text("Set a budget", exact=True).click()
     page.get_by_label("Scope", exact=True).fill("group:dashboard")
-    page.get_by_label("Limit (tokens)").fill("700")
+    page.get_by_label("Lifetime limit").fill("700")
     page.get_by_role("button", name="Set budget", exact=True).click()
     expect(page.locator("#b-result")).to_contain_text("Budget set")
     fail_inserts(dashboard, "budget_limit")
-    page.get_by_label("Limit (tokens)").fill("800")
+    page.get_by_label("Lifetime limit").fill("800")
     page.get_by_role("button", name="Set budget", exact=True).click()
     expect(page.locator("#toasts")).to_contain_text("budget unchanged")
     expect(page.locator("#b-result")).to_be_empty()
@@ -150,8 +173,8 @@ def test_failed_budget_ui_does_not_retain_previous_success(page, dashboard):
 
 def test_config_invalid_budget_preflight_prevents_earlier_valid_write(dashboard):
     write_config(dashboard, {"budgets": [
-        {"scope": "group:dashboard", "limit_tokens": 1},
-        {"scope": "group:new", "limit_tokens": 1, "policy": "blok"},
+        {"scope": "group:dashboard", "limits": {"total": {"limit_tokens": 1, "policy": "block"}}},
+        {"scope": "group:new", "limits": {"total": {"limit_tokens": 1, "policy": "blok"}}},
     ]})
     with httpx.Client(base_url=dashboard.base, headers=dashboard.headers) as client:
         before = budgets(client)
@@ -163,14 +186,18 @@ def test_config_invalid_budget_preflight_prevents_earlier_valid_write(dashboard)
 def test_config_failed_budget_does_not_create_dependent_alerts(dashboard):
     fail_inserts(dashboard, "budget_limit", "NEW.scope = 'group:failed'")
     write_config(dashboard, {"budgets": [
-        {"scope": "group:failed", "limit_tokens": 2, "alert_thresholds": [80]},
-        {"scope": "group:good", "limit_tokens": 3},
+        {"scope": "group:failed", "limits": {"total": {"limit_tokens": 2, "policy": "block"}},
+         "alert_thresholds": [80]},
+        {"scope": "group:good", "limits": {"total": {"limit_tokens": 3, "policy": "block"}}},
     ]})
     response = httpx.post(dashboard.base + "/admin/config/apply", headers=dashboard.headers)
     assert response.status_code == 503
     data = response.json()
     assert data["ok"] is False
-    assert data["budgets"]["applied"] == [{"scope": "group:good", "limit_tokens": 3}]
+    assert data["budgets"]["applied"] == [{
+        "scope": "group:good",
+        "limits": {"total": {"limit_tokens": 3, "policy": "block"}},
+    }]
     assert data["failures"][0]["scope"] == "group:failed"
     assert data["alerts"] == {"created": [], "skipped": []}
 
@@ -226,7 +253,9 @@ def test_partial_config_ui_preserves_one_time_key_and_reports_failure(page, dash
 
 
 def test_config_success_and_retry_are_truthful(dashboard):
-    write_config(dashboard, {"budgets": [{"scope": "g", "limit_tokens": 20, "alert_thresholds": [50]}],
+    write_config(dashboard, {"budgets": [{
+        "scope": "g", "limits": {"total": {"limit_tokens": 20, "policy": "block"}},
+        "alert_thresholds": [50]}],
                              "vkeys": [{"upstream": "openai", "subject": "smoke"}]})
     with httpx.Client(base_url=dashboard.base, headers=dashboard.headers) as client:
         first = client.post("/admin/config/apply")

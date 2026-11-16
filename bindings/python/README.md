@@ -12,7 +12,7 @@ pip install sandhi-gateway   # import as: import sandhi_gateway
 > The bare name `sandhi` on PyPI is an unrelated Sanskrit-linguistics library; this binding is
 > published as `sandhi-gateway`. The crate and GitHub repo are `sandhi`.
 
-Source builds require Rust 1.88 or newer for the locked dependency graph. Wheels retain the
+Source builds require Rust 1.99 or newer for the locked dependency graph. Wheels retain the
 CPython 3.11+ stable ABI and require the GIL; the dependency upgrade does not certify
 free-threaded execution. The local coverage harness validates CPython 3.11–3.13.
 

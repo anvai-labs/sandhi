@@ -213,9 +213,8 @@ def verify_attribution(page, client, database, steps):
 def budget(page, client, limit):
     page.get_by_role("navigation", name="Dashboard sections").get_by_role("link", name="Budgets", exact=True).click()
     page.locator("#b-scope").fill(SCOPE)
-    page.locator("#b-limit").fill(str(limit))
-    page.locator("#b-window").select_option("total")
-    page.locator("#b-policy").select_option("block")
+    page.locator("#b-total").fill(str(limit))
+    page.locator("#b-total-policy").select_option("block")
     with page.expect_response(lambda response: response.url.endswith("/admin/budget")) as completed:
         page.get_by_role("button", name="Set budget", exact=True).click()
     assert completed.value.status == 200

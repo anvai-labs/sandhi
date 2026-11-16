@@ -536,11 +536,22 @@ function loadBudgets() {
 }
 async function setBudget() {
   document.getElementById("b-result").replaceChildren();
+  const fields = ["hourly", "daily", "weekly", "monthly", "total"];
+  const limits = Object.fromEntries(fields.flatMap(field => {
+    const raw = document.getElementById(`b-${field}`).value.trim();
+    if (!raw) return [];
+    const limit = Number(raw);
+    const policy = document.getElementById(`b-${field}-policy`).value;
+    return [[field, { limit_tokens: limit, policy }]];
+  }));
+  if (!Object.keys(limits).length || Object.values(limits).some(({limit_tokens}) =>
+    !Number.isSafeInteger(limit_tokens) || limit_tokens < 0)) {
+    document.getElementById("b-result").innerHTML = '<div class="callout err">Enter at least one non-negative integer window limit.</div>';
+    return;
+  }
   const body = {
     scope: document.getElementById("b-scope").value.trim(),
-    limit_tokens: Number(document.getElementById("b-limit").value || 0),
-    window: document.getElementById("b-window").value,
-    policy: document.getElementById("b-policy").value,
+    limits,
   };
   const data = await adminCall("POST", "/admin/budget", body);
   if (!data) return;
@@ -643,7 +654,7 @@ function loadConfig() {
     + configPlanTable("Providers", data.providers, ["credential_id", "base_url"])
     + configPlanTable("Backends", data.backends || [], ["id", "upstream_ref"])
     + configPlanTable("Logical routes", data.routes || [], ["id", "upstream_ref", "revision"])
-    + configPlanTable("Budgets", data.budgets, ["scope", "limit_tokens"])
+    + configPlanTable("Budgets", data.budgets, ["scope", "limits"])
     + configPlanTable("Alerts", data.alerts, ["scope", "threshold_pct"])
     + configPlanTable("Virtual keys", data.vkeys, ["upstream", "subject", "group"])
     + `<div class="form-row" style="margin-top:1rem"><button class="btn primary" data-needs-token data-action="applyConfig">Apply config</button></div>`;

@@ -57,11 +57,10 @@ dispatch. Pricing and billing belong to downstream systems.
 </div>
 
 !!! info "Published baseline"
-    Sandhi **0.19.0** is published with model-scoped OIDC budgets.
-    Check the [0.19 release guide](releases/v0.19.0.md) before configuring an
-    installation, and use the coordinated Victor consumer release that pins the
-    verified `sandhi-gateway==0.19.0` binding. Publication and deployment
-    acceptance remain separate.
+    Sandhi **0.20.0** is staged with hierarchical rolling budgets and per-window
+    warn/block policy. Check the [0.20 release guide](releases/v0.20.0.md) before
+    configuring an installation. Victor 0.29.2's verified `sandhi-gateway==0.19.0`
+    pin remains the currently qualified consumer binding.
 
 ## One request, two responsibilities
 

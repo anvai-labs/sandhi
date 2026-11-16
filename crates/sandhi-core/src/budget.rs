@@ -5,24 +5,17 @@
 //! this call exceed the cap?" before the call, then records the actual usage after.
 //!
 //! TD-0003 P2 adds:
-//! - **Windows** ([`Window`]) — the spend counter resets at `daily` / `monthly` / `total`
-//!   boundaries (wall-clock based; a rolling 24h / 30d approximation for daily/monthly).
+//! - **Windows** ([`Window`]) — the spend counter uses fixed trailing intervals for
+//!   `hourly` / `daily` / `weekly` / `monthly`, or a lifetime `total` interval.
 //! - **Policy** ([`Policy`]) — `Block` (hard reject, today's behavior) or `Warn` (soft cap: the
 //!   request proceeds; a threshold alert subsystem does the notifying).
 //! - **Reserve-then-reconcile against the projected max** — already present in P1; P2 preserves
 //!   it so concurrent in-flight reservations cannot overspend a near-exhausted budget.
 //!
-//! The ledger is the **live enforcement surface** (in-memory). Durable spent-by-window aggregates
-//! come from `usage_events` in `sandhi-store`; a proxy restart re-derives the window from those
-//! events (the in-memory counter simply resets). No dollars anywhere.
-//!
-//! **Two ledgers, two window models (deliberate, not a bug to "fix" by accident):** this
-//! [`BudgetLedger`] rolls a window at a fixed `duration()` from `now` (a rolling 24h/30d
-//! approximation) and is the volatile in-process surface used by the language bindings. The
-//! proxy's durable [`SqliteLedger`](sandhi_store::SqliteLedger) (in `sandhi-store`) measures spend
-//! over **calendar-aligned** windows (UTC midnight / first-of-month — ADR-0005 D5) and is the
-//! authoritative enforcement surface. They share a name but not the window rule; consolidating them
-//! onto one model is a tracked follow-up, so do not assume parity.
+//! The proxy's durable [`SqliteLedger`](sandhi_store::SqliteLedger) is authoritative. It stores
+//! multiple caps per scope, sums settled usage over each cap's fixed trailing interval, and checks
+//! every hard cap independently. This in-memory ledger remains a simple single-window surface for
+//! language bindings and tools; it is not the HTTP enforcement model.
 
 use std::collections::HashMap;
 
@@ -33,10 +26,14 @@ use time::OffsetDateTime;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Window {
-    /// Resets roughly every 24h (rolling).
+    /// Trailing one-hour interval.
+    Hourly,
+    /// Trailing 24-hour interval.
     Daily,
-    /// Resets roughly every 30 days (rolling). A precise calendar-month boundary is a follow-up;
-    /// the rolling approximation is deterministic and cheap to enforce.
+    /// Trailing seven-day interval.
+    Weekly,
+    /// Trailing 30-day interval. This is deliberately a fixed-duration rolling window,
+    /// not a calendar-month boundary.
     Monthly,
     /// Never resets — the lifetime cap (P1 behavior).
     #[default]
@@ -44,10 +41,13 @@ pub enum Window {
 }
 
 impl Window {
-    /// Parse the wire/CLI spelling (`daily` / `monthly` / `total`). Unknown → `Total`.
+    /// Parse the wire/CLI spelling (`hourly` / `daily` / `weekly` / `monthly` / `total`).
+    /// Unknown → `Total`.
     pub fn parse(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
+            "hourly" => Self::Hourly,
             "daily" => Self::Daily,
+            "weekly" => Self::Weekly,
             "monthly" => Self::Monthly,
             _ => Self::Total,
         }
@@ -56,7 +56,9 @@ impl Window {
     /// The rolling duration after which the spend counter resets. `Total` never elapses.
     pub fn duration(self) -> Option<time::Duration> {
         match self {
+            Self::Hourly => Some(time::Duration::seconds(3_600)),
             Self::Daily => Some(time::Duration::seconds(86_400)),
+            Self::Weekly => Some(time::Duration::seconds(86_400 * 7)),
             Self::Monthly => Some(time::Duration::seconds(86_400 * 30)),
             Self::Total => None,
         }
@@ -65,7 +67,9 @@ impl Window {
     /// Lowercase wire name.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Hourly => "hourly",
             Self::Daily => "daily",
+            Self::Weekly => "weekly",
             Self::Monthly => "monthly",
             Self::Total => "total",
         }
@@ -142,9 +146,8 @@ pub struct BudgetExceeded {
     pub requested: u64,
 }
 
-/// Tracks spend per scope and enforces caps. In-memory — the **live enforcement surface**. Durable
-/// aggregates come from `usage_events` in `sandhi-store`; window-reset state lives here and is
-/// re-derived from events on restart (or simply reset — see TD-0003 P2 notes).
+/// Tracks one cap per scope for simple in-process callers. This is not the proxy's multi-window
+/// durable enforcement surface.
 #[derive(Debug, Default)]
 pub struct BudgetLedger {
     limits: HashMap<String, Budget>,
@@ -389,12 +392,19 @@ mod tests {
 
     #[test]
     fn window_and_policy_parse_round_trip() {
+        assert_eq!(Window::parse("hourly"), Window::Hourly);
         assert_eq!(Window::parse("daily"), Window::Daily);
+        assert_eq!(Window::parse("weekly"), Window::Weekly);
         assert_eq!(Window::parse("MONTHLY"), Window::Monthly);
         assert_eq!(Window::parse("nope"), Window::Total);
         assert_eq!(Policy::parse("warn"), Policy::Warn);
         assert_eq!(Policy::parse("x"), Policy::Block);
         assert_eq!(Window::Daily.as_str(), "daily");
+        assert_eq!(Window::Hourly.duration(), Some(Duration::seconds(3_600)));
+        assert_eq!(Window::Daily.duration(), Some(Duration::days(1)));
+        assert_eq!(Window::Weekly.duration(), Some(Duration::days(7)));
+        assert_eq!(Window::Monthly.duration(), Some(Duration::days(30)));
+        assert_eq!(Window::Total.duration(), None);
         assert_eq!(Policy::Warn.as_str(), "warn");
     }
 

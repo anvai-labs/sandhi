@@ -36,6 +36,10 @@ TABLES = ("usage_events", "virtual_keys", "vault", "alert_rules", "budget_limit"
           "budget_reservation", "idempotency_dedup", "budget_settlement_outbox")
 
 
+def budget_body(scope, limit):
+    return {"scope": scope, "limits": {"total": {"limit_tokens": limit, "policy": "block"}}}
+
+
 @dataclass
 class Gateway:
     process: subprocess.Popen
@@ -258,9 +262,7 @@ def mint(client, *, scope=SCOPES[0], expires_at=None):
 def seed(gateway):
     client = gateway.client
     for scope in SCOPES:
-        response = client.post("/admin/budget", headers=ADMIN, json={
-            "scope": scope, "limit_tokens": 10000, "window": "total", "policy": "block",
-        })
+        response = client.post("/admin/budget", headers=ADMIN, json=budget_body(scope, 10000))
         assert response.status_code == 200, response.text
     response = client.post("/admin/alerts", headers=ADMIN,
                            json={"scope": SCOPES[0], "threshold_pct": 0})
@@ -414,9 +416,9 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
         # historical row. Set the cap to exactly settled spend plus its ceiling.
         scope, _lease_id, ceiling, _actual, _settled, _expires = dangling[0]
         spent = next(row["spent"] for row in baseline["budgets"] if row["scope"] == scope)
-        changed = restarted.client.post("/admin/budget", headers=ADMIN, json={
-            "scope": scope, "limit_tokens": spent + ceiling, "window": "total", "policy": "block",
-        })
+        changed = restarted.client.post(
+            "/admin/budget", headers=ADMIN, json=budget_body(scope, spent + ceiling)
+        )
         assert changed.status_code == 200, changed.text
         denied = call(restarted.client, keys["active"]["virtual_key"], step="held-capacity")
         assert denied.status_code == 429, denied.text
@@ -525,9 +527,9 @@ def test_tracked_oidc_stream_terminal_lifecycle(
     source = tmp_path / "tracked-stream.db"
     with recovery_gateway(source, explicit_deadlines=True) as gateway:
         assert gateway.client.base_url.scheme == "https"
-        configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
-            "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
-        })
+        configured = gateway.client.post(
+            "/admin/budget", headers=gateway.admin_headers, json=budget_body(SCOPES[0], 10000)
+        )
         assert configured.status_code == 200, configured.text
         with gateway.client.stream(
             "POST", "/v1/chat/completions", **call_options(gateway.member_token, stream=True),
@@ -606,9 +608,9 @@ def test_tracked_terminal_observed_during_sqlite_contention(
     gated_provider.qualified_stream = streaming
     outcomes = []
     with recovery_gateway(source, explicit_deadlines=True) as gateway:
-        configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
-            "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
-        })
+        configured = gateway.client.post(
+            "/admin/budget", headers=gateway.admin_headers, json=budget_body(SCOPES[0], 10000)
+        )
         assert configured.status_code == 200, configured.text
         key = gateway.member_token if gateway.member_token is not None else mint(gateway.client)["virtual_key"]
         assert observed_tokens(gateway.client, headers=gateway.admin_headers) == {}
@@ -705,9 +707,9 @@ def test_tracked_terminal_observed_during_sqlite_contention(
     with recovery_gateway(source, explicit_deadlines=True) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         if crash:
-            changed = restarted.client.post("/admin/budget", headers=restarted.admin_headers, json={
-                "scope": held[0], "limit_tokens": held[2], "window": "total", "policy": "block",
-            })
+            changed = restarted.client.post(
+                "/admin/budget", headers=restarted.admin_headers, json=budget_body(held[0], held[2])
+            )
             assert changed.status_code == 200, changed.text
             assert call(restarted.client, key, step="held-capacity").status_code == 429
             restarted.stop(expected_status=124)
@@ -774,9 +776,9 @@ def test_tracked_sigkill_after_origin_acceptance_retains_unknown_liability(
     with recovery_gateway(source, explicit_deadlines=True) as restarted:
         assert restarted.executable_sha256 == gateway.executable_sha256
         # The held ceiling must still deny new work after all RAM owners are lost.
-        changed = restarted.client.post("/admin/budget", headers=restarted.admin_headers, json={
-            "scope": held[0], "limit_tokens": held[2], "window": "total", "policy": "block",
-        })
+        changed = restarted.client.post(
+            "/admin/budget", headers=restarted.admin_headers, json=budget_body(held[0], held[2])
+        )
         assert changed.status_code == 200, changed.text
         denied = call(restarted.client, key, step="held-capacity")
         assert denied.status_code == 429, denied.text
@@ -797,9 +799,9 @@ def test_tracked_sigkill_after_terminal_persistence_recovers_one_receipt(
     with recovery_gateway(source, explicit_deadlines=True) as gateway:
         expected_scheme = "https" if request.node.callspec.params["recovery_gateway"] == "oidc" else "http"
         assert gateway.client.base_url.scheme == expected_scheme
-        configured = gateway.client.post("/admin/budget", headers=gateway.admin_headers, json={
-            "scope": SCOPES[0], "limit_tokens": 10000, "window": "total", "policy": "block",
-        })
+        configured = gateway.client.post(
+            "/admin/budget", headers=gateway.admin_headers, json=budget_body(SCOPES[0], 10000)
+        )
         assert configured.status_code == 200, configured.text
         key = gateway.member_token if gateway.member_token is not None else mint(gateway.client)["virtual_key"]
         # Synthetic fault injection at the existing transaction boundary; this

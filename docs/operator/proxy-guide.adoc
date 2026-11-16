@@ -387,9 +387,12 @@ never revokes an object merely because it disappeared from the file.
   "budgets": [
     {
       "scope": "group:platform",
-      "limit_tokens": 1000000,
-      "window": "monthly",
-      "policy": "block",
+      "limits": {
+        "hourly": {"limit_tokens": 50000, "policy": "warn"},
+        "daily": {"limit_tokens": 250000, "policy": "warn"},
+        "weekly": {"limit_tokens": 1000000, "policy": "block"},
+        "monthly": {"limit_tokens": 4000000, "policy": "block"}
+      },
       "alert_thresholds": [80, 100]
     }
   ],
@@ -432,9 +435,15 @@ token bound, and every in-flight call can contribute excess. No provider/model c
 strict total-token-cap guarantee. See link:../product/metering-and-budget-guarantees.md[the
 metering and budget matrix] for controls, missing proofs, reasoning semantics and upgrade rules.
 
-`POST /admin/budget` validates a nonempty scope, a `total`/`daily`/`monthly` window, a
-`block`/`warn` policy, a limit from zero through `9223372036854775807`, and any alert thresholds
-from zero through 100. Unknown spellings are errors, not fallback policy choices. A rejected
+`POST /admin/budget` requires a `limits` hierarchy whose keys are one or more of `hourly`,
+`daily`, `weekly`, `monthly` and `total`. Every value is `{ "limit_tokens": N, "policy":
+"block" | "warn" }`. Each cap is checked independently over its fixed trailing interval; old
+settled consumption leaves that interval continuously, returning capacity without waiting for a
+calendar reset. The route validates a nonempty scope, per-window policies, limits from zero
+through `9223372036854775807`, and any alert thresholds from zero through 100. Unknown spellings
+are errors, not fallback policy choices. A direct request defines the complete hierarchy and
+removes omitted windows atomically; declarative config apply remains additive and omission never
+revokes an existing budget. A rejected
 budget request returns 400 before writing. Config apply validates all declared budget and alert
 intent before touching any backend. Other component errors are reported as apply failures.
 
@@ -576,12 +585,17 @@ shared backend satisfies the enforcement conformance suite.
 [source,bash]
 ----
 cargo run -p sandhi-proxy --bin sandhi -- --admin-token admin-secret \
-  budget set group:platform 1000000 --window monthly --policy block --alert 80 --alert 100
+  budget set group:platform --hourly 50000 --daily 250000 --weekly 1000000 \
+    --monthly 4000000 --hourly-policy warn --daily-policy warn \
+    --weekly-policy block --monthly-policy block --alert 80 --alert 100
 ----
 
-* `--window total|daily|monthly` — spend is measured over calendar-aligned windows.
-* `--policy block|warn` — `block` refuses calls past the cap; `warn` is a soft cap that
-  admits over the limit but still tracks spend (for alerts).
+* `--hourly`, `--daily`, `--weekly`, `--monthly` and `--total` — each optional flag installs an
+  independent rolling cap. At least one is required.
+* `--hourly-policy`, `--daily-policy`, `--weekly-policy`, `--monthly-policy` and
+  `--total-policy` — each defaults to `block`; set `warn` for that individual window.
+* `block` refuses calls past that window's cap; `warn` is a soft cap that admits over the
+  window limit but still tracks spend (for alerts).
 * `--alert <pct>` — repeatable; each value creates a log-channel alert rule at that % of the limit.
 
 Inspect with `budget list`, `budget usage group:platform`.

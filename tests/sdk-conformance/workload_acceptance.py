@@ -479,7 +479,7 @@ def accounting(client, base, database, run_id, config, before_spend, deadline):
             raise TimeoutError("accounting verification deadline")
         assert front_leg.get(scope, 0) - before_spend.get(scope, 0) == value
         body = client.get(base + "/admin/budget/usage", params={"scope": scope}).json()
-        assert body["spent"] == front_leg[scope]
+        assert body["windows"][0]["spent"] == front_leg[scope]
     tree = client.get(base + "/admin/usage/run/" + run_id).json()
     assert tree["run"]["total"]["billable_tokens"] == sum(expected_spend.values())
     assert_quiet(metrics(client.get(base + "/metrics").text))
@@ -568,8 +568,10 @@ def run_acceptance(binary: Path, config: Config, binary_revision=None):
                         if time.monotonic() >= deadline:
                             raise TimeoutError("tenant setup deadline")
                         scope = f"group:tenant-{tenant}"
-                        response = admin.post(base + "/admin/budget", json={"scope": scope,
-                            "limit_tokens": 100000000, "policy": "block", "window": "total"})
+                        response = admin.post(base + "/admin/budget", json={
+                            "scope": scope,
+                            "limits": {"total": {"limit_tokens": 100000000, "policy": "block"}},
+                        })
                         assert response.status_code == 200
                         response = admin.post(base + "/admin/keys/share", json={"upstream": "gemini",
                             "subject": f"subject-{tenant}", "group": f"tenant-{tenant}", "budget_scope": scope})
@@ -623,7 +625,10 @@ def run_acceptance(binary: Path, config: Config, binary_revision=None):
                         rows_before = connection.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0]
                     path, body = request_shape("transparent-unary", 0)
                     assert admin.post(base + path, headers={"Authorization": "Bearer invalid-synthetic"}, json=body).status_code == 401
-                    assert admin.post(base + "/admin/budget", json={"scope": "group:tenant-0", "limit_tokens": 0}).status_code == 200
+                    assert admin.post(base + "/admin/budget", json={
+                        "scope": "group:tenant-0",
+                        "limits": {"total": {"limit_tokens": 0, "policy": "block"}},
+                    }).status_code == 200
                     assert admin.post(base + path, headers={"Authorization": "Bearer " + tokens[0]}, json=body).status_code == 429
                     assert admin.get(mock_url).json().get("requests", 0) == count_before
                     with closing(sqlite3.connect(database)) as connection:

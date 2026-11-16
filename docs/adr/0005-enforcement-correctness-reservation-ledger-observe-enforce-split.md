@@ -2,6 +2,10 @@
 
 Date: 2026-07-23
 
+> **Current window update:** ADR-0046 supersedes the calendar-aligned window rule below with
+> hierarchical fixed trailing windows. This ADR's reservation ceilings, atomicity, idempotent
+> settlement, store-clock authority and durability requirements remain in force.
+
 ## Status
 
 Accepted (implemented — the lease ledger backs the proxy's enforcement: reserve → settle →

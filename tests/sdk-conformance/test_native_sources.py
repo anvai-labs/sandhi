@@ -270,9 +270,7 @@ def gateway(tmp_path, binaries, source, family):
                     "/admin/budget",
                     json={
                         "scope": scope,
-                        "limit_tokens": 10000,
-                        "window": "total",
-                        "policy": "block",
+                        "limits": {"total": {"limit_tokens": 10000, "policy": "block"}},
                     },
                 ).status_code
                 == 200
