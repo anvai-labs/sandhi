@@ -140,11 +140,17 @@ impl ExecutionContext {
                             | "chatgpt_codex"
                             | "anthropic_implicit_cache"
                             | "openai_terminal_chunk_usage"
+                            | "zai_final_choice_usage"
+                            | "deepseek_final_choice_usage"
                     )
                     && (b.endpoint_profile != "anthropic_implicit_cache"
                         || self.endpoint_family == EndpointFamilyV1::AnthropicMessages)
                     && (b.endpoint_profile != "openai_terminal_chunk_usage"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
+                    && (!matches!(
+                        b.endpoint_profile.as_str(),
+                        "zai_final_choice_usage" | "deepseek_final_choice_usage"
+                    ) || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
                     && (b.endpoint_profile != "chatgpt_codex"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiResponses)
             })
@@ -432,6 +438,25 @@ mod tests {
             assert!(matches!(value.validate(), Err(EvidenceError::InvalidInput)));
         }
     }
+    #[test]
+    fn final_choice_usage_profiles_require_chat_completions() {
+        let mut value = context();
+        value.upstream_ref = "backend/fixture".into();
+        value.backend = Some(BackendContext {
+            id: "fixture".into(),
+            revision: 1,
+            credential_ref: "openai:fixture".into(),
+            credential_generation: 1,
+            endpoint_profile: "zai_final_choice_usage".into(),
+        });
+        assert!(value.validate().is_ok());
+        value.endpoint_family = EndpointFamilyV1::OpenaiResponses;
+        assert!(matches!(value.validate(), Err(EvidenceError::InvalidInput)));
+        value.endpoint_family = EndpointFamilyV1::OpenaiChatCompletions;
+        value.backend.as_mut().unwrap().endpoint_profile = "deepseek_final_choice_usage".into();
+        assert!(value.validate().is_ok());
+    }
+
     #[test]
     fn context_admission_is_atomic_and_settlement_cannot_change_its_weight() {
         let dir = tempfile::tempdir().unwrap();
