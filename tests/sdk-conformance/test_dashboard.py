@@ -112,8 +112,11 @@ def dashboard(proxy_binary, upstream, tmp_path, request):
                 time.sleep(0.05)
             if options.get("admin", True):
                 response = client.post("/admin/budget", headers=server.headers, json={
-                    "scope": "group:dashboard", "limit_tokens": 10000,
-                    "policy": "block" if options.get("scoped_budget") else "warn", "window": "total",
+                    "scope": "group:dashboard",
+                    "limits": {"total": {
+                        "limit_tokens": 10000,
+                        "policy": "block" if options.get("scoped_budget") else "warn",
+                    }},
                 })
                 assert response.status_code == 200, response.text
             response = client.post("/v1/chat/completions", headers={

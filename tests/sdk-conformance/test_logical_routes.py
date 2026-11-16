@@ -170,8 +170,9 @@ def test_tracked_route_context_and_original_charge_survive_restart_and_rotation(
         definition = {"id": "coding", "models": [{"id": "agent", "targets": [{"backend": "primary", "model": "fixture"}]}]}
         assert instance.admin("POST", "/admin/routes", json={"definition": definition}).status_code == 201
         for scope in ("group:context-team", "upstream:models"):
-            assert instance.admin("POST", "/admin/budget", json={"scope": scope, "limit_tokens": 10000,
-                "window": "total", "policy": "block"}).status_code == 200
+            assert instance.admin("POST", "/admin/budget", json={
+                "scope": scope, "limits": {"total": {"limit_tokens": 10000, "policy": "block"}},
+            }).status_code == 200
         minted = instance.admin("POST", "/admin/keys/share", json={"upstream": "route/coding", "models": ["agent"], "group": "context-team"})
         assert minted.status_code == 200
         token = minted.json()["virtual_key"]

@@ -197,14 +197,18 @@ impl SqliteLedger {
             .map(i64::try_from)
             .transpose()
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        self.conn.execute(
-            "INSERT INTO budget_limit (scope, window, limit_tokens, policy) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope, window) DO UPDATE SET
-                 limit_tokens = excluded.limit_tokens,
-                 policy = excluded.policy",
-            params![scope, window.as_str(), limit, policy.as_str()],
-        )?;
-        Ok(())
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM budget_limit WHERE scope = ?1", [scope])?;
+        if let Some(limit) = limit {
+            tx.execute(
+                "INSERT INTO budget_limit (scope, window, limit_tokens, policy)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![scope, window.as_str(), limit, policy.as_str()],
+            )?;
+        }
+        tx.commit()
     }
 
     /// Atomically install every `(window, limit, policy)` row for one scope. With `replace`, the
@@ -1107,17 +1111,18 @@ mod tests {
     #[test]
     fn hierarchical_windows_roll_independently_and_capacity_returns_with_time() {
         let mut ledger = mem();
-        for (window, limit) in [
-            (Window::Hourly, 100),
-            (Window::Daily, 500),
-            (Window::Weekly, 700),
-            (Window::Monthly, 1200),
-        ] {
-            ledger
-                .set_limit_durable("group:h", Some(limit), window, Policy::Block)
-                .unwrap();
-        }
-
+        ledger
+            .set_limits_durable(
+                "group:h",
+                &[
+                    (Some(100), Window::Hourly, Policy::Block),
+                    (Some(500), Window::Daily, Policy::Block),
+                    (Some(700), Window::Weekly, Policy::Block),
+                    (Some(1200), Window::Monthly, Policy::Block),
+                ],
+                true,
+            )
+            .unwrap();
         let now = OffsetDateTime::now_utc();
         for (seconds_ago, actual) in [
             (3_600 * 2, 399),       // hourly out; daily/weekly/monthly in
@@ -1257,6 +1262,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn legacy_set_limit_none_clears_the_complete_hierarchy() {
+        let mut ledger = mem();
+        ledger
+            .set_limits_durable(
+                "group:clear",
+                &[
+                    (Some(100), Window::Hourly, Policy::Block),
+                    (Some(500), Window::Daily, Policy::Block),
+                ],
+                false,
+            )
+            .unwrap();
+        ledger
+            .set_limit_durable("group:clear", None, Window::Total, Policy::Block)
+            .unwrap();
+        assert!(ledger.list_budgets_durable().unwrap().is_empty());
+        assert_eq!(ledger.limit_durable("group:clear").unwrap(), None);
+    }
+
+    #[test]
+    fn warn_and_block_policies_are_independent_per_window() {
+        let mut ledger = mem();
+        ledger
+            .set_limits_durable(
+                "group:mixed",
+                &[
+                    (Some(100), Window::Hourly, Policy::Warn),
+                    (Some(500), Window::Daily, Policy::Block),
+                ],
+                true,
+            )
+            .unwrap();
+        let now = OffsetDateTime::now_utc();
+        ledger
+            .conn
+            .execute(
+                "INSERT INTO budget_reservation
+                    (scope, ceiling, actual, settled, settled_at, expires_at)
+                 VALUES ('group:mixed', 400, 400, 1, ?1, 0)",
+                [now.unix_timestamp()],
+            )
+            .unwrap();
+
+        // The hourly cap is warn and does not deny; the daily hard cap does.
+        assert!(matches!(
+            ledger
+                .reserve_durable("group:mixed", 150, now, ttl())
+                .unwrap(),
+            ReserveOutcome::Denied(denied) if denied.limit == 500
+        ));
+        assert!(matches!(
+            ledger
+                .reserve_durable("group:mixed", 100, now, ttl())
+                .unwrap(),
+            ReserveOutcome::Admitted(_)
+        ));
     }
 
     #[test]

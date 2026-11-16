@@ -176,8 +176,8 @@ def shutdown_gateway(proxy_binary, gated_provider, tmp_path):
                         assert time.monotonic() < deadline, "gateway did not start"
                         time.sleep(0.02)
                     response = client.post("/admin/budget", headers=ADMIN, json={
-                        "scope": "group:demo", "limit_tokens": 100000,
-                        "policy": "block", "window": "total",
+                        "scope": "group:demo",
+                        "limits": {"total": {"limit_tokens": 100000, "policy": "block"}},
                     })
                     assert response.status_code == 200, response.text
                 yield process, base, database, port
@@ -239,8 +239,8 @@ def test_sigterm_keeps_fresh_and_keepalive_probes_reachable_and_rejects_work(
                 assert fresh.get("/healthz").status_code == 200
                 assert_draining(fresh.post("/v1/chat/completions", headers=CLIENT, json=BODY))
                 assert_draining(fresh.post("/admin/budget", headers=ADMIN, json={
-                    "scope": "group:forbidden", "limit_tokens": 1,
-                    "policy": "block", "window": "total",
+                    "scope": "group:forbidden",
+                    "limits": {"total": {"limit_tokens": 1, "policy": "block"}},
                 }), administrative=True)
             assert evidence_counts(database) == before
             with sqlite3.connect(database, timeout=1) as connection:

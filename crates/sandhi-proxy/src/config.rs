@@ -85,17 +85,12 @@ pub struct ProviderEntry {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BudgetEntry {
     pub scope: String,
-    pub limit_tokens: Option<u64>,
-    /// Optional hierarchy: one limit for each of `hourly`, `daily`, `weekly`, `monthly` and/or
-    /// `total`. Mutually exclusive with the legacy singular `limit_tokens`/`window` shape.
-    #[serde(default)]
-    pub limits: Option<std::collections::BTreeMap<String, u64>>,
-    #[serde(default)]
-    pub window: Option<String>,
-    #[serde(default)]
-    pub policy: Option<String>,
+    /// Canonical hierarchy: one limit for each of `hourly`, `daily`, `weekly`, `monthly` and/or
+    /// `total`.
+    pub limits: std::collections::BTreeMap<String, crate::operator::admin::BudgetLimitRequest>,
     #[serde(default)]
     pub alert_thresholds: Option<Vec<u8>>,
 }
@@ -250,7 +245,7 @@ mod tests {
         let json = r#"{
             "tls": {"cert":"/run/tls/fullchain.pem","key":"/run/tls/privkey.pem"},
             "providers": [{"provider":"ollama","label":"default","base_url":"http://localhost:11434","secret_env":null}],
-            "budgets": [{"scope":"group:platform","limit_tokens":1000000,"window":"monthly","policy":"block"}],
+            "budgets": [{"scope":"group:platform","limits":{"monthly":{"limit_tokens":1000000,"policy":"block"}}}],
             "alerts": [{"scope":"group:platform","threshold_pct":90,"webhook_env":"SLACK_URL"}],
             "vkeys": [{"upstream":"ollama:default","subject":"alice","group":"platform","rate_limit_per_min":60}]
         }"#;
@@ -260,7 +255,7 @@ mod tests {
             Some(std::path::Path::new("/run/tls/fullchain.pem"))
         );
         assert_eq!(cfg.providers.len(), 1);
-        assert_eq!(cfg.budgets[0].limit_tokens, Some(1_000_000));
+        assert_eq!(cfg.budgets[0].limits["monthly"].limit_tokens, 1_000_000);
         assert_eq!(cfg.alerts[0].threshold_pct, 90);
         assert_eq!(cfg.vkeys[0].subject.as_deref(), Some("alice"));
     }
@@ -271,14 +266,13 @@ mod tests {
         // section carries it with no special-casing (apply flows through the same
         // `SetBudgetRequest` path as the operator API).
         let json = r#"{
-            "budgets": [{"scope":"upstream:inferflux","limit_tokens":250000,"window":"monthly","policy":"warn"}]
+            "budgets": [{"scope":"upstream:inferflux","limits":{"monthly":{"limit_tokens":250000,"policy":"warn"}}}]
         }"#;
         let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.budgets.len(), 1);
         assert_eq!(cfg.budgets[0].scope, "upstream:inferflux");
-        assert_eq!(cfg.budgets[0].limit_tokens, Some(250_000));
-        assert_eq!(cfg.budgets[0].window.as_deref(), Some("monthly"));
-        assert_eq!(cfg.budgets[0].policy.as_deref(), Some("warn"));
+        assert_eq!(cfg.budgets[0].limits["monthly"].limit_tokens, 250_000);
+        assert_eq!(cfg.budgets[0].limits["monthly"].policy, "warn");
     }
 
     #[test]
@@ -286,18 +280,16 @@ mod tests {
         let json = r#"{
             "budgets": [{
                 "scope": "coding/shared",
-                "policy": "warn",
                 "limits": {
-                    "hourly": 1000,
-                    "daily": 10000,
-                    "weekly": 50000,
-                    "monthly": 200000
+                    "hourly": {"limit_tokens": 1000, "policy": "warn"},
+                    "daily": {"limit_tokens": 10000, "policy": "warn"},
+                    "weekly": {"limit_tokens": 50000, "policy": "warn"},
+                    "monthly": {"limit_tokens": 200000, "policy": "warn"}
                 }
             }]
         }"#;
         let cfg: SandhiFileConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.budgets[0].limit_tokens, None);
-        assert_eq!(cfg.budgets[0].limits.as_ref().unwrap()["weekly"], 50_000);
+        assert_eq!(cfg.budgets[0].limits["weekly"].limit_tokens, 50_000);
     }
 
     #[test]

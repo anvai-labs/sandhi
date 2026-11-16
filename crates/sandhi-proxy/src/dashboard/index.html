@@ -174,12 +174,20 @@
     <div class="form-row">
       <div class="field"><label for="b-scope">Scope</label><input id="b-scope" placeholder="group:platform"></div>
       <div class="field"><label for="b-hourly">Hourly limit</label><input id="b-hourly" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-hourly-policy">Hourly policy</label>
+        <select id="b-hourly-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <div class="field"><label for="b-daily">Daily limit</label><input id="b-daily" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-daily-policy">Daily policy</label>
+        <select id="b-daily-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <div class="field"><label for="b-weekly">Weekly limit</label><input id="b-weekly" type="number" placeholder="optional"></div>
+      <div class="field"><label for="b-weekly-policy">Weekly policy</label>
+        <select id="b-weekly-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <div class="field"><label for="b-monthly">Monthly limit</label><input id="b-monthly" type="number" placeholder="1000000"></div>
+      <div class="field"><label for="b-monthly-policy">Monthly policy</label>
+        <select id="b-monthly-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <div class="field"><label for="b-total">Lifetime limit</label><input id="b-total" type="number" placeholder="optional"></div>
-      <div class="field"><label for="b-policy">Policy</label>
-        <select id="b-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
+      <div class="field"><label for="b-total-policy">Lifetime policy</label>
+        <select id="b-total-policy"><option value="block" selected>block</option><option value="warn">warn</option></select></div>
       <button class="btn primary" data-needs-token data-action="setBudget">Set budget</button>
     </div>
     <div id="b-result" data-sensitive role="status"></div>
