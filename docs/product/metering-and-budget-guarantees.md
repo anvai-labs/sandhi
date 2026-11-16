@@ -88,6 +88,12 @@ tokenizer or upper-bound proof. See the [durable migration](../operator/buffered
 | CJK, multilingual text, tools, cached prompts | Encoding size is not tokenizer output; provider-added material may differ | Output-only controls do not bound input | Estimated admission |
 | Images, audio, remote media, provider tool use, multiple candidates | No validated all-category token bound | No proven total-cost bound | No strict guarantee |
 
+A scope can carry independent hourly, daily, weekly, monthly and lifetime caps, each with its own
+block-or-warn policy. Each fixed window uses trailing settled consumption: as settlement time
+ages out of `(now - window, now]`, that charge releases capacity continuously. In-flight ceilings
+and unresolved paired liabilities count against every configured window until settled or
+explicitly closed; they are not removed merely because a wall-clock interval elapsed.
+
 **No provider/model combination currently qualifies as a strict total-token cap.** There is no
 strict mode to select today. A Block policy atomically rejects a reservation exceeding available
 capacity; it does not promise that later measured usage stays below that reservation. Warn

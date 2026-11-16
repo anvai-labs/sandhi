@@ -425,14 +425,14 @@ async fn dashboard_roles_and_csrf_are_enforced_at_real_handlers() {
             (
                 "POST",
                 "/admin/budget",
-                r#"{"scope":"user:test","limit_tokens":100}"#,
+                r#"{"scope":"user:test","limits":{"total":{"limit_tokens":100,"policy":"block"}}}"#,
                 false,
                 StatusCode::FORBIDDEN,
             ),
             (
                 "POST",
                 "/admin/budget",
-                r#"{"scope":"user:test","limit_tokens":100}"#,
+                r#"{"scope":"user:test","limits":{"total":{"limit_tokens":100,"policy":"block"}}}"#,
                 true,
                 expected_write,
             ),
@@ -1188,7 +1188,7 @@ async fn diagnostics_access_token_cannot_write_or_infer_and_revocation_is_checke
         ),
         (
             "/admin/budget",
-            r#"{"scope":"user:test","limit_tokens":100}"#,
+            r#"{"scope":"user:test","limits":{"total":{"limit_tokens":100,"policy":"block"}}}"#,
             StatusCode::FORBIDDEN,
         ),
         (
@@ -1424,7 +1424,7 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
     };
-    let budget = json!({"scope":"group:engineering","limit_tokens":100,"window":"total","policy":"warn","alert_thresholds":[80]});
+    let budget = json!({"scope":"group:engineering","limits":{"total":{"limit_tokens":100,"policy":"warn"}},"alert_thresholds":[80]});
     assert_eq!(
         app.clone()
             .oneshot(req("/admin/budget", "member-access", budget.clone()))
@@ -1488,7 +1488,7 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
             .oneshot(req(
                 "/admin/budget",
                 "admin-access",
-                json!({"scope":"group:engineering","limit_tokens":100,"policy":"block"})
+                json!({"scope":"group:engineering","limits":{"total":{"limit_tokens":100,"policy":"block"}}})
             ))
             .await
             .unwrap()
@@ -1518,7 +1518,7 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
             .oneshot(req(
                 "/admin/budget",
                 key,
-                json!({"scope":"x","limit_tokens":1})
+                json!({"scope":"x","limits":{"total":{"limit_tokens":1,"policy":"block"}}})
             ))
             .await
             .unwrap()

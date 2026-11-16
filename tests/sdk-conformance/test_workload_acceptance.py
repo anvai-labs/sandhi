@@ -184,7 +184,7 @@ def test_accounting_requires_exact_events_and_independent_views(tmp_path, corrup
                      for buffer in ("usage", "alerts")
                      for kind in ("queued", "in_flight", "dropped_total")]
             return SimpleNamespace(text="\n".join([*lines, "sandhi_shutdown_active_operations 0"]))
-        data = {"spent": 140} if url.endswith("/usage") else {
+        data = {"windows": [{"spent": 140}]} if url.endswith("/usage") else {
             "run": {"total": {"billable_tokens": 139 if corruption == "run_total" else 140}}}
         return SimpleNamespace(json=lambda: data)
 

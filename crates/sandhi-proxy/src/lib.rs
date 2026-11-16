@@ -1877,22 +1877,27 @@ async fn dashboard_budgets(State(state): State<Arc<ProxyState>>, headers: Header
     dashboard_read(move || {
         let ledger = state.ledger.lock().map_err(|e| e.to_string())?;
         let budgets = state.budgets.lock().map_err(|e| e.to_string())?;
-        let scopes: Result<Vec<Value>, String> = budgets
-            .values()
-            .map(|spec| {
-                let spent = ledger.try_spent(&spec.scope)?;
-                let limit = spec.limit_tokens;
-                Ok(json!({
+        let mut specs = budgets.values().cloned().collect::<Vec<_>>();
+        specs.sort_by(|a, b| a.scope.cmp(&b.scope));
+        let mut scopes = Vec::new();
+        for spec in specs {
+            for window in &spec.windows {
+                let spent = ledger.try_spent_for_window(
+                    &spec.scope,
+                    sandhi_core::Window::parse(&window.window),
+                )?;
+                let limit = window.limit_tokens;
+                scopes.push(json!({
                     "scope": spec.scope,
                     "limit_tokens": limit,
                     "spent": spent,
                     "remaining": limit.saturating_sub(spent),
-                    "window": spec.window,
-                    "policy": spec.policy,
-                }))
-            })
-            .collect();
-        Ok(json!({ "budgets": scopes? }))
+                    "window": window.window,
+                    "policy": window.policy,
+                }));
+            }
+        }
+        Ok(json!({ "budgets": scopes }))
     })
     .await
 }
@@ -3075,16 +3080,22 @@ impl RequestAccounting {
             let _operation = operation;
             let ledger = state.ledger.lock().ok()?;
             let budgets = state.budgets.lock().ok()?;
-            Some(
-                scopes
-                    .into_iter()
-                    .map(|scope| {
-                        let spent = ledger.spent(&scope);
-                        let limit = budgets.get(&scope).map(|budget| budget.limit_tokens);
-                        (scope, spent, limit)
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            let specs = budgets
+                .iter()
+                .filter(|(scope, _)| scopes.contains(scope))
+                .map(|(scope, budget)| (scope.clone(), budget.windows.clone()))
+                .collect::<Vec<_>>();
+            drop(budgets);
+            let mut rows = Vec::new();
+            for (scope, windows) in specs {
+                for window in windows {
+                    let spent = ledger
+                        .try_spent_for_window(&scope, sandhi_core::Window::parse(&window.window))
+                        .unwrap_or(0);
+                    rows.push((scope.clone(), spent, Some(window.limit_tokens)));
+                }
+            }
+            Some(rows)
         });
         if let Ok(Ok(Some(rows))) = tokio::time::timeout(wait, work).await {
             for (scope, spent, limit) in rows {

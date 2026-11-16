@@ -227,8 +227,9 @@ def tracked_gateway(tmp_path, binaries, origin, family, *, endpoint_profile="sta
         definition = {"id": "protocols", "models": [{"id": "agent", "targets": [{"backend": "primary", "model": "fixture"}]}]}
         assert instance.admin("POST", "/admin/routes", json={"definition": definition}).status_code == 201
         for scope in ("group:protocol-team", "upstream:models", "upstream:anthropic", "upstream:gemini"):
-            assert instance.admin("POST", "/admin/budget", json={"scope": scope, "limit_tokens": 10000,
-                "window": "total", "policy": "block"}).status_code == 200
+            assert instance.admin("POST", "/admin/budget", json={
+                "scope": scope, "limits": {"total": {"limit_tokens": 10000, "policy": "block"}},
+            }).status_code == 200
         minted = instance.admin("POST", "/admin/keys/share", json={"upstream": "route/protocols", "models": ["agent"], "group": "protocol-team"})
         assert minted.status_code == 200, minted.text
         yield instance, minted.json()["virtual_key"]
@@ -511,8 +512,9 @@ def test_tracked_protocol_sigkill_after_acceptance_preserves_unknown_attempt_and
         instance.start(SANDHI_SHUTDOWN_GRACE_SECS="1")
         context = json.loads(context_json)
         for scope in ("group:protocol-team", context["upstream_budget_scope"]):
-            assert instance.admin("POST", "/admin/budget", json={"scope": scope, "limit_tokens": 1,
-                "window": "total", "policy": "block"}).status_code == 200
+            assert instance.admin("POST", "/admin/budget", json={
+                "scope": scope, "limits": {"total": {"limit_tokens": 1, "policy": "block"}},
+            }).status_code == 200
         denied = httpx.post(instance.base + "/v1/chat/completions", headers={"authorization": "Bearer " + token},
             json={"model": "agent", "max_tokens": 64, "messages": [{"role": "user", "content": "held capacity"}]})
         assert denied.status_code == 429

@@ -32,7 +32,8 @@ def test_reasoning_accounted_once_across_planes(dashboard, monkeypatch, thoughts
         assert key.status_code == 200, key.text
         token = key.json()["virtual_key"]
         assert client.post("/admin/budget", headers=dashboard.headers, json={
-            "scope": "group:reason", "limit_tokens": 10000,
+            "scope": "group:reason",
+            "limits": {"total": {"limit_tokens": 10000, "policy": "block"}},
         }).status_code == 200
         headers = {"Authorization": "Bearer " + token, "x-sandhi-run-id": "reasoning-run",
                    "x-sandhi-step-id": "reasoning-step"}
@@ -80,4 +81,4 @@ def test_reasoning_accounted_once_across_planes(dashboard, monkeypatch, thoughts
             assert conn.execute("SELECT tokens_out, reasoning_tokens, reasoning_included FROM usage_events "
                                 "WHERE run_id='reasoning-run'").fetchall() == [(40, thoughts, 0)]
         usage = client.get("/admin/budget/usage?scope=group:reason", headers=dashboard.headers)
-        assert usage.json()["spent"] == 140 + thoughts
+        assert usage.json()["windows"][0]["spent"] == 140 + thoughts

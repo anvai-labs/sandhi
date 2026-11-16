@@ -19,7 +19,27 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
-## [0.19.0] — Source candidate, 2026-11-15
+## [0.20.0] — Source candidate, 2026-11-16
+
+- Add hierarchical `hourly`, `daily`, `weekly`, `monthly` and `total` neutral-token
+  budgets. Each window has its own cap and `warn` or `block` policy, so a short
+  window can warn while a longer window blocks.
+- Replace calendar resets with fixed trailing intervals. Settled consumption leaves
+  `(now - window, now]` continuously as its immutable settlement time ages out.
+- Check every configured hard window in the existing atomic reservation transaction.
+  Shared in-flight ceilings and unresolved paired liability remain counted.
+- Migrate durable budgets from one row per scope to a composite `(scope, window)`
+  primary key while preserving rows and reservation history.
+- Make direct operator/CLI updates replace the complete hierarchy, make
+  `set_limit(scope, None)` clear every window, and keep declarative apply additive.
+- Expose grouped `windows` metadata through admin list/usage responses and dashboard
+  controls.
+- Remove the singular `limit_tokens` plus `window` request and global policy. A
+  one-bucket budget is one canonical `limits` entry. This intentional breaking
+  operator/config/CLI change is the reason for the minor version. See the
+  [0.20 guide](docs/releases/v0.20.0.md).
+
+## [0.19.0] — Published 2026-11-15
 
 - Add explicit `model_budget_scope` templates for OIDC inference grants. One verified
   subject can expose multiple logical models while Sandhi derives a separate front
@@ -1859,7 +1879,8 @@ inline reverse-proxy, the durable store, and both language bindings.
   ([#9](https://github.com/anvai-labs/sandhi/pull/9),
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
-[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/anvai-labs/sandhi/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/anvai-labs/sandhi/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/anvai-labs/sandhi/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/anvai-labs/sandhi/compare/v0.17.0...v0.17.1

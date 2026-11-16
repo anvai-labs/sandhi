@@ -8,8 +8,8 @@ Remote HTTP services now have a separate [template and adapter](../../templates/
 
 ## Deployment
 
-Build the proxy with `--features policy-onnx`. This optional feature requires
-Rust 1.88 or newer; validation used Rust 1.95. The workspace's default feature
+Build the proxy with `--features policy-onnx`. Source builds require Rust 1.99,
+the current workspace floor. The workspace's default feature
 does not include ONNX. The pinned ort 2.0.0-rc.15 wrapper uses API 26, with
 automatic runtime downloads and default execution-provider features disabled.
 The operator supplies an approved ONNX Runtime >=1.26 shared library by absolute

@@ -14,8 +14,8 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 
 - **License:** Apache-2.0
 - **Documentation:** [Operator site](https://anvai-labs.github.io/sandhi/) ·
-  [source documentation map](docs/README.md). The site follows `develop` and labels
-  unreleased features explicitly.
+  [source documentation map](docs/README.md). The published site follows reviewed
+  `main`; pull requests and develop builds validate without deploying.
 - **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
   dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
   transparent metering, attributed usage recording, and opt-in listener TLS are shipped. The
@@ -56,8 +56,9 @@ and deterministic rules own its blocks. Both complement identity and budgets.
   revocation are per person, not per shared secret.
 - **Per-user / per-team attribution** — every call tagged with `subject_id` / `group_id`.
 - **Budgets** — per-virtual-key / per-team **token** admission limits enforced by a lease ledger
-  (reserve an estimate, settle measured usage by lease id), with calendar-aligned daily/monthly/total
-  **windows**, a block-or-**warn** policy, and threshold **alerts**. The current source
+  (reserve an estimate, settle measured usage by lease id), with independent rolling
+  hourly/daily/weekly/monthly and lifetime **windows**, a per-window block-or-**warn** policy,
+  and threshold **alerts**. The current source
   requires `SANDHI_STORE` and one file-backed ledger for HTTP generation: spend,
   caps and in-flight leases survive restart. Both client and upstream budgets
   share one admission and receipt. Only expiry-eligible leases are reclaimed;
