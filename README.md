@@ -14,8 +14,8 @@ key, and set per-user budgets — without hand-rolling provider APIs.
 
 - **License:** Apache-2.0
 - **Documentation:** [Operator site](https://anvai-labs.github.io/sandhi/) ·
-  [source documentation map](docs/README.md). The site follows `develop` and labels
-  unreleased features explicitly.
+  [source documentation map](docs/README.md). The published site follows reviewed
+  `main`; pull requests and develop builds validate without deploying.
 - **Status:** early and released. The metering core, typed provider runtime, four proxy ingress
   dialects, operator surface, durable single-node lease ledger, rate limiting, observability/OTLP,
   transparent metering, attributed usage recording, and opt-in listener TLS are shipped. The
