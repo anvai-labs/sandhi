@@ -8,10 +8,9 @@
 
 Run these from the repository root in an isolated virtual environment.
 
-The `Documentation` workflow checks links and builds the site for every PR. Only
-trusted `develop` pushes (or an explicit dispatch on `develop`) can publish the
-artifact to GitHub Pages. Enable Pages with **GitHub Actions** as the source and
-allow the `github-pages` environment to deploy `main`. PR and develop builds have
+The `Documentation` workflow checks links and builds the site for every PR and for
+pushes to `develop` and `main`. Enable Pages with **GitHub Actions** as the source
+and allow the `github-pages` environment to deploy `main`. PR and develop builds have
 read-only permissions and cannot deploy; publication happens only after the reviewed
 develop-to-main promotion. The banner labels this as development documentation;
 publishing it does not promote a runtime release.
