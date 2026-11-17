@@ -540,7 +540,7 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     );
     assert_eq!(
         preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"],
-        180000
+        420000
     );
     assert_eq!(
         preview["streaming_deadlines"]["desired"]["default"]["limits"]["body_ms"],
@@ -568,7 +568,7 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     assert_eq!(preview["tls"], "not configured");
     assert!(
         preview.get("buffered_deadlines").is_none()
-            && preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"] == 180000,
+            && preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"] == 420000,
         "configured defaults remain visible after removing a desired override"
     );
     let _ = std::fs::remove_file(&cfg_path);
@@ -4289,6 +4289,21 @@ fn owned_state_with_stream_limits(
     timeout: std::time::Duration,
     limits: Option<serde_json::Value>,
 ) -> Arc<ProxyState> {
+    owned_state_with_stream_policy(
+        uri,
+        path,
+        sink,
+        timeout,
+        limits.map(|limits| serde_json::json!({"ceiling_ms":10000,"default":limits})),
+    )
+}
+fn owned_state_with_stream_policy(
+    uri: String,
+    path: &std::path::Path,
+    sink: Arc<InMemorySink>,
+    timeout: std::time::Duration,
+    policy: Option<serde_json::Value>,
+) -> Arc<ProxyState> {
     let mut state = state_with(
         uri,
         sink,
@@ -4296,9 +4311,8 @@ fn owned_state_with_stream_limits(
             sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
         ),
     );
-    Arc::get_mut(&mut state).unwrap().streaming_deadlines = limits.map(|limits| {
-        serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":limits})).unwrap()
-    });
+    Arc::get_mut(&mut state).unwrap().streaming_deadlines =
+        policy.map(|policy| serde_json::from_value(policy).unwrap());
     sandhi_proxy::settlement::buffered::enable(
         &state,
         sandhi_proxy::settlement::buffered::Config::new(
@@ -5351,6 +5365,137 @@ async fn owned_stream_disconnect_deadline_and_shutdown_retain_qualified_usage() 
         server.abort();
         let _ = server.await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn exact_model_stream_override_passes_old_body_limit_without_inventing_usage() {
+    use futures_util::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = calls.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/chat/completions",
+        axum::routing::post(move || {
+            let calls = calls_in.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                // Emit a real partial delta, then never send terminal usage or EOF.
+                Body::from_stream(async_stream::stream! {
+                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from(
+                        "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"
+                    ));
+                    std::future::pending::<()>().await;
+                })
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    let sink = Arc::new(InMemorySink::new());
+    // The exact model override is 1,001ms beyond the old 180-second body limit.
+    // Tokio's paused clock keeps this acceptance fixture fast while exercising the real timer.
+    let state = owned_state_with_stream_policy(
+        format!("http://{address}"),
+        &path,
+        sink.clone(),
+        std::time::Duration::from_secs(2),
+        Some(serde_json::json!({
+            "ceiling_ms": 840000,
+            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
+            "endpoints": {
+                "up1": {
+                    "models": {
+                        "gpt-4o-mini": {
+                            "setup_ms": 30000,
+                            "idle_ms": 180000,
+                            "body_ms": 181000
+                        }
+                    }
+                }
+            }
+        })),
+    );
+    let mut request = owned_body();
+    request["stream"] = true.into();
+    request["stream_options"] = serde_json::json!({"include_usage": true});
+    let response = build_app(state.clone())
+        .oneshot(owned_request("/v1/chat/completions", request))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("partial"));
+    assert!(
+        body.next().await.unwrap().is_err(),
+        "the exact override, not the old default, must own the terminal timeout"
+    );
+    state.lifecycle.wait_idle().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.ledger.lock().unwrap().spent("group:platform"), 0);
+    assert!(state.ledger.lock().unwrap().reserved("group:platform") > 0);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(
+        sink.events()[0].usage_completeness,
+        sandhi_core::UsageCompleteness::Unavailable
+    );
+    assert_eq!(
+        sink.events()[0].outcome.as_deref(),
+        Some("stream_usage_unavailable;delivery:error")
+    );
+    assert_eq!(sink.events()[0].billable_tokens(), 0);
+
+    let mut ledger = sandhi_store::SqliteLedger::open(path.to_str().unwrap()).unwrap();
+    let page = ledger
+        .recovery_page_durable("group:platform", None, 10)
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert!(matches!(
+        page.entries[0].state,
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+    ));
+    let execution_id = page.entries[0].execution_id.clone();
+    let terminal = ledger
+        .terminal_durable("group:platform", &execution_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.usage.outcome.as_deref(),
+        Some("stream_usage_unavailable;delivery:error")
+    );
+    assert_eq!(
+        terminal.usage.completeness,
+        sandhi_core::UsageCompleteness::Unavailable
+    );
+    assert_eq!(
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM budget_settlement_outbox", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+            .unwrap(),
+        0
+    );
+
+    sandhi_proxy::settlement::buffered::recover(state.clone())
+        .await
+        .unwrap();
+    sandhi_proxy::settlement::buffered::recover(state)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(sink.events().len(), 1);
+    assert_eq!(
+        sink.events()[0].billable_tokens(),
+        0,
+        "recovery must not invent a duplicate call or charge from absent usage"
+    );
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]

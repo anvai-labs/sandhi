@@ -111,6 +111,123 @@ async fn tracked_logical_dispatch_persists_selection_and_cache_policy_with_its_i
 }
 
 #[tokio::test]
+async fn discovery_reports_sanitized_exact_model_stream_limits() {
+    let origin = MockServer::start().await;
+    let (mut state, _) = state(
+        vec![(
+            "primary",
+            provider(&origin, "primary", Family::OpenaiChatCompletions, 1, 1),
+        )],
+        definition(&["primary"]),
+    );
+    Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
+        serde_json::from_value(json!({
+            "ceiling_ms": 840000,
+            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
+            "endpoints": {
+                "backend/primary": {
+                    "models": {
+                        "physical": {
+                            "setup_ms": 30000,
+                            "idle_ms": 180000,
+                            "body_ms": 600000
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    let response = build_app(state)
+        .oneshot(
+            Request::get("/v1/models")
+                .header("authorization", "Bearer vk_one")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 10_000).await.unwrap()).unwrap();
+    let policy = &catalog["sandhi_streaming"];
+    assert_eq!(policy["ceiling_ms"], 840_000);
+    assert_eq!(policy["models"]["agent"]["limits"]["setup_ms"], 30_000);
+    assert_eq!(policy["models"]["agent"]["limits"]["idle_ms"], 180_000);
+    assert_eq!(policy["models"]["agent"]["limits"]["body_ms"], 600_000);
+    assert_eq!(policy["models"]["agent"]["source"], "model");
+    assert_eq!(policy["models"]["agent"]["targets"], "stable");
+    assert!(!catalog.to_string().contains(&origin.uri()));
+    assert!(!catalog.to_string().contains("credential_ref"));
+}
+
+#[tokio::test]
+async fn stream_body_budget_mismatch_fails_before_source_egress() {
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(reply(Family::OpenaiChatCompletions, true))
+        .expect(0)
+        .mount(&origin)
+        .await;
+    let (mut state, sink) = state(
+        vec![(
+            "primary",
+            provider(&origin, "primary", Family::OpenaiChatCompletions, 1, 1),
+        )],
+        definition(&["primary"]),
+    );
+    Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
+        serde_json::from_value(json!({
+            "ceiling_ms": 240000,
+            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
+            "endpoints": {
+                "backend/primary": {
+                    "models": {
+                        "physical": {
+                            "setup_ms": 30000,
+                            "idle_ms": 180000,
+                            "body_ms": 200000
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    );
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header("authorization", "Bearer vk_one")
+                .header("content-type", "application/json")
+                .header("x-sandhi-stream-body-budget-ms", "200001")
+                .body(Body::from(
+                    json!({
+                        "model":"agent",
+                        "max_tokens":64,
+                        "stream":true,
+                        "messages":[{"role":"user","content":"hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 10_000).await.unwrap()).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "requested stream body budget 200001ms exceeds effective policy 200000ms; no source egress occurred"
+    );
+    assert_eq!(origin.received_requests().await.unwrap().len(), 0);
+    assert!(sink.events().is_empty());
+    let ledger = state.ledger.lock().unwrap();
+    assert_eq!(ledger.reserved("vk:vk_one"), 0);
+    assert_eq!(ledger.spent("vk:vk_one"), 0);
+}
+
+#[tokio::test]
 async fn model_budget_scopes_isolate_logical_models() {
     let origin = MockServer::start().await;
     Mock::given(method("POST"))

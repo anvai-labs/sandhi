@@ -2186,13 +2186,23 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    let models = match &provider {
-        Some(provider) => permitted_provider_models(&vk, provider),
+    let discovered = match &provider {
+        Some(provider) => permitted_provider_models(&vk, provider)
+            .into_iter()
+            .map(|id| routing::DiscoveredModel {
+                target_models: vec![(vk.upstream_ref.clone(), id.clone())],
+                id,
+            })
+            .collect::<Vec<_>>(),
         None => match routing::discovery(&state, &vk).await {
             Ok(models) => models,
             Err(message) => return ingress_error(dialect, StatusCode::BAD_GATEWAY, message),
         },
     };
+    let models = discovered
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
     let body = match dialect {
         IngressDialect::Anthropic => json!({
             "data": models.iter().map(|id| json!({
@@ -2209,9 +2219,47 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
                 "object": "model",
                 "owned_by": provider.as_ref().map_or("sandhi",ProviderHandle::slug),
             })).collect::<Vec<_>>(),
+            "sandhi_streaming": streaming_policy_metadata(&state, &discovered),
         }),
     };
     Json(body).into_response()
+}
+
+/// Sanitized per-model transport limits for clients that must preflight long streams.
+///
+/// Model/target identities are deliberately omitted. If compatible route targets resolve to
+/// different limits, the entry says `multiple_targets` rather than pretending one policy is
+/// authoritative before affinity selects a backend.
+fn streaming_policy_metadata(state: &ProxyState, models: &[routing::DiscoveredModel]) -> Value {
+    let Some(policy) = state.streaming_deadlines.as_ref() else {
+        return Value::Null;
+    };
+    let mut entries = serde_json::Map::new();
+    for model in models {
+        let resolved = model
+            .target_models
+            .iter()
+            .map(|(reference, actual)| policy.resolve(reference, actual))
+            .collect::<Vec<_>>();
+        let Some(first) = resolved.first() else {
+            continue;
+        };
+        let stable = resolved.iter().all(|value| value == first);
+        let (limits, source) = first;
+        entries.insert(
+            model.id.clone(),
+            if stable {
+                json!({
+                    "limits": limits,
+                    "source": source,
+                    "targets": "stable",
+                })
+            } else {
+                json!({"targets": "multiple_targets"})
+            },
+        );
+    }
+    json!({"ceiling_ms": policy.ceiling_ms(), "models": entries})
 }
 
 /// `GET /v1beta/models` and Google-shaped `/v1/models` — Gemini discovery.
@@ -2221,8 +2269,14 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
         Ok(pair) => pair,
         Err(response) => return response,
     };
-    let models = match &provider {
-        Some(provider) => permitted_provider_models(&vk, provider),
+    let discovered = match &provider {
+        Some(provider) => permitted_provider_models(&vk, provider)
+            .into_iter()
+            .map(|id| routing::DiscoveredModel {
+                target_models: vec![(vk.upstream_ref.clone(), id.clone())],
+                id,
+            })
+            .collect::<Vec<_>>(),
         None => match routing::discovery(&state, &vk).await {
             Ok(models) => models,
             Err(message) => {
@@ -2230,6 +2284,10 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
             }
         },
     };
+    let models = discovered
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
     Json(json!({
         "models": models.iter().filter(|id|sandhi_core::model_id_is_path_safe(id)).map(|id| json!({
             // Gemini names a model by its resource path, and its SDK strips the prefix back off.

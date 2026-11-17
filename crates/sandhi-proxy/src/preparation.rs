@@ -77,6 +77,49 @@ pub(super) struct PreparedRequest {
     pub routing: Option<crate::routing::DispatchPlan>,
 }
 
+#[allow(clippy::result_large_err)]
+fn declared_stream_body_budget(
+    headers: &HeaderMap,
+    dialect: IngressDialect,
+) -> Result<Option<u64>, Response> {
+    let mut values = headers.get_all("x-sandhi-stream-body-budget-ms").iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "x-sandhi-stream-body-budget-ms must be supplied once",
+        ));
+    }
+    let raw = first
+        .to_str()
+        .map_err(|_| {
+            ingress_error(
+                dialect,
+                StatusCode::BAD_REQUEST,
+                "x-sandhi-stream-body-budget-ms must be UTF-8 text",
+            )
+        })?
+        .trim();
+    let value = raw.parse::<u64>().map_err(|_| {
+        ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "x-sandhi-stream-body-budget-ms must be a positive integer",
+        )
+    })?;
+    if value == 0 || value > 840_000 {
+        return Err(ingress_error(
+            dialect,
+            StatusCode::BAD_REQUEST,
+            "x-sandhi-stream-body-budget-ms must be between 1 and 840000",
+        ));
+    }
+    Ok(Some(value))
+}
+
 // Preserve the already-rendered dialect response, including policy headers.
 #[allow(clippy::result_large_err)]
 pub(super) async fn prepare(
@@ -382,6 +425,20 @@ pub(super) async fn prepare(
     } else {
         None
     };
+    if let Some(limits) = streaming_deadline {
+        if let Some(requested) = declared_stream_body_budget(headers, dialect)? {
+            let effective = limits.body_ms();
+            if requested > effective {
+                return Err(ingress_error(
+                    dialect,
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "requested stream body budget {requested}ms exceeds effective policy {effective}ms; no source egress occurred"
+                    ),
+                ));
+            }
+        }
+    }
     let body_lifetime = streaming_deadline.map(|policy| policy.body_lifetime());
     if wants_stream && body_lifetime.is_some() && !provider.supports_streaming_deadlines() {
         return Err(ingress_error(
