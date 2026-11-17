@@ -154,6 +154,7 @@ perpetually open.
 | TD | State | Remaining scope |
 |---|---|---|
 | [0034](td/TD-0034-protocol-neutral-router-cache-accounting.md) | Active goal | Explicit backend/operator lifecycle, loss-aware conversation/cache handling, authorized routing/affinity and uniform execution accounting; source/live qualification tracked separately |
+| [0033](td/TD-0033-sentinelpass-exact-entry-service-grants.md) | In progress | Exact-entry retrieval, backend observability and operator-declared ACL projection implemented; daemon-verified ACL state, live backend-miss parity, strict-daemon qualification and executable-pin evidence remain |
 | [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate; typed display reasoning minor14 remains a postrelease candidate |

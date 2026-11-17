@@ -155,6 +155,11 @@
           <div class="field"><label for="c-label">Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
           <div class="field"><label for="c-scheme">API authentication</label><select id="c-scheme"><option value="api_key">API key</option><option value="bearer">Bearer API credential</option></select></div>
           <div class="field"><label for="c-baseurl">Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
+          <div class="field"><label for="c-sp-entry">SentinelPass entry ID</label><input id="c-sp-entry" type="number" min="1" step="1" placeholder="exact entry" style="width:8rem"></div>
+          <div class="field"><label for="c-sp-token-env">Service-token env</label><input id="c-sp-token-env" placeholder="SANDHI_…_SERVICE_TOKEN" style="width:12rem"></div>
+          <div class="field"><label for="c-sp-exe">Exe-pinned</label><input id="c-sp-exe" type="checkbox" style="width:auto"></div>
+          <div class="field"><label for="c-sp-fp">Key-enrolled</label><input id="c-sp-fp" type="checkbox" style="width:auto"></div>
+          <div class="field"><label for="c-sp-expiry">Grant expiry (Unix)</label><input id="c-sp-expiry" type="number" step="1" placeholder="optional" style="width:8rem"></div>
           <div class="field"><label for="c-secret">Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
           <button class="btn primary" data-needs-token data-action="addCredential">Add</button>
         </div>

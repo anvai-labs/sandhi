@@ -1854,16 +1854,27 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap
             .iter()
             .map(operator::vkey_record_response)
             .collect::<Vec<_>>();
-        let vault_entries = vault
+        let vault_inventory = vault
             .as_ref()
-            .map(|s| s.list())
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default()
-            .iter()
-            .map(operator::vault_entry_response)
-            .collect::<Vec<_>>();
-        Ok(json!({ "virtual_keys": vkey_records, "vault": vault_entries }))
+            .map(|store| {
+                let backend = store.backend_name();
+                let entries = store.list().map_err(|e| e.to_string())?;
+                entries
+                    .iter()
+                    .map(|entry| {
+                        let reference = operator::inventory_reference_plan(store, entry)
+                            .map_err(|e| e.to_string())?;
+                        operator::vault_entry_response(entry, Some(&reference))
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+                    .map(|entries| json!({ "backend": backend, "keys": entries }))
+            })
+            .transpose()?;
+        Ok(json!({
+            "virtual_keys": vkey_records,
+            "vault": vault_inventory.unwrap_or_else(|| json!({ "backend": null, "keys": [] })),
+        }))
     })
     .await
 }

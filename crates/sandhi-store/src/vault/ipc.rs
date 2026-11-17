@@ -2,9 +2,13 @@
 //! No runtime is created, entered or dropped on the caller's async executor. Sync callers
 //! still block waiting for a reply; async hosts must offload the entire operation.
 
-use super::{Vault, VaultCapabilities, VaultError};
-use sentinelpass_protocol::{IpcClient, IpcMessage, Origin};
+use super::{SentinelPassExactBinding, Vault, VaultCapabilities, VaultError, VaultReferencePlan};
+use sentinelpass_protocol::{
+    IpcClient, IpcMessage, Origin, ServiceOutcome, VaultOp, VaultOpResult,
+};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const QUEUE_CAPACITY: usize = 16;
@@ -23,6 +27,7 @@ pub struct SentinelPassIpcVault {
     client_id: String,
     sender: SyncSender<Work>,
     timeout: Duration,
+    legacy_lookups: Mutex<HashMap<String, u64>>,
 }
 
 impl SentinelPassIpcVault {
@@ -98,11 +103,109 @@ impl SentinelPassIpcVault {
             client_id,
             sender,
             timeout,
+            legacy_lookups: Mutex::new(HashMap::new()),
         })
     }
 
     fn domain(provider: &str, label: &str) -> String {
         format!("sandhi:{provider}:{label}")
+    }
+
+    fn account(provider: &str, label: &str) -> String {
+        format!("{provider}:{label}")
+    }
+
+    fn record_legacy_lookup(&self, provider: &str, label: &str) -> Result<u64, VaultError> {
+        let mut lookups = self
+            .legacy_lookups
+            .lock()
+            .map_err(|_| VaultError::Backend("legacy lookup accounting poisoned".into()))?;
+        let count = lookups
+            .entry(Self::account(provider, label))
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        if *count == 1 {
+            tracing::warn!(
+                backend = "sentinelpass-ipc",
+                reference = %Self::account(provider, label),
+                domain = %Self::domain(provider, label),
+                "using deprecated SentinelPass legacy external-secret retrieval"
+            );
+        }
+        Ok(*count)
+    }
+
+    fn is_strict_legacy_denial(error: &str) -> bool {
+        // The protocol still returns this denial as display text. Match only the pinned
+        // SentinelPass wording, never relay it, and never infer meaning from arbitrary errors.
+        error.contains("strict profile")
+            && error.contains("legacy external-secret grants are disabled")
+            && error.contains("exact-entry service grants")
+    }
+
+    fn exact_secret_from_report(response: IpcMessage) -> Result<Option<String>, VaultError> {
+        let IpcMessage::ServiceResult { outcome } = response else {
+            return Err(VaultError::Backend(
+                "broker returned the wrong exact-entry response type".into(),
+            ));
+        };
+        let report = match outcome {
+            ServiceOutcome::Ok {
+                result: VaultOpResult::Report(report),
+            } => report,
+            ServiceOutcome::Ok { .. } => {
+                return Err(VaultError::Backend(
+                    "broker returned an invalid exact-entry result".into(),
+                ));
+            }
+            ServiceOutcome::Err { error } => match error.code.as_str() {
+                "locked" => return Err(VaultError::Locked),
+                "not_found" => return Ok(None),
+                "denied" => return Err(VaultError::Denied),
+                _ => {
+                    return Err(VaultError::Backend(
+                        "broker exact-entry request failed".into(),
+                    ))
+                }
+            },
+        };
+        match report.get("status").and_then(|value| value.as_str()) {
+            Some("authorized") => report
+                .get("value")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .map(Some)
+                .ok_or_else(|| {
+                    VaultError::Backend("broker exact-entry response omitted its value".into())
+                }),
+            Some("not_found") => Ok(None),
+            Some("locked") => Err(VaultError::Locked),
+            Some("denied") => Err(VaultError::Denied),
+            _ => Err(VaultError::Backend(
+                "broker returned an invalid exact-entry status".into(),
+            )),
+        }
+    }
+
+    fn get_exact_secret_with_token(
+        &self,
+        binding: &SentinelPassExactBinding,
+        token: &str,
+    ) -> Result<Option<String>, VaultError> {
+        super::validate_exact_binding(binding.entry_id, &binding.token_env)?;
+        if token.is_empty() || token.len() > 16_384 || token.bytes().any(|b| b <= 32 || b == 127) {
+            return Err(VaultError::Configuration);
+        }
+        let response = self.send(IpcMessage::ServiceCall {
+            op: VaultOp::ServiceGetSecret {
+                client_id: self.client_id.clone(),
+                entry_id: binding.entry_id,
+                field: "password".into(),
+                token: token.into(),
+            },
+            stepup_approval: None,
+        })?;
+        Self::exact_secret_from_report(response)
     }
 
     fn send(&self, message: IpcMessage) -> Result<IpcMessage, VaultError> {
@@ -170,12 +273,21 @@ impl Vault for SentinelPassIpcVault {
 
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
         super::validate_reference(provider, label)?;
-        match self.send(IpcMessage::GetExternalSecret {
+        let response = self.send(IpcMessage::GetExternalSecret {
             client_id: self.client_id.clone(),
             domain: Self::domain(provider, label),
             field: sentinelpass_protocol::ExternalSecretField::Password,
             purpose: Some("sandhi-vault".into()),
-        })? {
+        })?;
+        if let IpcMessage::GetExternalSecretResponse {
+            error: Some(error), ..
+        } = &response
+        {
+            if Self::is_strict_legacy_denial(error) {
+                return Err(VaultError::StrictLegacyDenied);
+            }
+        }
+        match response {
             IpcMessage::GetExternalSecretResponse {
                 authorized: false, ..
             } => Err(VaultError::Denied),
@@ -185,7 +297,18 @@ impl Vault for SentinelPassIpcVault {
             IpcMessage::GetExternalSecretResponse { error: Some(_), .. } => {
                 Err(VaultError::Backend("broker lookup failed".into()))
             }
-            IpcMessage::GetExternalSecretResponse { value, .. } => Ok(value),
+            IpcMessage::GetExternalSecretResponse {
+                value: Some(value), ..
+            } => {
+                self.record_legacy_lookup(provider, label)?;
+                Ok(Some(value))
+            }
+            IpcMessage::GetExternalSecretResponse {
+                authorized: true,
+                locked: None | Some(false),
+                error: None,
+                value: None,
+            } => Ok(None),
             _ => Err(VaultError::Backend(
                 "unexpected broker lookup response".into(),
             )),
@@ -219,6 +342,45 @@ impl Vault for SentinelPassIpcVault {
         Err(VaultError::NotSupported(
             "external broker deletion is unsupported; revoke grants separately".into(),
         ))
+    }
+
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        super::validate_reference(provider, label)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "legacy_domain",
+            searched_references: vec![Self::domain(provider, label)],
+        })
+    }
+
+    fn get_exact_secret(
+        &self,
+        binding: &SentinelPassExactBinding,
+    ) -> Result<Option<String>, VaultError> {
+        let token = std::env::var(&binding.token_env)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or(VaultError::Configuration)?;
+        self.get_exact_secret_with_token(binding, &token)
+    }
+
+    fn exact_reference_plan(
+        &self,
+        binding: &SentinelPassExactBinding,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        super::validate_exact_binding(binding.entry_id, &binding.token_env)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "exact_entry",
+            searched_references: vec![
+                format!("entry:{}", binding.entry_id),
+                format!("token_env:{}", binding.token_env),
+            ],
+        })
     }
 }
 
@@ -302,6 +464,108 @@ mod tests {
         })
     }
 
+    fn exact_exchange(listener: UnixListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            listener.set_nonblocking(true).unwrap();
+            runtime.block_on(async {
+                use sentinelpass_protocol::connection::IpcConnection;
+                use sentinelpass_protocol::transport::unix::UnixSocketConnection;
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (mut connection, _) = IpcConnection::accept_server(
+                        UnixSocketConnection::from_stream(stream).into(),
+                        "synthetic-daemon-token",
+                    )
+                    .await
+                    .unwrap();
+                    let body = connection.recv_frame().await.unwrap();
+                    let envelope: sentinelpass_protocol::IpcEnvelope =
+                        serde_json::from_slice(&body).unwrap();
+                    assert!(matches!(
+                        envelope.message,
+                        IpcMessage::ServiceCall {
+                            op: VaultOp::ServiceGetSecret {
+                                ref client_id,
+                                entry_id: 42,
+                                ref field,
+                                ref token,
+                            },
+                            stepup_approval: None,
+                        } if client_id == "sandhi" && field == "password"
+                            && token == "synthetic-service-token"
+                    ));
+                    let response = IpcMessage::ServiceResult {
+                        outcome: ServiceOutcome::Ok {
+                            result: VaultOpResult::Report(serde_json::json!({
+                                "status": "authorized",
+                                "value": "synthetic-exact-key",
+                                "error": null,
+                            })),
+                        },
+                    };
+                    connection
+                        .send_frame(&serde_json::to_vec(&response).unwrap())
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            });
+        })
+    }
+
+    fn strict_legacy_exchange(listener: UnixListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            listener.set_nonblocking(true).unwrap();
+            runtime.block_on(async {
+                use sentinelpass_protocol::connection::IpcConnection;
+                use sentinelpass_protocol::transport::unix::UnixSocketConnection;
+                let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (mut connection, _) = IpcConnection::accept_server(
+                        UnixSocketConnection::from_stream(stream).into(),
+                        "synthetic-daemon-token",
+                    )
+                    .await
+                    .unwrap();
+                    let body = connection.recv_frame().await.unwrap();
+                    let envelope: sentinelpass_protocol::IpcEnvelope =
+                        serde_json::from_slice(&body).unwrap();
+                    assert!(matches!(
+                        envelope.message,
+                        IpcMessage::GetExternalSecret { .. }
+                    ));
+                    let response = IpcMessage::GetExternalSecretResponse {
+                        value: None,
+                        authorized: false,
+                        error: Some(
+                            "strict profile: legacy external-secret grants are disabled on this \
+                             daemon; use exact-entry service grants"
+                                .into(),
+                        ),
+                        locked: None,
+                    };
+                    connection
+                        .send_frame(&serde_json::to_vec(&response).unwrap())
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            });
+        })
+    }
+
     #[test]
     fn construction_lookup_and_drop_are_safe_inside_an_async_runtime() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -340,6 +604,96 @@ mod tests {
             });
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn exact_entry_retrieval_uses_service_get_secret_and_not_legacy_domain() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        let server = exact_exchange(UnixListener::bind(&socket).unwrap());
+        runtime.block_on(async {
+            let vault = SentinelPassIpcVault::from_client(
+                "sandhi".into(),
+                client(socket),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let binding = SentinelPassExactBinding::new(42, "SANDHI_TEST_SERVICE_TOKEN").unwrap();
+            assert_eq!(
+                vault
+                    .get_exact_secret_with_token(&binding, "synthetic-service-token")
+                    .unwrap()
+                    .as_deref(),
+                Some("synthetic-exact-key")
+            );
+            drop(vault);
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn strict_legacy_denial_maps_on_the_wire_and_is_not_counted_as_use() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("broker.sock");
+        let server = strict_legacy_exchange(UnixListener::bind(&socket).unwrap());
+        runtime.block_on(async {
+            let vault = SentinelPassIpcVault::from_client(
+                "sandhi".into(),
+                client(socket),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            assert!(matches!(
+                vault.get_secret("openai", "default"),
+                Err(VaultError::StrictLegacyDenied)
+            ));
+            assert_eq!(
+                *vault
+                    .legacy_lookups
+                    .lock()
+                    .unwrap()
+                    .get("openai:default")
+                    .unwrap_or(&0),
+                0
+            );
+            drop(vault);
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn exact_and_legacy_reference_plans_are_distinct_without_contacting_a_daemon() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let vault = SentinelPassIpcVault {
+            client_id: "sandhi".into(),
+            sender,
+            timeout: Duration::from_millis(50),
+            legacy_lookups: Mutex::new(HashMap::new()),
+        };
+        let legacy = vault.reference_plan("openai", "default").unwrap();
+        assert_eq!(legacy.backend, "sentinelpass-ipc");
+        assert_eq!(legacy.resolution, "legacy_domain");
+        assert_eq!(legacy.searched_references, vec!["sandhi:openai:default"]);
+        let binding = SentinelPassExactBinding::new(42, "SANDHI_TEST_SERVICE_TOKEN").unwrap();
+        let exact = vault.exact_reference_plan(&binding).unwrap();
+        assert_eq!(exact.resolution, "exact_entry");
+        assert_eq!(
+            exact.searched_references,
+            vec!["entry:42", "token_env:SANDHI_TEST_SERVICE_TOKEN"]
+        );
+        drop(receiver);
     }
 
     #[test]
@@ -413,6 +767,7 @@ mod tests {
             client_id: "sandhi".into(),
             sender,
             timeout: Duration::from_millis(50),
+            legacy_lookups: Mutex::new(HashMap::new()),
         };
         for _ in 0..QUEUE_CAPACITY {
             let (reply, _) = mpsc::sync_channel(1);
@@ -506,6 +861,68 @@ mod tests {
         assert!(matches!(
             vault.get_secret("openai", "*"),
             Err(VaultError::InvalidReference)
+        ));
+    }
+
+    #[test]
+    fn strict_legacy_denial_requires_the_complete_pinned_diagnostic() {
+        let diagnostic = "strict profile: legacy external-secret grants are disabled on this \
+                          daemon; use exact-entry service grants";
+        assert!(SentinelPassIpcVault::is_strict_legacy_denial(diagnostic));
+        for partial in [
+            "strict profile",
+            "legacy external-secret grants are disabled",
+            "exact-entry service grants",
+            "strict profile: legacy external-secret grants are disabled",
+        ] {
+            assert!(!SentinelPassIpcVault::is_strict_legacy_denial(partial));
+        }
+    }
+
+    #[test]
+    fn exact_entry_reports_map_typed_outcomes_without_relaying_errors() {
+        let report = |status: &str, value: Option<&str>| IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": status,
+                    "value": value,
+                    "error": null,
+                })),
+            },
+        };
+        assert_eq!(
+            SentinelPassIpcVault::exact_secret_from_report(report(
+                "authorized",
+                Some("synthetic-exact-key")
+            ))
+            .unwrap()
+            .as_deref(),
+            Some("synthetic-exact-key")
+        );
+        assert_eq!(
+            SentinelPassIpcVault::exact_secret_from_report(report("not_found", None)).unwrap(),
+            None
+        );
+        assert!(matches!(
+            SentinelPassIpcVault::exact_secret_from_report(report("locked", None)),
+            Err(VaultError::Locked)
+        ));
+        assert!(matches!(
+            SentinelPassIpcVault::exact_secret_from_report(report("denied", None)),
+            Err(VaultError::Denied)
+        ));
+        assert!(matches!(
+            SentinelPassIpcVault::exact_secret_from_report(report("authorized", None)),
+            Err(VaultError::Backend(_))
+        ));
+        let service_error = IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Err {
+                error: sentinelpass_protocol::ServiceError::new("denied", "secret detail"),
+            },
+        };
+        assert!(matches!(
+            SentinelPassIpcVault::exact_secret_from_report(service_error),
+            Err(VaultError::Denied)
         ));
     }
 }
