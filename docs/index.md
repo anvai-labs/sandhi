@@ -57,10 +57,11 @@ dispatch. Pricing and billing belong to downstream systems.
 </div>
 
 !!! info "Published baseline"
-    Sandhi **0.20.0** is published with hierarchical rolling budgets and per-window
-    warn/block policy. Check the [0.20 release guide](releases/v0.20.0.md) before
-    configuring an installation. Victor 0.29.2's verified `sandhi-gateway==0.19.0`
-    pin remains the currently qualified consumer binding.
+    Sandhi **0.20.0** remains the published baseline with hierarchical rolling budgets.
+    The **0.21.0 source candidate** adds exact SentinelPass service grants, exact-model
+    streaming limits and the shared routing vocabulary; see the
+    [0.21 release guide](releases/v0.21.0.md) before evaluating it. Published consumer
+    qualifications must identify the exact binding they cover.
 
 ## One request, two responsibilities
 

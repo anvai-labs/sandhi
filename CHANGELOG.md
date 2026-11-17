@@ -19,6 +19,8 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.21.0] — Source candidate, 2026-11-17
+
 - Add native SentinelPass SP-1 exact-entry credential retrieval. Vault metadata stores only
   the exact entry ID and service-token environment-variable name; the token stays in the
   process environment and never enters SQLite, requests, logs, or backend JSON.
@@ -45,6 +47,9 @@ A partly published release remains incomplete even when some artifacts are avail
 - Add an exact-model acceptance fixture that passes the prior 180-second body default,
   times out only at its override, retains partial delivery, reports unavailable usage,
   creates no settlement, and does not replay inference during recovery.
+- Define the shared model-routing vocabulary, typed TOML source-manifest design, and
+  canonical JSON target in ADR-0045; add the TD-0035 delivery plan and example manifest.
+  Runtime TOML parsing and Sandhi/Victor compilers remain future work.
 
 ## [0.20.0] — Published 2026-11-16
 
@@ -1907,6 +1912,7 @@ inline reverse-proxy, the durable store, and both language bindings.
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
 [Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.20.0...HEAD
+[0.21.0]: https://github.com/anvai-labs/sandhi/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/anvai-labs/sandhi/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/anvai-labs/sandhi/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/anvai-labs/sandhi/compare/v0.17.1...v0.18.0
