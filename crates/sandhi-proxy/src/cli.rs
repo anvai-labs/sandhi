@@ -257,6 +257,21 @@ enum KeysAction {
         /// Per-endpoint User-Agent override (agent-allowlisting upstreams).
         #[arg(long)]
         user_agent: Option<String>,
+        /// Exact SentinelPass entry id; requires --sentinelpass-token-env.
+        #[arg(long)]
+        sentinelpass_entry_id: Option<i64>,
+        /// Environment variable holding the exact-entry service-grant token.
+        #[arg(long)]
+        sentinelpass_token_env: Option<String>,
+        /// Declare that the SentinelPass grant pins an approved executable.
+        #[arg(long, requires = "sentinelpass_entry_id")]
+        sentinelpass_exe_pinned: bool,
+        /// Declare that the grant completed OpenPGP key enrollment.
+        #[arg(long, requires = "sentinelpass_entry_id")]
+        sentinelpass_fingerprint_enrolled: bool,
+        /// Declared grant expiry in Unix seconds.
+        #[arg(long, requires = "sentinelpass_entry_id")]
+        sentinelpass_expires_at: Option<i64>,
     },
     /// Revoke a provider credential.
     Revoke { provider: String, label: String },
@@ -453,6 +468,11 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
                     scheme,
                     base_url,
                     user_agent,
+                    sentinelpass_entry_id,
+                    sentinelpass_token_env,
+                    sentinelpass_exe_pinned,
+                    sentinelpass_fingerprint_enrolled,
+                    sentinelpass_expires_at,
                 },
         } => (
             "POST",
@@ -460,6 +480,13 @@ pub(crate) fn admin_request(base_url: &str, command: &Command) -> AdminRequest {
             Some(json!({
                 "provider": provider, "label": label, "scheme": scheme, "base_url": base_url,
                 "user_agent": user_agent,
+                "sentinelpass_entry_id": sentinelpass_entry_id,
+                "sentinelpass_token_env": sentinelpass_token_env,
+                "sentinelpass_grant_acl": sentinelpass_entry_id.map(|_| json!({
+                    "exe_pinned": sentinelpass_exe_pinned,
+                    "fingerprint_enrolled": sentinelpass_fingerprint_enrolled,
+                    "expires_at": sentinelpass_expires_at,
+                })),
             })),
         ),
         Command::Keys {
@@ -1202,6 +1229,38 @@ mod tests {
         let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
         assert!(body.get("secret").is_none());
         assert_eq!(body["label"], "default");
+    }
+
+    #[test]
+    fn reference_command_maps_exact_entry_metadata_without_a_token() {
+        let cli = Cli::try_parse_from([
+            "sandhi",
+            "keys",
+            "reference",
+            "openai",
+            "default",
+            "--sentinelpass-entry-id",
+            "42",
+            "--sentinelpass-token-env",
+            "SANDHI_OPENAI_SERVICE_TOKEN",
+            "--sentinelpass-exe-pinned",
+            "--sentinelpass-fingerprint-enrolled",
+            "--sentinelpass-expires-at",
+            "1893456000",
+        ])
+        .unwrap();
+        let req = admin_request(url(), &cli.command);
+        let body: Value = serde_json::from_str(req.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["sentinelpass_entry_id"], 42);
+        assert_eq!(
+            body["sentinelpass_token_env"],
+            "SANDHI_OPENAI_SERVICE_TOKEN"
+        );
+        assert_eq!(body["sentinelpass_grant_acl"]["exe_pinned"], true);
+        assert_eq!(body["sentinelpass_grant_acl"]["fingerprint_enrolled"], true);
+        assert_eq!(body["sentinelpass_grant_acl"]["expires_at"], 1_893_456_000);
+        assert!(body.get("secret").is_none());
+        assert!(!body.to_string().contains("synthetic-service-token"));
     }
 
     #[test]

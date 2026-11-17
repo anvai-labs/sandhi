@@ -31,8 +31,9 @@ pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreE
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 pub use profiles::{ProfileRecord, ProfileStore};
 pub use vault::{
-    hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassVault, Vault,
-    VaultEntry, VaultError, VaultStore,
+    hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassExactBinding,
+    SentinelPassGrantAcl, SentinelPassVault, Vault, VaultEntry, VaultError, VaultReferencePlan,
+    VaultStore,
 };
 pub use vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 

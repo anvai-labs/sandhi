@@ -136,7 +136,7 @@ sandhi-proxy listening on http://127.0.0.1:8787  (OpenAI Chat/Responses | Anthro
 
 | `SANDHI_CONFIG`
 | _(unset)_
-| Declarative JSON configuration. Optional `tls.cert` / `tls.key` enable listener TLS. Optional `buffered_deadlines` configures global, credential-endpoint and exact-model buffered limits; see link:buffered-deadlines.md[buffered deadlines]. Optional `streaming_deadlines` configures complete setup/idle/body limits per authorized route; see link:streaming-deadlines.md[streaming deadlines]. Without a streaming override the source defaults are setup 30 s / idle 90 s / body 180 s, under a 240 s ceiling. These sections require restart; invalid startup configuration fails before bind.
+| Declarative JSON configuration. Optional `tls.cert` / `tls.key` enable listener TLS. Optional `buffered_deadlines` configures global, credential-endpoint and exact-model buffered limits; see link:buffered-deadlines.md[buffered deadlines]. Optional `streaming_deadlines` configures complete setup/idle/body limits per authorized route; see link:streaming-deadlines.md[streaming deadlines]. Without a streaming override the source defaults are setup 30 s / idle 180 s / body 420 s, under an 840 s ceiling. These sections require restart; invalid startup configuration fails before bind.
 
 | `SANDHI_STORE`
 | _required_
@@ -283,6 +283,31 @@ operations separately from grants (`grant_status: not_checked`). Local credentia
 does not revoke a broker grant or provider key, and reports secret cleanup separately.
 See link:../product/broker-integration-contract.md[the broker contract] for setup, failure codes,
 partial-write recovery, canonical references and the remaining live-daemon gates.
+
+For a SentinelPass exact-entry service grant, create the grant in SentinelPass with the real
+entry ID, `password` field, and any executable/fingerprint policy chosen by its owner. Launch
+Sandhi with a private service-manager environment source for the resulting one-time token, then
+register the non-secret binding and grant-class facts explicitly:
+
+[source,sh]
+----
+sandhi keys reference openai default \
+  --sentinelpass-entry-id 42 \
+  --sentinelpass-token-env SANDHI_OPENAI_SERVICE_TOKEN \
+  --sentinelpass-exe-pinned \
+  --sentinelpass-fingerprint-enrolled \
+  --sentinelpass-expires-at 1893456000
+----
+
+The named variable must be present in the Sandhi process; it is not inferred from the entry ID,
+read from the administrator shell, or accepted by the reference API. `SENTINELPASS_CLIENT_TOKEN`
+remains the IPC client token and is never a substitute for the service-grant token. Inventory
+reports the active backend plus either `exact_entry` or `legacy_domain` resolution, including the
+entry/token-environment or synthesized domain it will search. The ACL flags copy the non-secret
+policy class shown when the grant was minted; they do not grant authority or prove the
+daemon-side policy. Protocol 0.20 has no read-only grant-inspection operation, so an exact
+reference registered without those facts reports `unknown_service_grant` rather than guessing.
+Never place either token in argv, Git, logs, screenshots, or backend JSON.
 
 [IMPORTANT]
 ====

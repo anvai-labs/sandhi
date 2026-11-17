@@ -19,6 +19,38 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.21.0] — Source candidate, 2026-11-17
+
+- Add native SentinelPass SP-1 exact-entry credential retrieval. Vault metadata stores only
+  the exact entry ID and service-token environment-variable name; the token stays in the
+  process environment and never enters SQLite, requests, logs, or backend JSON.
+- Keep unbound SentinelPass references on the deprecated domain lookup, count successful legacy
+  use once per reference, and map the strict-profile refusal to `409 vault_legacy_denied`.
+- Report the active vault backend and exact reference plan through admin, CLI, and dashboard
+  inventory. Partial exact bindings, backend changes, and missing named tokens fail closed.
+- Project the non-secret SentinelPass grant class — executable pin, key enrollment and expiry —
+  from the operator's grant report into inventory; SentinelPass remains the enforcing authority.
+- Make direct secret writes clear an obsolete exact-entry binding on the next metadata
+  generation so a label cannot silently change which SentinelPass entry authorizes it.
+- Change the public Rust `VaultEntry` shape and `VaultStore::register_metadata` arity, and change
+  the internal dashboard keys response from a vault array to a `{ backend, keys }` object. These
+  deliberate compatibility breaks are the reason the release is planned as Sandhi 0.21.0.
+- Allow startup streaming-deadline overrides to name registered explicit backend
+  references, so an exact logical-route model can receive a longer body limit without
+  widening the whole route.
+- Raise the built-in streaming body default from 180 seconds to 420 seconds and the global
+  idle default from 90 seconds to 180 seconds, and raise the global ceiling from 240 seconds
+  to 840 seconds. Deployments can still configure the previous conservative values explicitly.
+- Expose sanitized per-model streaming limits through authenticated OpenAI model
+  discovery and reject an explicit caller stream-body budget above the effective policy
+  before source egress.
+- Add an exact-model acceptance fixture that passes the prior 180-second body default,
+  times out only at its override, retains partial delivery, reports unavailable usage,
+  creates no settlement, and does not replay inference during recovery.
+- Define the shared model-routing vocabulary, typed TOML source-manifest design, and
+  canonical JSON target in ADR-0045; add the TD-0035 delivery plan and example manifest.
+  Runtime TOML parsing and Sandhi/Victor compilers remain future work.
+
 ## [0.20.0] — Published 2026-11-16
 
 - Add hierarchical `hourly`, `daily`, `weekly`, `monthly` and `total` neutral-token
@@ -1880,6 +1912,7 @@ inline reverse-proxy, the durable store, and both language bindings.
   [#10](https://github.com/anvai-labs/sandhi/pull/10))
 
 [Unreleased]: https://github.com/anvai-labs/sandhi/compare/v0.20.0...HEAD
+[0.21.0]: https://github.com/anvai-labs/sandhi/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/anvai-labs/sandhi/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/anvai-labs/sandhi/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/anvai-labs/sandhi/compare/v0.17.1...v0.18.0

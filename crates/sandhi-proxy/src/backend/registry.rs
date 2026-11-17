@@ -265,6 +265,9 @@ pub(crate) async fn preflight_config(
                             .map_err(|message| err(StatusCode::BAD_REQUEST, message))?,
                         base_url: provider.base_url.clone(),
                         user_agent: provider.user_agent.clone(),
+                        sentinelpass_entry_id: None,
+                        sentinelpass_token_env: None,
+                        sentinelpass_grant_acl: None,
                         created_at: String::new(),
                         generation: 0, // Preflight only; never a published binding.
                         status: "active".into(),

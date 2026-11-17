@@ -199,7 +199,19 @@ async fn add_list_revoke_provider_key() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let list = body_json(r).await;
+    assert_eq!(list["backend"], "memory");
     assert_eq!(list["keys"][0]["credential_id"], "anthropic:default");
+    assert_eq!(list["keys"][0]["vault"]["backend"], "memory");
+    assert_eq!(list["keys"][0]["vault"]["resolution"], "process_map");
+    assert_eq!(
+        list["keys"][0]["vault"]["searched_references"][0],
+        "anthropic:default"
+    );
+    assert_eq!(list["keys"][0]["sentinelpass_entry_id"], Value::Null);
+    assert_eq!(list["keys"][0]["sentinelpass_token_env"], Value::Null);
+    assert_eq!(list["keys"][0]["acl"]["class"], "backend_native");
+    assert_eq!(list["keys"][0]["acl"]["exe_pinned"], false);
+    assert_eq!(list["keys"][0]["acl"]["fingerprint_enrolled"], false);
     assert!(!list.to_string().contains("sk-super-secret-123"));
 
     // Revoke.
@@ -226,6 +238,94 @@ async fn add_list_revoke_provider_key() {
         .await
         .unwrap();
     assert_eq!(body_json(r).await["revoked"], false);
+}
+
+#[tokio::test]
+async fn sentinelpass_exact_reference_arguments_are_explicit_and_fail_closed() {
+    let app = build_app(admin_state());
+    for body in [
+        json!({
+            "provider": "openai",
+            "label": "default",
+            "sentinelpass_entry_id": 42
+        }),
+        json!({
+            "provider": "openai",
+            "label": "default",
+            "sentinelpass_token_env": "SANDHI_TEST_SERVICE_TOKEN"
+        }),
+        json!({
+            "provider": "openai",
+            "label": "default",
+            "sentinelpass_grant_acl": {
+                "exe_pinned": true,
+                "fingerprint_enrolled": true,
+                "expires_at": null
+            }
+        }),
+    ] {
+        let expected = if body.get("sentinelpass_grant_acl").is_some() {
+            "sentinelpass_grant_acl requires an exact-entry binding"
+        } else {
+            "sentinelpass_entry_id and sentinelpass_token_env must be supplied together"
+        };
+        let response = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/admin/keys/reference",
+                Some(TOKEN),
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response).await["error"], expected);
+    }
+
+    let response = app
+        .oneshot(req(
+            "POST",
+            "/admin/keys/reference",
+            Some(TOKEN),
+            Some(json!({
+                "provider": "openai",
+                "label": "default",
+                "sentinelpass_entry_id": 42,
+                "sentinelpass_token_env": "SANDHI_TEST_SERVICE_TOKEN"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let response = body_json(response).await;
+    assert_eq!(response["code"], "vault_unsupported");
+}
+
+#[tokio::test]
+async fn a_missing_vault_reference_names_the_backend_and_searched_account() {
+    let app = build_app(admin_state());
+    let response = app
+        .oneshot(req(
+            "POST",
+            "/admin/keys/reference",
+            Some(TOKEN),
+            Some(json!({
+                "provider": "anthropic",
+                "label": "production"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = body_json(response).await;
+    assert_eq!(body["code"], "vault_missing");
+    assert_eq!(body["vault"]["backend"], "memory");
+    assert_eq!(body["vault"]["resolution"], "process_map");
+    assert_eq!(
+        body["vault"]["searched_references"][0],
+        "anthropic:production"
+    );
 }
 
 // --- Virtual keys: share → list → revoke ------------------------------------
@@ -1372,6 +1472,15 @@ async fn dashboard_keys_returns_masked_keys_and_vault_entries() {
     assert!(serialized.contains(&id));
     assert!(serialized.contains("anthropic:default"));
     assert_eq!(body["virtual_keys"][0]["status"], "active");
+    assert_eq!(body["vault"]["backend"], "memory");
+    assert_eq!(
+        body["vault"]["keys"][0]["credential_id"],
+        "anthropic:default"
+    );
+    assert_eq!(
+        body["vault"]["keys"][0]["vault"]["resolution"],
+        "process_map"
+    );
     // …but NO secret material: not the plaintext virtual key, not the real provider key, not the
     // stored virtual-key hash.
     assert!(

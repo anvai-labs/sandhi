@@ -1,0 +1,51 @@
+# Canonical human-edited source format proposed by ADR-0045.
+# Secret bytes are never stored here; credential entries name their external source.
+
+schema = "anvai.model-routing.v1"
+
+[[provider]]
+id = "zai"
+display_name = "Z.AI"
+
+[[protocol]]
+id = "openai_chat_completions"
+
+[[credential]]
+id = "zai_coding_api_key"
+provider = "zai"
+auth = "api_key"
+source.env = "ZAI_API_KEY"
+
+[[endpoint]]
+id = "zai_coding"
+provider = "zai"
+protocol = "openai_chat_completions"
+dialect = "zai_final_choice_usage"
+url = "https://api.z.ai/api/coding/paas/v4"
+credential = "zai_coding_api_key"
+
+[[model]]
+id = "glm-5.3"
+provider = "zai"
+provider_model_id = "glm-5.3"
+limits.max_context_tokens = 262144
+limits.max_output_tokens = 65536
+
+[[route]]
+id = "coding/glm-5.3"
+model = "glm-5.3"
+target = "endpoint:zai_coding"
+budget_scope = "coding/glm-5.3"
+
+[[profile]]
+id = "victor/research"
+route = "coding/glm-5.3"
+generation.temperature = 0.2
+generation.output_tokens = 16384
+generation.reasoning_effort = "low"
+
+[[gateway]]
+id = "sandhi/ds3"
+url = "https://dataserver3.singh.local:18444/v1"
+credential.file = "/private/path/to/delegated-key.json"
+tls.ca_file = "/private/path/to/ca-bundle.pem"

@@ -96,7 +96,7 @@
 </section>
 <section class="panel" aria-labelledby="defaults-reference-title">
   <span class="eyebrow">Policy reference</span><h3 id="defaults-reference-title">Bounded defaults, explicit authority</h3>
-  <dl class="token-glossary"><div><dt>Output default</dt><dd>Chat requests without a limit receive 4,096 tokens by default. Operators can override it; an explicit declared model ceiling can narrow it.</dd></div><div><dt>Streaming defaults</dt><dd>30 s setup · 90 s idle · 180 s body, under a 240 s ceiling. Configured route policy takes precedence.</dd></div></dl>
+  <dl class="token-glossary"><div><dt>Output default</dt><dd>Chat requests without a limit receive 4,096 tokens by default. Operators can override it; an explicit declared model ceiling can narrow it.</dd></div><div><dt>Streaming defaults</dt><dd>30 s setup · 180 s idle · 420 s body, under an 840 s ceiling. Configured route policy takes precedence.</dd></div></dl>
   <p class="hint">These are source defaults, not a readout of this process’s effective policy. Inspect Configuration for active deadline overrides. Reservations estimate liability; they are not strict physical token guarantees. Text Completions retains its explicit native default; Embeddings reserves input only.</p>
   <div class="callout info">Standalone generation requires the original durable store and one ledger shard. Pure provider FFI remains ledger free. API-key/static Bearer credentials are distinct from managed subscription leases; client headers never grant backend credential authority.</div>
 </section>
@@ -155,6 +155,11 @@
           <div class="field"><label for="c-label">Label</label><input id="c-label" placeholder="default" style="width:7rem"></div>
           <div class="field"><label for="c-scheme">API authentication</label><select id="c-scheme"><option value="api_key">API key</option><option value="bearer">Bearer API credential</option></select></div>
           <div class="field"><label for="c-baseurl">Base URL</label><input id="c-baseurl" placeholder="http://host:11434" style="width:13rem"></div>
+          <div class="field"><label for="c-sp-entry">SentinelPass entry ID</label><input id="c-sp-entry" type="number" min="1" step="1" placeholder="exact entry" style="width:8rem"></div>
+          <div class="field"><label for="c-sp-token-env">Service-token env</label><input id="c-sp-token-env" placeholder="SANDHI_…_SERVICE_TOKEN" style="width:12rem"></div>
+          <div class="field"><label for="c-sp-exe">Exe-pinned</label><input id="c-sp-exe" type="checkbox" style="width:auto"></div>
+          <div class="field"><label for="c-sp-fp">Key-enrolled</label><input id="c-sp-fp" type="checkbox" style="width:auto"></div>
+          <div class="field"><label for="c-sp-expiry">Grant expiry (Unix)</label><input id="c-sp-expiry" type="number" step="1" placeholder="optional" style="width:8rem"></div>
           <div class="field"><label for="c-secret">Secret</label><input id="c-secret" type="password" placeholder="empty is fine for keyless" style="width:12rem"></div>
           <button class="btn primary" data-needs-token data-action="addCredential">Add</button>
         </div>
