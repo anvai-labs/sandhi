@@ -634,6 +634,24 @@ mod tests {
     }
 
     #[test]
+    fn committed_example_parses_with_the_canonical_budget_hierarchy() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/sandhi.json");
+        let raw = std::fs::read_to_string(path).expect("committed example must be readable");
+        let config: SandhiFileConfig =
+            serde_json::from_str(&raw).expect("committed example must parse");
+        let budget = config
+            .budgets
+            .first()
+            .expect("committed example declares a budget");
+        let monthly = budget
+            .limits
+            .get("monthly")
+            .expect("committed example uses a canonical monthly window");
+        assert_eq!(monthly.limit_tokens, 2_000_000);
+        assert_eq!(monthly.policy, "block");
+    }
+
+    #[test]
     fn profile_entry_parses_the_full_shape_and_mode_values() {
         let json = r#"{"profiles":[
             {"group":"platform","mode":"gateway","upstream":"ollama:default",

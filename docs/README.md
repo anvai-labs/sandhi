@@ -125,6 +125,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0042](adr/0042-provider-identity-and-budget-namespace.md) | Diagnostic labels separate from immutable persisted budget namespace; old caps/spend/holds/pins preserved |
 | [0043](adr/0043-mandatory-durable-http-execution.md) | Required original single-file HTTP owner, defaults, paired liability and ledger-free FFI boundary |
 | [0044](adr/0044-native-reference-ownership.md) | Same-ledger source-issued native proof, original request/shutdown bounds and no implicit external adoption |
+| [0045](adr/0045-unified-model-routing-configuration.md) | Proposed typed TOML source manifest, canonical JSON exchange and shared Sandhi/Victor routing vocabulary |
 | [0046](adr/0046-hierarchical-rolling-token-budgets.md) | Independent hourly/daily/weekly/monthly/lifetime caps per scope using immutable trailing settlement time |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
@@ -155,6 +156,7 @@ perpetually open.
 |---|---|---|
 | [0034](td/TD-0034-protocol-neutral-router-cache-accounting.md) | Active goal | Explicit backend/operator lifecycle, loss-aware conversation/cache handling, authorized routing/affinity and uniform execution accounting; source/live qualification tracked separately |
 | [0033](td/TD-0033-sentinelpass-exact-entry-service-grants.md) | In progress | Exact-entry retrieval, backend observability and operator-declared ACL projection implemented; daemon-verified ACL state, live backend-miss parity, strict-daemon qualification and executable-pin evidence remain |
+| [0035](td/TD-0035-unified-routing-configuration.md) | Proposed | Versioned schema, TOML renderer, Sandhi/Victor compilers, migration reports and catalog-boundary cleanup pending |
 | [0032](td/TD-0032-weighted-allowance-policy.md) | W01 released in 0.14.0 | Opt-in weighted allowance arithmetic; reporting provenance, admission-bound policy snapshots, durable enforcement and live acceptance pending |
 | [0001](td/TD-0001-provider-adapter-qa-and-codegen.md) | Complete | — |
 | [0002](td/TD-0002-typed-provider-runtime.md) | Complete | Consumer-repository cleanup is outside Sandhi's completion gate; typed display reasoning minor14 remains a postrelease candidate |
