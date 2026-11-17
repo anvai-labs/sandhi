@@ -216,10 +216,10 @@ fn validate_routes<'a, T: 'a>(
     check: impl Fn(&T) -> Result<(), String>,
 ) -> Result<(), String> {
     for (reference, default, models) in routes {
-        if !reference.split_once(':').is_some_and(|(provider, label)| {
-            !provider.trim().is_empty() && !label.trim().is_empty()
-        }) {
-            return Err("deadline endpoint must be a credential reference (provider:label)".into());
+        if reference.trim().is_empty() || reference.chars().any(char::is_whitespace) {
+            return Err(
+                "deadline endpoint must be a nonempty registered transport reference".into(),
+            );
         }
         if let Some(value) = default {
             check(value)?;
@@ -266,6 +266,10 @@ impl TryFrom<RawStreamLimits> for StreamLimits {
 }
 
 impl StreamLimits {
+    pub fn body_ms(self) -> u64 {
+        self.body_ms
+    }
+
     fn validate(self, ceiling_ms: u64) -> Result<(), String> {
         if self.setup_ms == 0
             || self.idle_ms == 0
@@ -343,11 +347,11 @@ impl From<StreamingDeadlines> for StreamingFile {
 impl Default for StreamingDeadlines {
     fn default() -> Self {
         StreamingFile {
-            ceiling_ms: 240_000,
+            ceiling_ms: 840_000,
             default: StreamLimits {
                 setup_ms: 30_000,
-                idle_ms: 90_000,
-                body_ms: 180_000,
+                idle_ms: 180_000,
+                body_ms: 420_000,
             },
             endpoints: BTreeMap::new(),
         }
@@ -357,6 +361,10 @@ impl Default for StreamingDeadlines {
 }
 
 impl StreamingDeadlines {
+    pub fn ceiling_ms(&self) -> u64 {
+        self.0.ceiling_ms
+    }
+
     pub fn validate_endpoints(&self, known: impl Fn(&str) -> bool) -> Result<(), String> {
         for reference in self.0.endpoints.keys() {
             if !known(reference) {

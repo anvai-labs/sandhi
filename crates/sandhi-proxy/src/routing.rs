@@ -38,6 +38,12 @@ pub(crate) struct Selected {
     established: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct DiscoveredModel {
+    pub id: String,
+    pub target_models: Vec<(String, String)>,
+}
+
 fn failure(error: Error) -> Response {
     let status = match error {
         Error::Invalid(_) => StatusCode::BAD_REQUEST,
@@ -350,7 +356,7 @@ pub(crate) fn validate_targets(
 pub(crate) async fn discovery(
     state: &ProxyState,
     vk: &VirtualKey,
-) -> Result<Vec<String>, &'static str> {
+) -> Result<Vec<DiscoveredModel>, &'static str> {
     let store = state
         .routes
         .clone()
@@ -390,7 +396,19 @@ pub(crate) async fn discovery(
                     .is_some_and(|provider| available(provider, target))
             })
         })
-        .map(|model| model.id.clone())
+        .map(|model| DiscoveredModel {
+            id: model.id.clone(),
+            target_models: model
+                .targets
+                .iter()
+                .filter(|target| {
+                    providers
+                        .get(&format!("backend/{}", target.backend))
+                        .is_some_and(|provider| available(provider, target))
+                })
+                .map(|target| (format!("backend/{}", target.backend), target.model.clone()))
+                .collect(),
+        })
         .collect())
 }
 

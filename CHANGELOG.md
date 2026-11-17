@@ -33,6 +33,18 @@ A partly published release remains incomplete even when some artifacts are avail
 - Change the public Rust `VaultEntry` shape and `VaultStore::register_metadata` arity, and change
   the internal dashboard keys response from a vault array to a `{ backend, keys }` object. These
   deliberate compatibility breaks are the reason the release is planned as Sandhi 0.21.0.
+- Allow startup streaming-deadline overrides to name registered explicit backend
+  references, so an exact logical-route model can receive a longer body limit without
+  widening the whole route.
+- Raise the built-in streaming body default from 180 seconds to 420 seconds and the global
+  idle default from 90 seconds to 180 seconds, and raise the global ceiling from 240 seconds
+  to 840 seconds. Deployments can still configure the previous conservative values explicitly.
+- Expose sanitized per-model streaming limits through authenticated OpenAI model
+  discovery and reject an explicit caller stream-body budget above the effective policy
+  before source egress.
+- Add an exact-model acceptance fixture that passes the prior 180-second body default,
+  times out only at its override, retains partial delivery, reports unavailable usage,
+  creates no settlement, and does not replay inference during recovery.
 
 ## [0.20.0] — Published 2026-11-16
 
