@@ -441,23 +441,27 @@ function vkeyRow(k) {
     + `<td><button class="btn danger" data-needs-token ${disabled} data-revoked="${!!k.revoked_at}" data-action="revokeVkey" data-id="${esc(k.id)}">Revoke</button></td></tr>`;
 }
 function vaultRow(e) {
+  const acl = e.acl || {};
   return `<tr><td><code>${esc(e.credential_id)}</code></td>`
     + `<td>${esc(e.scheme)}</td><td>${orDash(e.base_url)}</td>`
+    + `<td>${esc(e.vault?.backend || "unknown")}</td>`
+    + `<td><code>${esc(e.vault?.resolution || "unknown")}</code></td>`
+    + `<td><code>${esc(acl.class || "unknown")}</code><br><span class="muted">${esc(acl.source || "")}</span></td>`
     + `<td><span class="badge ${e.status === "active" ? "active" : "revoked"}">${esc(e.status)}</span></td>`
     + `<td><button class="btn danger" data-needs-token data-action="revokeCred" data-provider="${esc(e.provider)}" data-label="${esc(e.label)}">Revoke</button></td></tr>`;
 }
 function keysView(d) {
-  const vault = (d.vault || []).map(vaultRow).join("");
+  const vault = (d.vault?.keys || []).map(vaultRow).join("");
   return `<h3>Virtual keys (masked — secrets are never stored)</h3>`
     + pagedTable("vkeys", "Virtual keys", `<tr><th>id</th><th>subject</th><th>group</th><th>upstream</th><th>models</th><th>status</th><th>expires</th><th></th></tr>`,
       d.virtual_keys || [], vkeyRow, '<tr><td colspan=8>no virtual keys</td></tr>', "keys", true)
     + `<h3>Provider credentials (vault metadata)</h3>`
-    + tableScroll("Provider credentials", `<tr><th>credential</th><th>scheme</th><th>base url</th><th>status</th><th></th></tr>`,
-      vault || '<tr><td colspan=5>no provider credentials</td></tr>');
+    + tableScroll("Provider credentials", `<tr><th>credential</th><th>scheme</th><th>base url</th><th>vault</th><th>resolution</th><th>ACL class</th><th>status</th><th></th></tr>`,
+      vault || '<tr><td colspan=8>no provider credentials</td></tr>');
 }
 function loadKeys() {
   return loadPanel("keys", "/dashboard/api/keys", d => {
-    requireFields(d, ["virtual_keys", "vault"]);
+    requireFields(d, ["virtual_keys"], ["vault"]);
     return keysView(d);
   });
 }
@@ -496,6 +500,18 @@ async function addCredential() {
     base_url: document.getElementById("c-baseurl").value.trim() || null,
     ...(reference ? {} : { secret: document.getElementById("c-secret").value }),
   };
+  if (reference) {
+    const entryId = document.getElementById("c-sp-entry").value;
+    const tokenEnv = document.getElementById("c-sp-token-env").value.trim();
+    if (entryId) body.sentinelpass_entry_id = Number(entryId);
+    if (tokenEnv) body.sentinelpass_token_env = tokenEnv;
+    if (entryId) body.sentinelpass_grant_acl = {
+        exe_pinned: document.getElementById("c-sp-exe").checked,
+        fingerprint_enrolled: document.getElementById("c-sp-fp").checked,
+        expires_at: document.getElementById("c-sp-expiry").value
+          ? Number(document.getElementById("c-sp-expiry").value) : null,
+    };
+  }
   const data = await adminCall("POST", reference ? "/admin/keys/reference" : "/admin/keys", body);
   if (!data) return;
   document.getElementById("c-secret").value = "";
@@ -504,10 +520,17 @@ async function addCredential() {
 }
 
 document.getElementById("c-mode").addEventListener("change", () => {
-  const input = document.getElementById("c-secret");
-  input.value = "";
-  input.disabled = document.getElementById("c-mode").value === "reference";
+  const reference = document.getElementById("c-mode").value === "reference";
+  const secret = document.getElementById("c-secret");
+  secret.value = "";
+  secret.disabled = reference;
+  document.getElementById("c-sp-entry").disabled = !reference;
+  document.getElementById("c-sp-token-env").disabled = !reference;
+  document.getElementById("c-sp-exe").disabled = !reference;
+  document.getElementById("c-sp-fp").disabled = !reference;
+  document.getElementById("c-sp-expiry").disabled = !reference;
 });
+document.getElementById("c-mode").dispatchEvent(new Event("change"));
 
 // Budgets: spent-vs-limit bar + window + policy. Neutral tokens.
 function budgetsView(d) {

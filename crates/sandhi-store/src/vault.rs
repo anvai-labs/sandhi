@@ -66,6 +66,17 @@ pub struct VaultEntry {
     /// Per-endpoint User-Agent override (agent-allowlisting upstreams).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Exact SentinelPass entry binding. The service-grant token itself is never metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentinelpass_entry_id: Option<i64>,
+    /// Environment variable holding the exact-entry service-grant token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentinelpass_token_env: Option<String>,
+    /// Operator-declared, non-secret ACL facts from the SentinelPass grant
+    /// ceremony. Protocol 0.20 has no read-only grant-inspection operation,
+    /// so these are projection metadata rather than daemon-verified state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentinelpass_grant_acl: Option<SentinelPassGrantAcl>,
     pub created_at: String,
     /// Monotonic local metadata generation. Registration/rotation advances it;
     /// an unchanged reference is not proof of unchanged account authority.
@@ -74,10 +85,92 @@ pub struct VaultEntry {
     pub status: String,
 }
 
+/// A non-secret exact SentinelPass service-grant binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SentinelPassExactBinding {
+    pub entry_id: i64,
+    pub token_env: String,
+}
+
+/// Non-secret SentinelPass grant policy declared when an exact reference is
+/// registered. SentinelPass owns and enforces the grant; Sandhi projects the
+/// class selected by the operator and never stores the service token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SentinelPassGrantAcl {
+    pub exe_pinned: bool,
+    pub fingerprint_enrolled: bool,
+    /// Unix seconds; `None` means the grant was minted without expiry.
+    pub expires_at: Option<i64>,
+}
+
+impl SentinelPassGrantAcl {
+    fn to_db(self) -> (i64, i64, Option<i64>) {
+        (
+            i64::from(self.exe_pinned),
+            i64::from(self.fingerprint_enrolled),
+            self.expires_at,
+        )
+    }
+}
+
+impl SentinelPassExactBinding {
+    pub fn new(entry_id: i64, token_env: &str) -> Result<Self, VaultError> {
+        validate_exact_binding(entry_id, token_env)?;
+        Ok(Self {
+            entry_id,
+            token_env: token_env.to_owned(),
+        })
+    }
+}
+
+pub fn validate_exact_binding(entry_id: i64, token_env: &str) -> Result<(), VaultError> {
+    if entry_id <= 0 {
+        return Err(VaultError::InvalidReference);
+    }
+    let valid_env = !token_env.is_empty()
+        && token_env.len() <= 128
+        && token_env.bytes().next().is_some_and(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_lowercase() || byte == b'_'
+        })
+        && token_env.bytes().all(|byte| {
+            byte.is_ascii_uppercase()
+                || byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || byte == b'_'
+        });
+    if !valid_env || token_env == "SENTINELPASS_CLIENT_TOKEN" {
+        return Err(VaultError::InvalidReference);
+    }
+    Ok(())
+}
+
 impl VaultEntry {
     /// The stable credential id under which a provider handle is registered: `provider:label`.
     pub fn credential_id(&self) -> String {
         format!("{}:{}", self.provider, self.label)
+    }
+
+    /// Validate the optional persisted binding as one complete, non-secret pair.
+    pub fn exact_binding(&self) -> Result<Option<SentinelPassExactBinding>, VaultError> {
+        match (
+            self.sentinelpass_entry_id,
+            self.sentinelpass_token_env.as_deref(),
+        ) {
+            (Some(entry_id), Some(token_env)) => {
+                Ok(Some(SentinelPassExactBinding::new(entry_id, token_env)?))
+            }
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => Err(VaultError::InvalidReference),
+        }
+    }
+
+    /// Fail closed if ACL projection is present without its exact binding.
+    pub fn grant_acl(&self) -> Result<Option<SentinelPassGrantAcl>, VaultError> {
+        match (self.exact_binding()?, self.sentinelpass_grant_acl) {
+            (Some(_), acl) => Ok(acl),
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(VaultError::InvalidReference),
+        }
     }
 
     /// A masked hint for display, e.g. `sk-…Q12` (never the full secret).
@@ -101,6 +194,58 @@ fn read_generation(row: &rusqlite::Row<'_>) -> rusqlite::Result<u64> {
     Ok(value as u64)
 }
 
+fn invalid_vault_metadata(column: &str) -> rusqlite::Error {
+    rusqlite::Error::InvalidColumnType(8, column.to_string(), rusqlite::types::Type::Null)
+}
+
+fn read_vault_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<VaultEntry> {
+    let sentinelpass_entry_id: Option<i64> = row.get(8)?;
+    let sentinelpass_token_env: Option<String> = row.get(9)?;
+    let exact = match (sentinelpass_entry_id, sentinelpass_token_env.as_deref()) {
+        (Some(entry_id), Some(token_env)) => Some(
+            SentinelPassExactBinding::new(entry_id, token_env)
+                .map_err(|_| invalid_vault_metadata("sentinelpass exact-entry binding"))?,
+        ),
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(invalid_vault_metadata("sentinelpass exact-entry binding"));
+        }
+    };
+    let exe_pinned: Option<i64> = row.get(10)?;
+    let fingerprint_enrolled: Option<i64> = row.get(11)?;
+    let expires_at: Option<i64> = row.get(12)?;
+    let sentinelpass_grant_acl = match (exact, exe_pinned, fingerprint_enrolled) {
+        (None, None, None) if expires_at.is_none() => None,
+        (None, _, _) => {
+            return Err(invalid_vault_metadata(
+                "sentinelpass grant ACL without exact entry",
+            ));
+        }
+        (Some(_), None, None) if expires_at.is_none() => None,
+        (Some(_), Some(exe_pinned), Some(fingerprint_enrolled)) => Some(SentinelPassGrantAcl {
+            exe_pinned: exe_pinned != 0,
+            fingerprint_enrolled: fingerprint_enrolled != 0,
+            expires_at,
+        }),
+        (Some(_), _, _) => {
+            return Err(invalid_vault_metadata("partial sentinelpass grant ACL"));
+        }
+    };
+    Ok(VaultEntry {
+        provider: row.get(0)?,
+        label: row.get(1)?,
+        scheme: CredentialScheme::from_db(row.get::<_, String>(2)?.as_str()),
+        base_url: row.get(3)?,
+        user_agent: row.get(4)?,
+        created_at: row.get(5)?,
+        status: row.get(6)?,
+        generation: read_generation(row)?,
+        sentinelpass_entry_id,
+        sentinelpass_token_env,
+        sentinelpass_grant_acl,
+    })
+}
+
 /// The secret-only backend. Implementations store/retrieve the raw credential under
 /// `service = "sandhi"`, `account = "<provider>:<label>"`.
 pub trait Vault: Send + Sync {
@@ -121,6 +266,48 @@ pub trait Vault: Send + Sync {
     fn set_secret(&self, provider: &str, label: &str, secret: &str) -> Result<(), VaultError>;
     /// Delete the secret. Returns whether it existed.
     fn delete_secret(&self, provider: &str, label: &str) -> Result<bool, VaultError>;
+    /// Non-secret description of the exact names a backend will search. This is not a grant
+    /// probe and must not contact the backend.
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_reference(provider, label)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "backend_default",
+            searched_references: vec![account(provider, label)],
+        })
+    }
+
+    /// Retrieve through an exact-entry service grant. Only the native IPC backend implements
+    /// this path; the default deliberately fails closed instead of downgrading to a domain.
+    fn get_exact_secret(
+        &self,
+        _binding: &SentinelPassExactBinding,
+    ) -> Result<Option<String>, VaultError> {
+        Err(VaultError::NotSupported(
+            "selected vault backend does not implement SentinelPass exact-entry retrieval".into(),
+        ))
+    }
+
+    /// Non-secret exact-entry lookup description. The default reports the mismatch rather than
+    /// pretending the active backend can search a persisted SentinelPass binding.
+    fn exact_reference_plan(
+        &self,
+        binding: &SentinelPassExactBinding,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_exact_binding(binding.entry_id, &binding.token_env)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "unsupported_exact_binding",
+            searched_references: vec![
+                format!("entry:{}", binding.entry_id),
+                format!("token_env:{}", binding.token_env),
+            ],
+        })
+    }
 }
 
 /// Errors from a vault backend. Kept opaque so a missing OS keychain degrades gracefully rather
@@ -135,6 +322,15 @@ pub enum VaultError {
     Denied,
     Configuration,
     InvalidReference,
+    StrictLegacyDenied,
+}
+
+/// Backend-owned, non-secret reference information for operator errors and inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VaultReferencePlan {
+    pub backend: &'static str,
+    pub resolution: &'static str,
+    pub searched_references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -166,6 +362,7 @@ impl std::fmt::Display for VaultError {
             Self::Denied => f.write_str("broker rejected operation; check client token and exact read/write grant"),
             Self::Configuration => f.write_str("vault configuration unavailable; check backend feature, client token and daemon token"),
             Self::InvalidReference => f.write_str("provider and label must use lowercase ASCII letters, digits, dots, underscores or hyphens (1–128 characters)"),
+            Self::StrictLegacyDenied => f.write_str("strict broker profile denied the legacy external-secret grant"),
         }
     }
 }
@@ -197,6 +394,22 @@ impl Vault for KeyringVault {
             delete: true,
             bounded_io: false,
         }
+    }
+
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_reference(provider, label)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "os_service_account",
+            searched_references: vec![format!(
+                "service={KEYRING_SERVICE};account={}",
+                account(provider, label)
+            )],
+        })
     }
 
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
@@ -305,6 +518,24 @@ impl Vault for CredentialStoreVault {
             delete: false,
             bounded_io: false,
         }
+    }
+
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        let candidates = self
+            .candidates(provider, label)
+            .ok_or(VaultError::InvalidReference)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "filesystem_candidates",
+            searched_references: candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        })
     }
 
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
@@ -422,6 +653,19 @@ impl Vault for SentinelPassVault {
         }
     }
 
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_reference(provider, label)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "legacy_domain",
+            searched_references: vec![Self::domain(provider, label)],
+        })
+    }
+
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
         let out = std::process::Command::new(&self.binary)
             .args([
@@ -505,6 +749,19 @@ impl Vault for InMemoryVault {
         }
     }
 
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_reference(provider, label)?;
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "process_map",
+            searched_references: vec![account(provider, label)],
+        })
+    }
+
     fn get_secret(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
         Ok(self
             .secrets
@@ -574,6 +831,18 @@ impl Vault for UnavailableVault {
     }
     fn delete_secret(&self, _: &str, _: &str) -> Result<bool, VaultError> {
         Err(VaultError::Configuration)
+    }
+
+    fn reference_plan(
+        &self,
+        _provider: &str,
+        _label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        Ok(VaultReferencePlan {
+            backend: self.name(),
+            resolution: "unavailable",
+            searched_references: Vec::new(),
+        })
     }
 }
 
@@ -684,6 +953,11 @@ impl VaultStore {
                 created_at TEXT NOT NULL,
                 status     TEXT NOT NULL DEFAULT 'active',
                 generation INTEGER NOT NULL DEFAULT 1 CHECK(typeof(generation) = 'integer' AND generation > 0),
+                sentinelpass_entry_id INTEGER,
+                sentinelpass_token_env TEXT,
+                sentinelpass_exe_pinned INTEGER,
+                sentinelpass_fingerprint_enrolled INTEGER,
+                sentinelpass_expires_at INTEGER,
                 PRIMARY KEY (provider, label)
             );",
         )?;
@@ -697,6 +971,34 @@ impl VaultStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if !names.iter().any(|name| name == "generation") {
             conn.execute("ALTER TABLE vault ADD COLUMN generation INTEGER NOT NULL DEFAULT 1 CHECK(typeof(generation) = 'integer' AND generation > 0)", [])?;
+        }
+        for (statement, duplicate) in [
+            (
+                "ALTER TABLE vault ADD COLUMN sentinelpass_entry_id INTEGER",
+                "duplicate column name: sentinelpass_entry_id",
+            ),
+            (
+                "ALTER TABLE vault ADD COLUMN sentinelpass_token_env TEXT",
+                "duplicate column name: sentinelpass_token_env",
+            ),
+            (
+                "ALTER TABLE vault ADD COLUMN sentinelpass_exe_pinned INTEGER",
+                "duplicate column name: sentinelpass_exe_pinned",
+            ),
+            (
+                "ALTER TABLE vault ADD COLUMN sentinelpass_fingerprint_enrolled INTEGER",
+                "duplicate column name: sentinelpass_fingerprint_enrolled",
+            ),
+            (
+                "ALTER TABLE vault ADD COLUMN sentinelpass_expires_at INTEGER",
+                "duplicate column name: sentinelpass_expires_at",
+            ),
+        ] {
+            if let Err(error) = conn.execute(statement, []) {
+                if !error.to_string().contains(duplicate) {
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -714,11 +1016,14 @@ impl VaultStore {
     ) -> Result<String, VaultError> {
         validate_reference(provider, label)?;
         self.backend.set_secret(provider, label, secret)?;
-        self.register_metadata(provider, label, scheme, base_url, user_agent)
+        self.register_metadata(provider, label, scheme, base_url, user_agent, None, None)
     }
 
     /// Index a reference only after its caller has successfully resolved and validated the secret.
     /// This never writes to the secret backend; registration is not a grant or a rotation.
+    // The seven domain fields describe one vault row; collapsing them into a request DTO would
+    // move the same coupling to every existing store caller without improving validation.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_metadata(
         &self,
         provider: &str,
@@ -726,22 +1031,51 @@ impl VaultStore {
         scheme: CredentialScheme,
         base_url: Option<&str>,
         user_agent: Option<&str>,
+        exact: Option<SentinelPassExactBinding>,
+        grant_acl: Option<SentinelPassGrantAcl>,
     ) -> Result<String, VaultError> {
         validate_reference(provider, label)?;
+        if let Some(binding) = &exact {
+            validate_exact_binding(binding.entry_id, &binding.token_env)?;
+            if self.backend.name() != "sentinelpass-ipc" {
+                return Err(VaultError::NotSupported(
+                    "exact-entry metadata requires the native SentinelPass IPC backend".into(),
+                ));
+            }
+        }
+        if exact.is_none() && grant_acl.is_some() {
+            return Err(VaultError::InvalidReference);
+        }
+        let (exe_pinned, fingerprint_enrolled, expires_at) = grant_acl
+            .map(SentinelPassGrantAcl::to_db)
+            .map_or((None, None, None), |(exe, enrolled, expires)| {
+                (Some(exe), Some(enrolled), expires)
+            });
         let conn = self.conn.lock().expect("vault conn poisoned");
         conn.execute(
-            "INSERT INTO vault (provider, label, scheme, base_url, user_agent, created_at, status, generation) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1) \
+            "INSERT INTO vault (provider, label, scheme, base_url, user_agent, created_at, status, generation, \
+             sentinelpass_entry_id, sentinelpass_token_env, sentinelpass_exe_pinned, \
+             sentinelpass_fingerprint_enrolled, sentinelpass_expires_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 1, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(provider, label) DO UPDATE SET scheme=excluded.scheme, \
              base_url=excluded.base_url, user_agent=excluded.user_agent, created_at=excluded.created_at, \
-             status='active', generation=vault.generation+1",
+             status='active', generation=vault.generation+1, sentinelpass_entry_id=excluded.sentinelpass_entry_id, \
+             sentinelpass_token_env=excluded.sentinelpass_token_env, \
+             sentinelpass_exe_pinned=excluded.sentinelpass_exe_pinned, \
+             sentinelpass_fingerprint_enrolled=excluded.sentinelpass_fingerprint_enrolled, \
+             sentinelpass_expires_at=excluded.sentinelpass_expires_at",
             params![
                 provider,
                 label,
                 scheme.as_db(),
                 base_url,
                 user_agent,
-                now_rfc3339()
+                now_rfc3339(),
+                exact.as_ref().map(|binding| binding.entry_id),
+                exact.as_ref().map(|binding| binding.token_env.clone()),
+                exe_pinned,
+                fingerprint_enrolled,
+                expires_at,
             ],
         )
         .map_err(|e| VaultError::Backend(format!("sqlite vault set: {e}")))?;
@@ -750,7 +1084,30 @@ impl VaultStore {
 
     /// Read the raw secret for `provider:label` (from the secret backend).
     pub fn get(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
+        if let Some(binding) = self
+            .metadata_entry(provider, label)?
+            .and_then(|entry| entry.exact_binding().transpose())
+            .transpose()?
+        {
+            return self.backend.get_exact_secret(&binding);
+        }
         self.backend.get_secret(provider, label)
+    }
+
+    /// Resolve an unregistered exact reference during operator onboarding.
+    pub fn get_exact(
+        &self,
+        provider: &str,
+        label: &str,
+        binding: &SentinelPassExactBinding,
+    ) -> Result<Option<String>, VaultError> {
+        validate_reference(provider, label)?;
+        if self.backend.name() != "sentinelpass-ipc" {
+            return Err(VaultError::NotSupported(
+                "exact-entry retrieval requires the native SentinelPass IPC backend".into(),
+            ));
+        }
+        self.backend.get_exact_secret(binding)
     }
 
     /// Resolve the **active** credential for a provider (first active label, ordered), returning
@@ -759,7 +1116,13 @@ impl VaultStore {
         let Some(entry) = self.first_active_entry(provider)? else {
             return Ok(None);
         };
-        match self.backend.get_secret(&entry.provider, &entry.label)? {
+        let binding = entry.exact_binding()?;
+        let secret = if let Some(binding) = binding {
+            self.backend.get_exact_secret(&binding)?
+        } else {
+            self.backend.get_secret(&entry.provider, &entry.label)?
+        };
+        match secret {
             Some(secret) => Ok(Some((entry, secret))),
             None => Ok(None),
         }
@@ -773,13 +1136,10 @@ impl VaultStore {
     ) -> Result<Option<VaultEntry>, VaultError> {
         validate_reference(provider, label)?;
         let conn = self.conn.lock().expect("vault conn poisoned");
-        conn.query_row("SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation FROM vault WHERE provider=?1 AND label=?2",
-            params![provider,label], |row| Ok(VaultEntry {
-                provider: row.get(0)?, label: row.get(1)?,
-                scheme: CredentialScheme::from_db(row.get::<_,String>(2)?.as_str()),
-                base_url: row.get(3)?, user_agent: row.get(4)?, created_at: row.get(5)?,
-                status: row.get(6)?, generation: read_generation(row)?,
-            })).optional().map_err(|error| VaultError::Backend(format!("sqlite vault metadata: {error}")))
+        conn.query_row("SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation, sentinelpass_entry_id, sentinelpass_token_env, sentinelpass_exe_pinned, sentinelpass_fingerprint_enrolled, sentinelpass_expires_at FROM vault WHERE provider=?1 AND label=?2",
+            params![provider,label], read_vault_entry)
+            .optional()
+            .map_err(|error| VaultError::Backend(format!("sqlite vault metadata: {error}")))
     }
 
     /// Masked metadata list (never the secret), all labels.
@@ -787,23 +1147,14 @@ impl VaultStore {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation, \
+                 sentinelpass_entry_id, sentinelpass_token_env, sentinelpass_exe_pinned, \
+                 sentinelpass_fingerprint_enrolled, sentinelpass_expires_at \
                  FROM vault ORDER BY provider, label",
             )
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok(VaultEntry {
-                    provider: r.get(0)?,
-                    label: r.get(1)?,
-                    scheme: CredentialScheme::from_db(r.get::<_, String>(2)?.as_str()),
-                    base_url: r.get(3)?,
-                    user_agent: r.get(4)?,
-                    created_at: r.get(5)?,
-                    status: r.get(6)?,
-                    generation: read_generation(r)?,
-                })
-            })
+            .query_map([], read_vault_entry)
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| VaultError::Backend(format!("sqlite vault list: {e}")))
@@ -851,30 +1202,48 @@ impl VaultStore {
         let conn = self.conn.lock().expect("vault conn poisoned");
         let mut stmt = conn
             .prepare(
-                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation \
+                "SELECT provider, label, scheme, base_url, user_agent, created_at, status, generation, \
+                 sentinelpass_entry_id, sentinelpass_token_env, sentinelpass_exe_pinned, \
+                 sentinelpass_fingerprint_enrolled, sentinelpass_expires_at \
                  FROM vault WHERE provider = ?1 AND status = 'active' \
                  ORDER BY created_at LIMIT 1",
             )
             .map_err(|e| VaultError::Backend(format!("sqlite vault get: {e}")))?;
-        stmt.query_row(params![provider], |r| {
-            Ok(VaultEntry {
-                provider: r.get(0)?,
-                label: r.get(1)?,
-                scheme: CredentialScheme::from_db(r.get::<_, String>(2)?.as_str()),
-                base_url: r.get(3)?,
-                user_agent: r.get(4)?,
-                created_at: r.get(5)?,
-                status: r.get(6)?,
-                generation: read_generation(r)?,
-            })
-        })
-        .optional()
-        .map_err(|e| VaultError::Backend(format!("sqlite vault get: {e}")))
+        stmt.query_row(params![provider], read_vault_entry)
+            .optional()
+            .map_err(|e| VaultError::Backend(format!("sqlite vault get: {e}")))
     }
 
     /// The configured backend name.
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
+    }
+
+    /// Describe the non-secret names this configured backend searches for an exact reference.
+    pub fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        if let Some(binding) = self
+            .metadata_entry(provider, label)?
+            .and_then(|entry| entry.exact_binding().transpose())
+            .transpose()?
+        {
+            return self.backend.exact_reference_plan(&binding);
+        }
+        self.backend.reference_plan(provider, label)
+    }
+
+    /// Describe a caller-supplied exact reference before it is committed locally.
+    pub fn reference_plan_for_exact(
+        &self,
+        provider: &str,
+        label: &str,
+        binding: &SentinelPassExactBinding,
+    ) -> Result<VaultReferencePlan, VaultError> {
+        validate_reference(provider, label)?;
+        self.backend.exact_reference_plan(binding)
     }
 
     pub fn capabilities(&self) -> VaultCapabilities {
@@ -923,6 +1292,55 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
+    struct SyntheticExactBackend {
+        exact_calls: Mutex<usize>,
+    }
+
+    impl Vault for SyntheticExactBackend {
+        fn name(&self) -> &'static str {
+            "sentinelpass-ipc"
+        }
+        fn capabilities(&self) -> VaultCapabilities {
+            VaultCapabilities {
+                read: true,
+                write: true,
+                delete: false,
+                bounded_io: true,
+            }
+        }
+        fn get_secret(&self, _provider: &str, _label: &str) -> Result<Option<String>, VaultError> {
+            Ok(Some("synthetic-legacy-key".into()))
+        }
+        fn set_secret(
+            &self,
+            _provider: &str,
+            _label: &str,
+            _secret: &str,
+        ) -> Result<(), VaultError> {
+            Ok(())
+        }
+        fn delete_secret(&self, _: &str, _: &str) -> Result<bool, VaultError> {
+            Ok(false)
+        }
+        fn get_exact_secret(
+            &self,
+            binding: &SentinelPassExactBinding,
+        ) -> Result<Option<String>, VaultError> {
+            *self.exact_calls.lock().unwrap() += 1;
+            Ok(Some(format!("synthetic-entry-{}", binding.entry_id)))
+        }
+        fn exact_reference_plan(
+            &self,
+            binding: &SentinelPassExactBinding,
+        ) -> Result<VaultReferencePlan, VaultError> {
+            Ok(VaultReferencePlan {
+                backend: self.name(),
+                resolution: "exact_entry",
+                searched_references: vec![format!("entry:{}", binding.entry_id)],
+            })
+        }
+    }
+
     #[test]
     fn legacy_metadata_generation_migrates_and_never_reuses_a_revoked_generation() {
         let conn = Connection::open_in_memory().unwrap();
@@ -941,12 +1359,28 @@ mod tests {
             1
         );
         vault
-            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .register_metadata(
+                "openai",
+                "fixture",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(vault.list().unwrap()[0].generation, 2);
         vault.revoke("openai", "fixture").unwrap();
         vault
-            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .register_metadata(
+                "openai",
+                "fixture",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(
             vault
@@ -969,7 +1403,15 @@ mod tests {
             .execute("UPDATE vault SET generation=9223372036854775807", [])
             .unwrap();
         assert!(vault
-            .register_metadata("openai", "fixture", CredentialScheme::ApiKey, None, None)
+            .register_metadata(
+                "openai",
+                "fixture",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                None,
+                None,
+            )
             .is_err());
         assert_eq!(vault.list().unwrap()[0].generation, i64::MAX as u64);
     }
@@ -1012,6 +1454,169 @@ mod tests {
                 .generation,
             2
         );
+    }
+
+    #[test]
+    fn exact_entry_metadata_routes_retrieval_and_direct_secrets_clear_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.db");
+        let backend = SyntheticExactBackend {
+            exact_calls: Mutex::new(0),
+        };
+        let vault = VaultStore::with_backend(path.to_str().unwrap(), Box::new(backend)).unwrap();
+        let binding = SentinelPassExactBinding::new(42, "SANDHI_TEST_SERVICE_TOKEN").unwrap();
+        vault
+            .register_metadata(
+                "openai",
+                "default",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                Some(binding.clone()),
+                Some(SentinelPassGrantAcl {
+                    exe_pinned: true,
+                    fingerprint_enrolled: true,
+                    expires_at: Some(1_893_456_000),
+                }),
+            )
+            .unwrap();
+        let entry = vault.metadata_entry("openai", "default").unwrap().unwrap();
+        assert_eq!(entry.exact_binding().unwrap().as_ref(), Some(&binding));
+        assert_eq!(
+            entry.grant_acl().unwrap(),
+            Some(SentinelPassGrantAcl {
+                exe_pinned: true,
+                fingerprint_enrolled: true,
+                expires_at: Some(1_893_456_000),
+            })
+        );
+        assert_eq!(
+            vault.get("openai", "default").unwrap().as_deref(),
+            Some("synthetic-entry-42")
+        );
+        let plan = vault.reference_plan("openai", "default").unwrap();
+        assert_eq!(plan.resolution, "exact_entry");
+        assert_eq!(plan.searched_references, vec!["entry:42"]);
+
+        vault
+            .set(
+                "openai",
+                "default",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                "synthetic-direct-key",
+            )
+            .unwrap();
+        let rotated = vault.metadata_entry("openai", "default").unwrap().unwrap();
+        assert_eq!(rotated.exact_binding().unwrap(), None);
+        assert_eq!(rotated.grant_acl().unwrap(), None);
+        assert_eq!(
+            vault.get("openai", "default").unwrap().as_deref(),
+            Some("synthetic-legacy-key")
+        );
+    }
+
+    #[test]
+    fn persisted_exact_entry_fails_closed_when_backend_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.db");
+        let vault = VaultStore::with_backend(
+            path.to_str().unwrap(),
+            Box::new(SyntheticExactBackend {
+                exact_calls: Mutex::new(0),
+            }),
+        )
+        .unwrap();
+        let binding = SentinelPassExactBinding::new(42, "SANDHI_TEST_SERVICE_TOKEN").unwrap();
+        vault
+            .register_metadata(
+                "openai",
+                "default",
+                CredentialScheme::ApiKey,
+                None,
+                None,
+                Some(binding),
+                None,
+            )
+            .unwrap();
+        drop(vault);
+        let mismatch =
+            VaultStore::with_backend(path.to_str().unwrap(), Box::new(InMemoryVault::new()))
+                .unwrap();
+        assert!(matches!(
+            mismatch.get("openai", "default"),
+            Err(VaultError::NotSupported(_))
+        ));
+        let plan = mismatch.reference_plan("openai", "default").unwrap();
+        assert_eq!(plan.backend, "memory");
+        assert_eq!(plan.resolution, "unsupported_exact_binding");
+    }
+
+    #[test]
+    fn corrupted_or_orphaned_acl_metadata_fails_closed_on_reopen() {
+        let vault = VaultStore::with_backend(
+            ":memory:",
+            Box::new(SyntheticExactBackend {
+                exact_calls: Mutex::new(0),
+            }),
+        )
+        .unwrap();
+        let valid = "sentinelpass_entry_id = 42, sentinelpass_token_env = \
+                     'SANDHI_TEST_SERVICE_TOKEN', sentinelpass_exe_pinned = 1, \
+                     sentinelpass_fingerprint_enrolled = 1, sentinelpass_expires_at = NULL";
+        vault
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO vault (provider,label,scheme,created_at,status,generation) \
+                 VALUES ('openai','default','api_key','fixture','active',1)",
+                [],
+            )
+            .unwrap();
+        for assignment in [
+            "sentinelpass_entry_id = NULL",
+            "sentinelpass_token_env = NULL",
+            "sentinelpass_exe_pinned = NULL",
+            "sentinelpass_fingerprint_enrolled = NULL",
+        ] {
+            vault
+                .conn
+                .lock()
+                .unwrap()
+                .execute(&format!("UPDATE vault SET {valid}"), [])
+                .unwrap();
+            assert!(vault.list().is_ok());
+            vault
+                .conn
+                .lock()
+                .unwrap()
+                .execute(&format!("UPDATE vault SET {assignment}"), [])
+                .unwrap();
+            assert!(
+                vault.list().is_err(),
+                "corrupt assignment `{assignment}` must fail inventory"
+            );
+            assert!(vault.metadata_entry("openai", "default").is_err());
+            assert!(vault.get("openai", "default").is_err());
+        }
+    }
+
+    #[test]
+    fn exact_entry_bindings_require_a_complete_nonsecret_pair() {
+        for (entry_id, token_env) in [
+            (0, "SANDHI_TEST_SERVICE_TOKEN"),
+            (42, ""),
+            (42, "BAD TOKEN"),
+            (42, "1BAD_TOKEN"),
+            (42, "SENTINELPASS_CLIENT_TOKEN"),
+        ] {
+            assert!(SentinelPassExactBinding::new(entry_id, token_env).is_err());
+        }
+        let binding = SentinelPassExactBinding::new(42, "SANDHI_TEST_SERVICE_TOKEN_2").unwrap();
+        assert_eq!(binding.entry_id, 42);
+        assert_eq!(binding.token_env, "SANDHI_TEST_SERVICE_TOKEN_2");
     }
 
     #[test]
@@ -1191,6 +1796,47 @@ mod credstore_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn vault_reference_plans_name_the_active_backend_and_searched_names() {
+        let dir = temp_dir("reference-plan");
+        let backends: Vec<Box<dyn Vault>> = vec![
+            Box::new(KeyringVault),
+            Box::new(CredentialStoreVault::new(dir.clone())),
+            Box::new(InMemoryVault::new()),
+        ];
+
+        let plans: Vec<VaultReferencePlan> = backends
+            .iter()
+            .map(|backend| backend.reference_plan("openai", "default").unwrap())
+            .collect();
+        assert_eq!(plans[0].backend, "keyring");
+        assert_eq!(plans[0].resolution, "os_service_account");
+        assert_eq!(
+            plans[0].searched_references,
+            vec!["service=sandhi;account=openai:default"]
+        );
+        assert_eq!(plans[1].backend, "credstore");
+        assert_eq!(plans[1].resolution, "filesystem_candidates");
+        assert_eq!(
+            plans[1].searched_references,
+            vec![
+                dir.join("openai__default").display().to_string(),
+                dir.join("openai.default").display().to_string(),
+                dir.join("sandhi.openai.default").display().to_string(),
+            ]
+        );
+        assert_eq!(plans[2].backend, "memory");
+        assert_eq!(plans[2].searched_references, vec!["openai:default"]);
+
+        for backend in backends {
+            assert!(matches!(
+                backend.reference_plan("bad/reference", "default"),
+                Err(VaultError::InvalidReference)
+            ));
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -34,8 +34,9 @@ use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
 use sandhi_store::{
-    AlertRuleRecord, AlertStore, CreateAlertRequest, CredentialScheme, VaultEntry, VaultError,
-    VirtualKeyRecord, VirtualKeyStore,
+    AlertRuleRecord, AlertStore, CreateAlertRequest, CredentialScheme, SentinelPassExactBinding,
+    SentinelPassGrantAcl, VaultEntry, VaultError, VaultReferencePlan, VirtualKeyRecord,
+    VirtualKeyStore,
 };
 
 use crate::access::{admit_mutation, constant_time_eq, err};
@@ -68,6 +69,25 @@ pub mod admin {
         /// upstream. Agent-allowlisting plans (e.g. Aliyun coding) reject an
         /// empty/default-less identity; set the UA the endpoint expects.
         pub user_agent: Option<String>,
+        /// Exact SentinelPass SP-1 entry id. Must be supplied as a pair with
+        /// `sentinelpass_token_env`; the service token itself is never accepted.
+        pub sentinelpass_entry_id: Option<i64>,
+        /// Environment variable holding the exact-entry service-grant token.
+        pub sentinelpass_token_env: Option<String>,
+        /// Non-secret policy class copied from the SentinelPass grant report.
+        /// Protocol 0.20 does not expose a read-only grant inspection, so this
+        /// declaration is projection metadata rather than daemon-verified state.
+        pub sentinelpass_grant_acl: Option<SentinelPassGrantAclRequest>,
+    }
+
+    /// Operator-declared ACL class for an exact SentinelPass service grant.
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct SentinelPassGrantAclRequest {
+        pub exe_pinned: bool,
+        pub fingerprint_enrolled: bool,
+        /// Unix seconds; omit when the grant has no expiry.
+        pub expires_at: Option<i64>,
     }
 
     /// `POST /admin/keys/share` — mint a scoped virtual key.
@@ -587,8 +607,12 @@ pub(crate) fn parse_scheme(s: Option<&str>) -> Result<CredentialScheme, &'static
     }
 }
 
-pub(crate) fn vault_entry_response(e: &VaultEntry) -> Value {
-    json!({
+pub(crate) fn vault_entry_response(
+    e: &VaultEntry,
+    reference: Option<&VaultReferencePlan>,
+) -> Result<Value, VaultError> {
+    let acl = vault_acl_response(e, reference)?;
+    Ok(json!({
         "provider": e.provider,
         "label": e.label,
         "scheme": e.scheme,
@@ -597,8 +621,76 @@ pub(crate) fn vault_entry_response(e: &VaultEntry) -> Value {
         "generation": e.generation,
         "status": e.status,
         "credential_id": e.credential_id(),
+        "sentinelpass_entry_id": e.sentinelpass_entry_id,
+        "sentinelpass_token_env": e.sentinelpass_token_env,
+        "acl": acl,
+        "vault": reference,
         // NB: the raw secret lives only in the Vault backend — never serialized here.
-    })
+    }))
+}
+
+pub(crate) fn inventory_reference_plan(
+    vault: &sandhi_store::VaultStore,
+    entry: &VaultEntry,
+) -> Result<VaultReferencePlan, VaultError> {
+    match vault.reference_plan(&entry.provider, &entry.label) {
+        Ok(plan) => Ok(plan),
+        Err(VaultError::InvalidReference) => Ok(VaultReferencePlan {
+            backend: vault.backend_name(),
+            resolution: "invalid_reference",
+            searched_references: vec![entry.credential_id()],
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+fn vault_acl_response(
+    e: &VaultEntry,
+    reference: Option<&VaultReferencePlan>,
+) -> Result<Value, VaultError> {
+    let declared_acl = e.grant_acl()?;
+    let resolution = reference.map(|reference| reference.resolution);
+    if resolution != Some("exact_entry") {
+        return Ok(json!({
+            "class": if resolution == Some("legacy_domain") {
+                "legacy_domain"
+            } else {
+                "backend_native"
+            },
+            "exe_pinned": false,
+            "fingerprint_enrolled": false,
+            "expires_at": Value::Null,
+            "source": "active_backend",
+        }));
+    }
+    let Some(acl) = declared_acl else {
+        return Ok(json!({
+            "class": "unknown_service_grant",
+            "exe_pinned": Value::Null,
+            "fingerprint_enrolled": Value::Null,
+            "expires_at": Value::Null,
+            "source": "not_declared",
+        }));
+    };
+    let class = match (acl.exe_pinned, acl.fingerprint_enrolled) {
+        (true, true) => "exe_and_fingerprint",
+        (true, false) => "exe_pinned",
+        (false, true) => "fingerprint_enrolled",
+        (false, false) => "token_only",
+    };
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    Ok(json!({
+        "class": class,
+        "exe_pinned": acl.exe_pinned,
+        "fingerprint_enrolled": acl.fingerprint_enrolled,
+        "expires_at": acl.expires_at,
+        "expiry_state": match acl.expires_at {
+            None => "non_expiring",
+            Some(expires_at) if expires_at <= now => "expired",
+            Some(_) => "active",
+        },
+        "source": "registration_declaration",
+    }))
 }
 
 pub(crate) fn vkey_record_response(r: &VirtualKeyRecord) -> Value {
@@ -630,6 +722,7 @@ pub(crate) fn vault_failure(error: VaultError, write: bool) -> Response {
         VaultError::Denied => (StatusCode::FORBIDDEN, "vault_denied", "Broker rejected operation; check the exact client/domain/field and read/write grant"),
         VaultError::Configuration => (StatusCode::SERVICE_UNAVAILABLE, "vault_configuration", "Check selected backend, IPC feature, daemon token and client token; no automatic fallback"),
         VaultError::InvalidReference => (StatusCode::BAD_REQUEST, "invalid_reference", "Provider and label require 1–128 lowercase ASCII letters, digits, dots, underscores or hyphens"),
+        VaultError::StrictLegacyDenied => (StatusCode::CONFLICT, "vault_legacy_denied", "Strict SentinelPass profile refused the legacy domain grant; provision an exact-entry service grant"),
         VaultError::NotSupported(_) => (StatusCode::NOT_IMPLEMENTED, "vault_unsupported", "Operation unsupported by this backend; provision in the broker and use a supported read-only reference path"),
         VaultError::Backend(_) => (StatusCode::SERVICE_UNAVAILABLE, "vault_unavailable", "Credential operation failed; backend details are redacted"),
     };
@@ -658,6 +751,9 @@ pub(crate) async fn add_key(
             scheme: req.scheme,
             base_url: req.base_url,
             user_agent: req.user_agent,
+            sentinelpass_entry_id: None,
+            sentinelpass_token_env: None,
+            sentinelpass_grant_acl: None,
         },
         Some(req.secret),
     )
@@ -724,12 +820,60 @@ async fn register_credential(
         let _operation = operation;
         let _permit = permit;
         let label = req.label.as_deref().unwrap_or("default");
+        let exact = match (
+            req.sentinelpass_entry_id,
+            req.sentinelpass_token_env.as_deref(),
+        ) {
+            (Some(entry_id), Some(token_env)) => {
+                match SentinelPassExactBinding::new(entry_id, token_env) {
+                    Ok(binding) => Some(binding),
+                    Err(_) => return err(
+                        StatusCode::BAD_REQUEST,
+                        "sentinelpass exact-entry binding requires a positive entry id and valid token environment name",
+                    ),
+                }
+            }
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "sentinelpass_entry_id and sentinelpass_token_env must be supplied together",
+                );
+            }
+        };
+        let grant_acl = req.sentinelpass_grant_acl.map(|acl| SentinelPassGrantAcl {
+            exe_pinned: acl.exe_pinned,
+            fingerprint_enrolled: acl.fingerprint_enrolled,
+            expires_at: acl.expires_at,
+        });
+        if exact.is_none() && grant_acl.is_some() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "sentinelpass_grant_acl requires an exact-entry binding",
+            );
+        }
+        let reference_plan = if let Some(binding) = &exact {
+            match vault.reference_plan_for_exact(&req.provider, label, binding) {
+                Ok(plan) => plan,
+                Err(e) => return vault_failure(e, false),
+            }
+        } else {
+            match vault.reference_plan(&req.provider, label) {
+                Ok(plan) => plan,
+                Err(e) => return vault_failure(e, false),
+            }
+        };
         let secret = match supplied {
             Some(secret) => secret,
-            None => match vault.get(&req.provider, label) {
+            None => match if let Some(binding) = &exact {
+                vault.get_exact(&req.provider, label, binding)
+            } else {
+                vault.get(&req.provider, label)
+            } {
                 Ok(Some(secret)) => secret,
                 Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({
-                    "error": "No credential at the authorized reference", "code": "vault_missing"
+                    "error": "No credential at the authorized reference", "code": "vault_missing",
+                    "vault": reference_plan
                 }))).into_response(),
                 Err(e) => return vault_failure(e, false),
             },
@@ -764,6 +908,8 @@ async fn register_credential(
                 scheme,
                 req.base_url.as_deref(),
                 req.user_agent.as_deref(),
+                exact,
+                grant_acl,
             )
         };
         let cred_id = match committed {
@@ -802,13 +948,16 @@ async fn register_credential(
         match vault.list() {
             Ok(entries) => {
                 let entry = entries.iter().find(|e| e.credential_id() == cred_id);
+                let body = match entry {
+                    Some(entry) => match vault_entry_response(entry, Some(&reference_plan)) {
+                        Ok(body) => body,
+                        Err(error) => return vault_failure(error, false),
+                    },
+                    None => json!({ "credential_id": cred_id }),
+                };
                 (
                     StatusCode::CREATED,
-                    Json(
-                        entry
-                            .map(vault_entry_response)
-                            .unwrap_or_else(|| json!({ "credential_id": cred_id })),
-                    ),
+                    Json(body),
                 )
                     .into_response()
             }
@@ -838,11 +987,21 @@ pub(crate) async fn list_keys(
     let Some(vault) = state.vault.clone() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "vault not configured");
     };
-    match tokio::task::spawn_blocking(move || vault.list()).await {
-        Ok(Ok(entries)) => {
-            Json(json!({ "keys": entries.iter().map(vault_entry_response).collect::<Vec<_>>() }))
-                .into_response()
-        }
+    match tokio::task::spawn_blocking(move || {
+        let entries = vault.list()?;
+        let backend = vault.backend_name();
+        let keys = entries
+            .iter()
+            .map(|entry| {
+                let reference = inventory_reference_plan(&vault, entry)?;
+                vault_entry_response(entry, Some(&reference))
+            })
+            .collect::<Result<Vec<_>, VaultError>>()?;
+        Ok::<Json<Value>, VaultError>(Json(json!({ "backend": backend, "keys": keys })))
+    })
+    .await
+    {
+        Ok(Ok(response)) => response.into_response(),
         _ => vault_failure(VaultError::Backend("inventory unavailable".into()), false),
     }
 }
@@ -2931,5 +3090,61 @@ mod diagnostic_admission_tests {
         );
         assert_eq!(slots.available_permits(), 1);
         assert_eq!(lifecycle.active_operations(), 0);
+    }
+}
+
+#[cfg(test)]
+mod vault_acl_projection_tests {
+    use super::*;
+
+    fn entry(acl: Option<SentinelPassGrantAcl>) -> VaultEntry {
+        VaultEntry {
+            provider: "openai".into(),
+            label: "default".into(),
+            scheme: CredentialScheme::ApiKey,
+            base_url: None,
+            user_agent: None,
+            sentinelpass_entry_id: acl.map(|_| 42),
+            sentinelpass_token_env: acl.map(|_| "SANDHI_TEST_SERVICE_TOKEN".into()),
+            sentinelpass_grant_acl: acl,
+            created_at: String::new(),
+            generation: 1,
+            status: "active".into(),
+        }
+    }
+
+    fn plan(resolution: &'static str) -> VaultReferencePlan {
+        VaultReferencePlan {
+            backend: "sentinelpass-ipc",
+            resolution,
+            searched_references: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inventory_projects_declared_exact_grant_classes() {
+        let acl = vault_acl_response(
+            &entry(Some(SentinelPassGrantAcl {
+                exe_pinned: true,
+                fingerprint_enrolled: true,
+                expires_at: Some(i64::MAX),
+            })),
+            Some(&plan("exact_entry")),
+        )
+        .unwrap();
+        assert_eq!(acl["class"], "exe_and_fingerprint");
+        assert_eq!(acl["exe_pinned"], true);
+        assert_eq!(acl["fingerprint_enrolled"], true);
+        assert_eq!(acl["expiry_state"], "active");
+        assert_eq!(acl["source"], "registration_declaration");
+
+        assert_eq!(
+            vault_acl_response(&entry(None), Some(&plan("exact_entry"))).unwrap()["class"],
+            "unknown_service_grant"
+        );
+        assert_eq!(
+            vault_acl_response(&entry(None), Some(&plan("legacy_domain"))).unwrap()["class"],
+            "legacy_domain"
+        );
     }
 }

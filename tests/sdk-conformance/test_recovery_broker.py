@@ -105,7 +105,17 @@ def test_restored_metadata_is_not_broker_authority(
             token="wrong-token" if failure == "denied" else "read-token",
         ) as client:
             assert client.get("/readyz").status_code == 200, "readiness is lifecycle-only"
-            assert client.get("/admin/keys").json() == inventory
+            restored_inventory = client.get("/admin/keys").json()
+            def durable_metadata(records):
+                return [
+                    {key: value for key, value in record.items() if key not in ("acl", "vault")}
+                    for record in records
+                ]
+
+            assert durable_metadata(restored_inventory["keys"]) == durable_metadata(inventory["keys"])
+            assert restored_inventory["backend"] == (
+                "unavailable" if failure == "plain" else "sentinelpass-ipc"
+            )
             denied = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body)
             assert denied.status_code == 502, denied.text
             assert len(upstream.requests) == before

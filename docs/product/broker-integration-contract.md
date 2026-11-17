@@ -91,6 +91,31 @@ explicit review/migration; do not relabel their grants automatically. Provider a
 silently merged. At restart, each active label resolves its own secret, not the first label for
 that provider. Resolved material remains in cached handles; it is not persisted in SQLite.
 
+For SentinelPass protocol 0.20, a reference may instead bind the exact SP-1 service grant. Supply
+both non-secret fields to the reference operation:
+
+```sh
+sandhi keys reference openai default \
+  --sentinelpass-entry-id 42 \
+  --sentinelpass-token-env SANDHI_OPENAI_SERVICE_TOKEN \
+  --sentinelpass-exe-pinned \
+  --sentinelpass-fingerprint-enrolled \
+  --sentinelpass-expires-at 1893456000
+```
+
+The gateway process must have that named environment variable when it validates the reference and
+when it later retrieves the credential. It is the exact-entry service token, distinct from both
+`SENTINELPASS_CLIENT_TOKEN` and the daemon transport token. Sandhi stores only the integer entry
+ID, environment-variable name, and optional non-secret ACL class declared from the grant report.
+A partial pair, ACL metadata without an exact binding, a non-native backend, or a missing named
+token fails closed. Exact retrieval sends `VaultOp::ServiceGetSecret`; only references without an exact
+binding use the deprecated `sandhi:<provider>:<label>` domain, and a successful legacy retrieval
+logs once per reference. A strict daemon that denies that legacy surface gets the distinct
+`vault_legacy_denied` code. Directly writing a secret clears the exact binding on the next
+metadata generation rather than silently changing which SentinelPass entry authorizes the label.
+The ACL declaration is inventory metadata, not enforcement: SentinelPass owns the grant, and
+protocol 0.20 exposes no read-only inspection operation Sandhi could use to verify it.
+
 ## Failure and offboarding semantics
 
 | Outcome | HTTP / code | Meaning and recovery |

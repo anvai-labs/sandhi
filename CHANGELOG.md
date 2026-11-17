@@ -19,6 +19,21 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+- Add native SentinelPass SP-1 exact-entry credential retrieval. Vault metadata stores only
+  the exact entry ID and service-token environment-variable name; the token stays in the
+  process environment and never enters SQLite, requests, logs, or backend JSON.
+- Keep unbound SentinelPass references on the deprecated domain lookup, count successful legacy
+  use once per reference, and map the strict-profile refusal to `409 vault_legacy_denied`.
+- Report the active vault backend and exact reference plan through admin, CLI, and dashboard
+  inventory. Partial exact bindings, backend changes, and missing named tokens fail closed.
+- Project the non-secret SentinelPass grant class — executable pin, key enrollment and expiry —
+  from the operator's grant report into inventory; SentinelPass remains the enforcing authority.
+- Make direct secret writes clear an obsolete exact-entry binding on the next metadata
+  generation so a label cannot silently change which SentinelPass entry authorizes it.
+- Change the public Rust `VaultEntry` shape and `VaultStore::register_metadata` arity, and change
+  the internal dashboard keys response from a vault array to a `{ backend, keys }` object. These
+  deliberate compatibility breaks are the reason the release is planned as Sandhi 0.21.0.
+
 ## [0.20.0] — Published 2026-11-16
 
 - Add hierarchical `hourly`, `daily`, `weekly`, `monthly` and `total` neutral-token
