@@ -2,7 +2,7 @@
 
 The current standalone candidate always selects a bounded streaming policy.
 Without an explicit section, its source defaults are 30 seconds for setup,
-90 seconds for idle gaps and 180 seconds for the body, within a 240-second
+180 seconds for idle gaps and 420 seconds for the body, within an 840-second
 ceiling. Operators can override them through `streaming_deadlines` in
 `SANDHI_CONFIG`. These are configured source defaults, not proof of a particular
 process's effective override or a physical token guarantee.
