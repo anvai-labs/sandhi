@@ -89,3 +89,5 @@ The postrelease integration binds this review to the exact adapter with the expl
 
 
 The 2026-11-15 model-budget amendment was independently reassessed. Its adapter changes are confined to grant-template validation, fixed/model scope separation, delegated model canonicalization, and budget-scope propagation. Production token exchange, ID-token verification, introspection authentication, JWKS/public-key operations, private signing/decryption, JWE/client assertions, manifests, and lockfiles are unchanged. The adapter fingerprint is updated; the existing 2026-11-18 deadline and advisory status are unchanged.
+
+The record window lapsed on 2026-11-18 with no advisory-relevant change and was re-dated on 2026-11-18 after drift verification: the intervening tree churn is confined to the 0.20.0/0.21.0 workspace version bumps in the root and binding lockfiles, `auth.rs`, `deny.toml` and the check script have no commits in the window, and all recorded package versions and checksums match the current root lockfile byte-for-byte. The review window now runs to 2026-12-12 (24 days, prior convention).
