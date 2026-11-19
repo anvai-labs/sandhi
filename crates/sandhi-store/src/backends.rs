@@ -488,18 +488,13 @@ mod thinking_validation_tests {
     }
 
     #[test]
-    fn backend_models_require_valid_model_scoped_thinking_metadata() {
-        assert!(
-            serde_json::from_value::<BackendDefinition>(serde_json::json!({
-                "id":"source",
-                "provider":"vendor-one",
-                "credential_ref":"vendor:fixture",
-                "endpoint":{"endpoint_family":"openai_chat_completions"},
-                "models":[{"id":"fixture"}]
-            }))
-            .is_err(),
-            "thinking capability is mandatory, not inferred"
+    fn backend_models_default_omitted_thinking_to_unsupported() {
+        let omitted = definition(serde_json::json!([{"id":"fixture"}]));
+        assert_eq!(
+            omitted.models[0].thinking,
+            sandhi_core::ThinkingCapabilityV1::unsupported()
         );
+        omitted.validate().unwrap();
 
         let invalid = [
             serde_json::json!({"supported":false,"encoding":"openai_chat"}),

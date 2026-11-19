@@ -1709,6 +1709,8 @@ fn decode_responses_request(
         seed: None,
         metadata,
         // W3d/G7: Responses expresses effort as `reasoning.effort`; no thinking.
+        // The SDK uses `effort: "none"` as its native disable spelling even though
+        // "none" is deliberately not a semantic effort value.
         thinking: object
             .get("reasoning")
             .and_then(|reasoning| reasoning.get("effort"))
@@ -1718,7 +1720,13 @@ fn decode_responses_request(
                 }
                 value
                     .as_str()
-                    .map(|effort| Some(ThinkingRequestV1::enabled().with_effort(effort)))
+                    .map(|effort| {
+                        if effort == "none" {
+                            Some(ThinkingRequestV1::disabled())
+                        } else {
+                            Some(ThinkingRequestV1::enabled().with_effort(effort))
+                        }
+                    })
                     .ok_or_else(|| "reasoning.effort must be a string or null".to_owned())
             })
             .transpose()?
@@ -2774,6 +2782,20 @@ mod tests {
             request.extensions["openai_responses"]["reasoning"]["summary"],
             "auto"
         );
+    }
+
+    #[test]
+    fn responses_ingress_maps_native_none_effort_to_semantic_disable() {
+        let (request, _) = decode_responses_request(
+            json!({
+                "model": "gpt-5",
+                "input": "hi",
+                "reasoning": {"effort": "none"}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert_eq!(request.thinking, Some(ThinkingRequestV1::disabled()));
     }
 
     #[test]

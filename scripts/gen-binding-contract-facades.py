@@ -295,7 +295,7 @@ class ModelDescriptorV1(TypedDict):
     max_output_tokens: NotRequired[int]
     default_temperature: NotRequired[float]
     capabilities: NotRequired[ProviderCapabilitiesV1]
-    thinking: ThinkingCapabilityV1
+    thinking: NotRequired[ThinkingCapabilityV1]
     endpoint_url: NotRequired[str]
     extensions: NotRequired[dict[str, JsonValue]]
 class ProviderDescriptorV1(TypedDict):
@@ -471,7 +471,7 @@ export interface ThinkingCapabilityV1 {{
 export interface ModelDescriptorV1 {{
   id: string; aliases?: string[]; max_input_tokens?: number; max_output_tokens?: number
   default_temperature?: number; capabilities?: ProviderCapabilitiesV1
-  thinking: ThinkingCapabilityV1; endpoint_url?: string
+  thinking?: ThinkingCapabilityV1; endpoint_url?: string
   extensions?: Record<string, JsonValue>
 }}
 export interface ProviderDescriptorV1 {{

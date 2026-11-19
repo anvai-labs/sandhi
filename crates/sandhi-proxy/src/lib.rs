@@ -2330,7 +2330,10 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
                 // Gemini names a model by its resource path, and the SDK strips the prefix back off.
                 "name": format!("models/{}", model.id),
                 "displayName": model.id,
-                "thinking": model.thinking.sanitized(),
+                // Gemini reserves `thinking` for a boolean. Keep the native SDK
+                // shape valid and expose Sandhi's semantic descriptor separately.
+                "thinking": model.thinking.supported,
+                "sandhi_thinking": model.thinking.sanitized(),
                 "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
             }))
             .collect::<Vec<_>>(),
@@ -2439,6 +2442,27 @@ mod discovery_contract_tests {
         let raw = bytes.as_ref();
         assert!(!String::from_utf8_lossy(raw).contains("\"encoding\""));
         assert!(!String::from_utf8_lossy(raw).contains("reasoning_effort_values"));
+
+        let response = build_app(state(explicit_qwen(), Some(vec!["qwen-fixture"])))
+            .oneshot(
+                axum::http::Request::get("/v1/models")
+                    .header("x-goog-api-key", "vk-discovery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let model = &body["models"][0];
+        assert_eq!(model["thinking"], true);
+        assert_eq!(model["sandhi_thinking"]["supported"], true);
+        assert!(model["sandhi_thinking"].get("encoding").is_none());
     }
 
     #[test]

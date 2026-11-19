@@ -400,24 +400,24 @@ def tracked_evidence(connection):
 
 
 def valid_attempt_version(attempt):
-    """Accept stored evidence versions without promoting diagnostic labels to authority."""
+    """Validate the clean pre-GA evidence version without treating labels as authority."""
     if not isinstance(attempt, dict):
         return False
     version = attempt.get("version")
     observed = attempt.get("observed_provider")
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version != 1:
         return False
-    if observed is None:
-        return True
-    if version != 2 or not isinstance(observed, dict) or set(observed) - {"provider", "model"}:
+    if not isinstance(observed, dict) or set(observed) - {"provider", "model", "upstream_host"}:
         return False
 
     def label(value, limit):
         return (isinstance(value, str) and 0 < len(value.encode("utf-8")) <= limit
                 and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value))
 
+    host = observed.get("upstream_host")
     return (label(observed.get("provider"), 128)
-            and (observed.get("model") is None or label(observed["model"], 512)))
+            and (observed.get("model") is None or label(observed["model"], 512))
+            and (host is None or label(host, 255)))
 
 
 def verify_tracked(report, by_step):

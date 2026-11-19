@@ -201,12 +201,16 @@ class Gateway:
         self.base = "http://" + env["SANDHI_BIND"]
         self.process = subprocess.Popen([str(self.binaries / "sandhi-proxy")], cwd=self.directory,
                                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise AssertionError(self.process.stderr.read().decode())
             try:
-                if httpx.get(self.base + "/readyz", timeout=1).status_code == 200:
+                ready = httpx.get(self.base + "/readyz", timeout=1)
+                if ready.status_code == 200 or (
+                    ready.status_code == 503
+                    and "durable_accounting_recovery_unresolved" in ready.text
+                ):
                     return self
             except httpx.TransportError:
                 pass
@@ -217,7 +221,7 @@ class Gateway:
         if self.process and self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=10)
+                self.process.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=2)

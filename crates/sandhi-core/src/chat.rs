@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
 /// Version 1 is the clean pre-GA/GA baseline: one semantic thinking request and
-/// mandatory model-scoped capability descriptors. Pre-GA deployments swap atomically.
-pub const CHAT_CONTRACT_MINOR: u32 = 0;
+/// explicit model-scoped capability descriptors. Pre-GA deployments swap atomically.
+pub const CHAT_CONTRACT_MINOR: u32 = 1;
 pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
@@ -296,7 +296,7 @@ pub struct ThinkingBudgetCapabilityV1 {
 }
 
 /// Exact model-scoped thinking control facts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ThinkingCapabilityV1 {
     pub supported: bool,
@@ -766,6 +766,9 @@ pub struct ModelDescriptorV1 {
     pub default_temperature: Option<f64>,
     #[serde(default)]
     pub capabilities: ProviderCapabilitiesV1,
+    /// Omission means the model cannot configure thinking. An explicit
+    /// unsupported descriptor serializes identically.
+    #[serde(default)]
     pub thinking: ThinkingCapabilityV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
@@ -1189,6 +1192,20 @@ mod tests {
     }
 
     #[test]
+    fn omitted_model_thinking_capability_defaults_to_unsupported() {
+        let model: ModelDescriptorV1 = serde_json::from_value(serde_json::json!({
+            "id": "legacy-mock"
+        }))
+        .unwrap();
+
+        assert_eq!(model.thinking, ThinkingCapabilityV1::unsupported());
+        assert_eq!(
+            serde_json::to_value(&model).unwrap()["thinking"],
+            serde_json::json!({"supported": false})
+        );
+    }
+
+    #[test]
     fn neutral_contract_allows_temperature_alongside_thinking() {
         // Family-scoped constraint: non-Anthropic upstreams accept — and some
         // documented agent profiles REQUIRE — temperature+thinking (e.g.
@@ -1323,7 +1340,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (0, 0x9c1d2a273d29c63d_u64),
+            (1, 0x9855e8c635de35fd_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

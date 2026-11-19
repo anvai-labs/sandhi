@@ -73,8 +73,7 @@
     "ModelDescriptorV1": {
       "type": "object",
       "required": [
-        "id",
-        "thinking"
+        "id"
       ],
       "properties": {
         "aliases": {
@@ -138,7 +137,15 @@
           "minimum": 0.0
         },
         "thinking": {
-          "$ref": "#/definitions/ThinkingCapabilityV1"
+          "description": "Omission means the model cannot configure thinking. An explicit unsupported descriptor serializes identically.",
+          "default": {
+            "supported": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThinkingCapabilityV1"
+            }
+          ]
         }
       }
     },
