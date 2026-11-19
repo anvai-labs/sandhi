@@ -10,7 +10,6 @@ import subprocess
 import pytest
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "${{ github.event_name == 'push' && github.event.before || '' }}"
 REF = "${{ github.event_name == 'push' && github.sha || '' }}"
@@ -33,8 +32,84 @@ def test_push_comparison_uses_immutable_event_bounds_without_changing_pr_api_rou
         assert ".github/workflows/ci.yml" in patterns
 
 
+def test_rust_jobs_and_local_development_use_the_same_pinned_toolchain():
+    for name in ("ci.yml", "release.yml"):
+        workflow = yaml.load(
+            (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
+        )
+        toolchains = [
+            step["with"]["toolchain"]
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("uses", "").startswith("dtolnay/rust-toolchain@")
+        ]
+        assert toolchains and set(toolchains) == {"1.100.0"}, name
+    assert (ROOT / "rust-toolchain.toml").read_text() == (
+        '[toolchain]\nchannel = "1.100.0"\n'
+    )
+
+
+def test_maturin_builds_use_the_same_pinned_release():
+    expected = "1.16.0"
+    workflows = {}
+    for name in ("ci.yml", "release.yml"):
+        workflows[name] = yaml.load(
+            (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
+        )
+        actions = [
+            step["with"].get("maturin-version")
+            for job in workflows[name]["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("uses", "").startswith("PyO3/maturin-action@")
+        ]
+        assert actions and set(actions) == {expected}, name
+    installs = [
+        line.strip()
+        for workflow in workflows.values()
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        for line in step.get("run", "").splitlines()
+        if "pip install" in line and "maturin" in line
+    ]
+    assert installs == ["pip install maturin==1.16.0"]
+    assert (
+        f"maturin=={expected}"
+        in (ROOT / "bindings/python/requirements-test.txt").read_text()
+    )
+    assert (
+        f'requires = ["maturin=={expected}"]'
+        in (ROOT / "bindings/python/pyproject.toml").read_text()
+    )
+
+
+def test_toolchain_changes_recompile_every_native_job():
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    filters = yaml.safe_load(
+        next(
+            step
+            for step in workflow["jobs"]["changes"]["steps"]
+            if step.get("id") == "filter"
+        )["with"]["filters"]
+    )
+    required = {
+        "release_binaries",
+        "rust",
+        "python",
+        "node",
+        "schema",
+        "sdk_conformance",
+        "codegen",
+    }
+    assert required <= set(filters)
+    assert all("rust-toolchain.toml" in filters[name] for name in required)
+
+
 @pytest.mark.parametrize("default_branch", ["develop", "main"])
-def test_promotion_and_docs_push_compare_before_to_exact_after(tmp_path, default_branch):
+def test_promotion_and_docs_push_compare_before_to_exact_after(
+    tmp_path, default_branch
+):
     def git(*args):
         return subprocess.check_output(
             ["git", "-C", str(tmp_path), *args], text=True, stderr=subprocess.PIPE

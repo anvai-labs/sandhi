@@ -124,7 +124,8 @@ id = "victor/research"
 route = "coding/glm-5.3"
 generation.temperature = 0.2
 generation.output_tokens = 16384
-generation.reasoning_effort = "low"
+generation.thinking.enabled = true
+generation.thinking.budget_tokens = 16384
 
 [[gateway]]
 id = "sandhi/ds3"

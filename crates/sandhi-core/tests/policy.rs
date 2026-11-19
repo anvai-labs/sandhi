@@ -331,7 +331,7 @@ fn policy_rejects_invalid_documents_instead_of_loading_empty_policy() {
     let valid = json!({"schema_version":"1","revision":1,"deadline_ms":200,"max_body_bytes":65536,
         "rules":[rule("test",json!({"kind":"regex","pattern":"x"}),"audit")]});
     for (field, value) in [
-        ("schema_version", json!("2")),
+        ("schema_version", json!("0")),
         ("revision", json!(0)),
         ("deadline_ms", json!(0)),
         ("deadline_ms", json!(2001)),

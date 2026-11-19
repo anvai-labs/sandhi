@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use sandhi_core::UsageCompleteness;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1, UsageV2,
+    ContentPart, FinishReasonV1, MessageContent, ThinkingEncodingV1, ToolCallV1, ToolChoiceMode,
+    ToolChoiceV1, UsageV2,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -370,22 +371,21 @@ pub(crate) fn encode_anthropic_request_base(
             }
         }
     }
-    // W3d/G7: Anthropic extended thinking is `{type: enabled, budget_tokens}`.
-    // Typed field wins over an extensions-carried duplicate (inserted after
-    // the extensions clone). Effort `none` is an explicit no-thinking request;
-    // other effort levels retain their existing consumer decision.
-    let no_reasoning = request.reasoning_effort.as_deref() == Some("none");
-    if no_reasoning
-        && request
-            .thinking
-            .as_ref()
-            .is_some_and(|thinking| thinking.enabled)
-    {
-        return Err(ProviderError::InvalidRequest(
-            "reasoning effort none conflicts with enabled thinking".into(),
-        ));
-    }
+    // Restore only a handle-admitted semantic control in Anthropic's native
+    // shape. The original native control is removed first so duplicates cannot
+    // survive a translated or re-encoded request.
     if let Some(thinking) = &request.thinking {
+        if request.compiled_thinking != Some(ThinkingEncodingV1::AnthropicMessages) {
+            return Err(ProviderError::InvalidRequest(
+                "thinking control was not admitted for Anthropic messages".into(),
+            ));
+        }
+        if thinking.effort.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "Anthropic thinking supports budget only, not effort".into(),
+            ));
+        }
+        body.remove("thinking");
         if thinking.enabled {
             let mut obj = serde_json::Map::new();
             obj.insert("type".into(), Value::String("enabled".into()));
@@ -396,8 +396,10 @@ pub(crate) fn encode_anthropic_request_base(
         } else {
             body.insert("thinking".into(), json!({"type":"disabled"}));
         }
-    } else if no_reasoning {
-        body.insert("thinking".into(), json!({"type":"disabled"}));
+    } else if request.compiled_thinking.is_some() {
+        return Err(ProviderError::InvalidRequest(
+            "compiled thinking has no semantic request".into(),
+        ));
     }
     Ok(Value::Object(body))
 }
@@ -535,22 +537,18 @@ fn decode_anthropic_stream(raw: ByteStream, requested_model: String) -> ChatEven
 mod tests {
     #[test]
     fn explicitly_disabled_thinking_is_sent_instead_of_relying_on_backend_defaults() {
-        for control in [
-            serde_json::json!({"thinking":{"enabled":false}}),
-            serde_json::json!({"reasoning_effort":"none"}),
-        ] {
-            let mut value = serde_json::json!({"model":"fixture","max_output_tokens":64,"messages":[{"role":"user","content":"hello"}]});
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(control.as_object().unwrap().clone());
-            let request = serde_json::from_value(value).unwrap();
-            let body = super::encode_anthropic_request(&request).unwrap();
-            assert_eq!(body["thinking"], serde_json::json!({"type":"disabled"}));
-        }
-        let request=serde_json::from_value(serde_json::json!({"model":"fixture","max_output_tokens":64,
-            "reasoning_effort":"none","thinking":{"enabled":true},"messages":[{"role":"user","content":"hello"}]})).unwrap();
-        assert!(super::encode_anthropic_request(&request).is_err());
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"fixture", "max_output_tokens":64,
+            "messages":[{"role":"user","content":"hello"}],
+            "thinking":{"enabled":false}
+        }))
+        .unwrap();
+        let request = ChatRequestV1 {
+            compiled_thinking: Some(ThinkingEncodingV1::AnthropicMessages),
+            ..request
+        };
+        let body = encode_anthropic_request(&request).unwrap();
+        assert_eq!(body["thinking"], json!({"type":"disabled"}));
     }
 
     /// TD-0014 P1, the opposing guard. The six `..._is_bounded_and_errors_...` tests pin the
@@ -671,20 +669,34 @@ mod tests {
     use bytes::Bytes;
     use futures_util::StreamExt;
 
-    #[test]
-    fn w3d_thinking_maps_to_native_and_effort_is_ignored() {
+    fn admitted_budget_request(budget: u64) -> ChatRequestV1 {
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model": "claude-test", "max_output_tokens": 128,
             "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "high",
-            "thinking": {"enabled": true, "budget_tokens": 4096}
+            "thinking": {"enabled": true, "budget_tokens": budget}
         }))
         .unwrap();
-        let body = encode_anthropic_request(&request).unwrap();
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 4096);
-        // Anthropic has no effort concept — the typed field is dropped, not leaked.
-        assert!(body.get("reasoning_effort").is_none());
+        ChatRequestV1 {
+            compiled_thinking: Some(ThinkingEncodingV1::AnthropicMessages),
+            ..request
+        }
+    }
+
+    #[test]
+    fn semantic_budget_maps_to_native_thinking() {
+        let body = encode_anthropic_request(&admitted_budget_request(4096)).unwrap();
+        assert_eq!(
+            body["thinking"],
+            json!({"type":"enabled","budget_tokens":4096})
+        );
+    }
+
+    #[test]
+    fn anthropic_effort_is_rejected_before_source_encoding() {
+        let mut request = admitted_budget_request(4096);
+        request.thinking =
+            Some(sandhi_core::chat::ThinkingRequestV1::enabled().with_effort("high"));
+        assert!(encode_anthropic_request(&request).is_err());
     }
 
     #[test]

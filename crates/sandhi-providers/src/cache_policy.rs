@@ -2,17 +2,231 @@
 //! typed and raw native bodies. No usage counters or inference replay live here.
 use crate::{OpenAiResponsesProfile, ProviderError, ProviderFamily, ProviderHandle};
 use sandhi_core::{
-    cache_digest, CacheCapabilitiesV1, CacheCapabilityProfileV1 as Profile, CacheIntentV1,
-    CacheModeV1 as Mode, CacheMutationV1 as Mutation, CacheNamespaceV1 as Namespace, ChatRequestV1,
+    cache_digest, chat::ThinkingEncodingV1, CacheCapabilitiesV1,
+    CacheCapabilityProfileV1 as Profile, CacheIntentV1, CacheModeV1 as Mode,
+    CacheMutationV1 as Mutation, CacheNamespaceV1 as Namespace, ChatRequestV1,
     CompiledCachePlanV1 as Plan, EndpointFamilyV1 as Family,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 fn invalid(message: impl Into<String>) -> ProviderError {
     ProviderError::InvalidRequest(message.into())
 }
 
+fn openai_control_matches(value: &Value, thinking: &sandhi_core::chat::ThinkingRequestV1) -> bool {
+    match value {
+        Value::String(effort) => thinking.effort.as_deref() == Some(effort),
+        Value::Bool(enabled) => thinking.enabled == *enabled,
+        Value::Number(budget) => {
+            thinking.enabled
+                && budget
+                    .as_u64()
+                    .is_some_and(|budget| thinking.budget_tokens == Some(budget))
+        }
+        Value::Object(native) => {
+            let enabled = native.get("type").and_then(Value::as_str);
+            let enabled = match enabled {
+                Some("enabled") => true,
+                Some("disabled") => false,
+                _ => return false,
+            };
+            let budget = native.get("budget_tokens");
+            enabled == thinking.enabled
+                && match budget {
+                    None | Some(Value::Null) => thinking.budget_tokens.is_none(),
+                    Some(Value::Number(number)) => number
+                        .as_u64()
+                        .is_some_and(|budget| thinking.budget_tokens == Some(budget)),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+fn openai_native_thinking_matches(body: &Map<String, Value>, request: &ChatRequestV1) -> bool {
+    let Some(thinking) = &request.thinking else {
+        return false;
+    };
+    let controls: Vec<&str> = [
+        "reasoning_effort",
+        "enable_thinking",
+        "thinking_budget",
+        "thinking",
+    ]
+    .iter()
+    .filter(|key| {
+        body.get(**key)
+            .is_some_and(|value| !value.is_null() && openai_control_matches(value, thinking))
+    })
+    .copied()
+    .collect();
+    match controls.as_slice() {
+        ["reasoning_effort"] | ["enable_thinking"] | ["thinking_budget"] | ["thinking"] => true,
+        ["reasoning_effort", "thinking_budget"] => true,
+        ["enable_thinking", "thinking_budget"] => {
+            body.get("enable_thinking").and_then(Value::as_bool) == Some(true)
+                && thinking.budget_tokens.is_some()
+        }
+        _ => false,
+    }
+}
+
+fn responses_native_thinking_matches(body: &Map<String, Value>, request: &ChatRequestV1) -> bool {
+    let Some(effort) = request
+        .thinking
+        .as_ref()
+        .and_then(|thinking| thinking.effort.as_deref())
+    else {
+        return false;
+    };
+    let top_level = body.get("reasoning_effort");
+    let nested = body
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|reasoning| reasoning.get("effort"));
+    [top_level, nested]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_null())
+        .all(|value| value.as_str() == Some(effort))
+}
+
+fn openai_native_encoding_matches(
+    body: &Map<String, Value>,
+    request: &ChatRequestV1,
+    encoding: ThinkingEncodingV1,
+) -> bool {
+    if !openai_native_thinking_matches(body, request) {
+        return false;
+    }
+    let controls: Vec<&str> = [
+        "reasoning_effort",
+        "enable_thinking",
+        "thinking_budget",
+        "thinking",
+    ]
+    .iter()
+    .filter(|key| body.get(**key).is_some_and(|value| !value.is_null()))
+    .copied()
+    .collect();
+    match encoding {
+        ThinkingEncodingV1::OpenaiChat => matches!(controls.as_slice(), ["reasoning_effort"]),
+        ThinkingEncodingV1::QwenOpenaiChat => matches!(
+            controls.as_slice(),
+            ["reasoning_effort"]
+                | ["enable_thinking"]
+                | ["thinking_budget"]
+                | ["reasoning_effort", "thinking_budget"]
+                | ["enable_thinking", "thinking_budget"]
+        ),
+        ThinkingEncodingV1::ZaiOpenaiChat => matches!(controls.as_slice(), ["thinking"]),
+        _ => false,
+    }
+}
+
+fn native_thinking_conflict(
+    request: &ChatRequestV1,
+    family: Family,
+    encoding: Option<ThinkingEncodingV1>,
+) -> Result<(), ProviderError> {
+    let object = |bucket: &str| request.extensions.get(bucket).and_then(Value::as_object);
+    let conflict = match family {
+        Family::OpenaiChatCompletions => object("openai").is_some_and(|body| {
+            encoding.is_none_or(|encoding| !openai_native_encoding_matches(body, request, encoding))
+                && [
+                    "reasoning_effort",
+                    "enable_thinking",
+                    "thinking_budget",
+                    "thinking",
+                ]
+                .iter()
+                .any(|key| body.get(*key).is_some_and(|value| !value.is_null()))
+        }),
+        Family::OpenaiResponses => object("openai_responses").is_some_and(|body| {
+            body.get("reasoning")
+                .is_some_and(|reasoning| !reasoning.is_null() && reasoning.as_object().is_none())
+                || ((body
+                    .get("reasoning_effort")
+                    .is_some_and(|value| !value.is_null())
+                    || body
+                        .get("reasoning")
+                        .and_then(Value::as_object)
+                        .is_some_and(|value| {
+                            value.get("effort").is_some_and(|effort| !effort.is_null())
+                        }))
+                    && (encoding != Some(ThinkingEncodingV1::OpenaiResponses)
+                        || !responses_native_thinking_matches(body, request)))
+        }),
+        Family::AnthropicMessages => object("anthropic").is_some_and(|body| {
+            if request.thinking.is_some() {
+                body.get("thinking")
+                    .is_some_and(|thinking| !thinking.is_object())
+            } else {
+                body.contains_key("thinking")
+            }
+        }),
+        Family::GeminiGenerateContent => object("gemini").is_some_and(|body| {
+            body.get("generationConfig")
+                .and_then(|generation| generation.get("thinkingConfig"))
+                .is_some_and(|config| {
+                    if config.is_null() {
+                        return false;
+                    }
+                    let Some(config) = config.as_object() else {
+                        return true;
+                    };
+                    if config.is_empty() {
+                        return false;
+                    }
+                    let budget = config
+                        .get("thinkingBudget")
+                        .or_else(|| config.get("thinking_budget"));
+                    request.thinking.is_none() && budget.is_some_and(|value| !value.is_null())
+                        || config.keys().any(|key| {
+                            !matches!(key.as_str(), "thinkingBudget" | "thinking_budget")
+                        })
+                })
+        }),
+        Family::CohereChat
+        | Family::OllamaChat
+        | Family::BedrockConverse
+        | Family::HostCallback => false,
+    };
+    if conflict {
+        return Err(invalid(
+            "native thinking control was not admitted by exact model capability",
+        ));
+    }
+    Ok(())
+}
+
 impl ProviderHandle {
+    fn compile_thinking_request(
+        &self,
+        request: &ChatRequestV1,
+    ) -> Result<Option<sandhi_core::chat::ThinkingEncodingV1>, ProviderError> {
+        if request.compiled_thinking.is_some() {
+            return Err(invalid(
+                "thinking control was compiled outside the provider handle",
+            ));
+        }
+        let capability = self.thinking_capability(&request.model)?;
+        let encoding = capability.encoding;
+        native_thinking_conflict(request, self.family().endpoint_family(), encoding)?;
+        let Some(thinking) = &request.thinking else {
+            return Ok(None);
+        };
+        capability.admits(thinking).map_err(invalid)?;
+        let encoding = encoding.expect("admitted thinking carries an encoding");
+        if encoding.endpoint_family() != self.family().endpoint_family() {
+            return Err(invalid(
+                "thinking capability encoding does not match the selected endpoint family",
+            ));
+        }
+        Ok(Some(encoding))
+    }
+
     pub fn apply_cache_plan(
         &self,
         request: &ChatRequestV1,
@@ -268,6 +482,7 @@ impl ProviderHandle {
         &self,
         mut request: ChatRequestV1,
     ) -> Result<ChatRequestV1, ProviderError> {
+        let compiled_thinking = self.compile_thinking_request(&request)?;
         if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
             if request.compiled_cache.is_some() {
                 return Err(invalid(
@@ -275,8 +490,10 @@ impl ProviderHandle {
                 ));
             }
             request.validate().map_err(invalid)?;
+            request.compiled_thinking = compiled_thinking;
             return Ok(request);
         }
+        request.compiled_thinking = compiled_thinking;
         request.compiled_cache = self.compile_cache_plan(&request)?;
         Ok(request)
     }
@@ -764,4 +981,500 @@ pub(crate) fn encode_for_peer(
         );
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod thinking_admission_tests {
+    use super::*;
+    use sandhi_core::chat::{ThinkingCapabilityV1, ThinkingEncodingV1, ThinkingRequestV1};
+    use sandhi_core::{EndpointFamilyV1, ModelDescriptorV1};
+
+    fn bound_qwen(capability: ThinkingCapabilityV1) -> ProviderHandle {
+        let descriptor: ModelDescriptorV1 = serde_json::from_value(serde_json::json!({
+            "id":"qwen-fixture",
+            "thinking":capability
+        }))
+        .unwrap();
+        crate::ProviderRuntime::new()
+            .openai_compat(
+                "qwen",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+                http::HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(crate::typed::BackendBinding {
+                id: "qwen".into(),
+                revision: 1,
+                provider: "qwen".into(),
+                credential_ref: "qwen:fixture".into(),
+                credential_generation: 1,
+                endpoint_family: EndpointFamilyV1::OpenaiChatCompletions,
+                endpoint_profile: "standard".into(),
+                models: vec![descriptor],
+                cache_policy: None,
+            })
+    }
+
+    fn request(thinking: ThinkingRequestV1) -> ChatRequestV1 {
+        serde_json::from_value(serde_json::json!({
+            "model":"qwen-fixture",
+            "messages":[{"role":"user","content":"hello"}],
+            "thinking":thinking
+        }))
+        .unwrap()
+    }
+
+    fn bound_responses(capability: ThinkingCapabilityV1) -> ProviderHandle {
+        let descriptor: ModelDescriptorV1 = serde_json::from_value(serde_json::json!({
+            "id":"responses-fixture",
+            "thinking":capability
+        }))
+        .unwrap();
+        crate::ProviderRuntime::new()
+            .openai_responses(
+                "openai",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+                http::HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(crate::typed::BackendBinding {
+                id: "responses".into(),
+                revision: 1,
+                provider: "openai".into(),
+                credential_ref: "openai:fixture".into(),
+                credential_generation: 1,
+                endpoint_family: EndpointFamilyV1::OpenaiResponses,
+                endpoint_profile: "standard".into(),
+                models: vec![descriptor],
+                cache_policy: None,
+            })
+    }
+
+    #[test]
+    fn explicit_thinking_fails_closed_for_unknown_models_before_encoder_egress() {
+        let provider = crate::ProviderRuntime::new().openai_compat(
+            "moonshot",
+            "http://127.0.0.1:1/v1",
+            "synthetic",
+            http::HeaderMap::new(),
+            Some(0),
+            None,
+            None,
+            None,
+        );
+        let mut request = request(ThinkingRequestV1::enabled().with_effort("medium"));
+        request.model = "not-in-any-catalog".into();
+        assert!(provider.preflight_request(&request).is_err());
+        assert!(provider.encode_execution_request(&request).is_err());
+    }
+
+    #[test]
+    fn native_thinking_control_cannot_bypass_exact_admission() {
+        let provider = bound_qwen(ThinkingCapabilityV1::unsupported());
+        let mut request = request(ThinkingRequestV1::disabled());
+        request.thinking = None;
+        request.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"thinking_budget": 16_384}),
+        );
+        let error = provider.prepare_cache_request(request).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("native thinking control was not admitted"));
+    }
+
+    #[test]
+    fn explicit_null_vendor_thinking_controls_mean_default() {
+        let provider = bound_qwen(ThinkingCapabilityV1::unsupported());
+        let mut request = request(ThinkingRequestV1::disabled());
+        request.thinking = None;
+        request.extensions.insert(
+            "openai".into(),
+            serde_json::json!({
+                "reasoning_effort": serde_json::Value::Null,
+                "enable_thinking": serde_json::Value::Null,
+                "thinking_budget": serde_json::Value::Null
+            }),
+        );
+        assert!(provider.prepare_cache_request(request.clone()).is_ok());
+    }
+
+    #[test]
+    fn gemini_null_thinking_config_reaches_backend_preflight_as_default() {
+        let descriptor: ModelDescriptorV1 = serde_json::from_value(serde_json::json!({
+            "id":"gemini-fixture",
+            "thinking":ThinkingCapabilityV1::unsupported()
+        }))
+        .unwrap();
+        let provider = crate::ProviderRuntime::new()
+            .gemini(
+                "http://127.0.0.1:1/v1beta",
+                "synthetic",
+                crate::GeminiAuthScheme::ApiKey,
+                http::HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(crate::typed::BackendBinding {
+                id: "gemini".into(),
+                revision: 1,
+                provider: "gemini".into(),
+                credential_ref: "gemini:fixture".into(),
+                credential_generation: 1,
+                endpoint_family: EndpointFamilyV1::GeminiGenerateContent,
+                endpoint_profile: "standard".into(),
+                models: vec![descriptor],
+                cache_policy: None,
+            });
+        let mut request = request(ThinkingRequestV1::disabled());
+        request.model = "gemini-fixture".into();
+        request.thinking = None;
+        request.extensions.insert(
+            "gemini".into(),
+            serde_json::json!({
+                "contents":[{"role":"user","parts":[{"text":"hello"}]}],
+                "generationConfig":{"thinkingConfig":serde_json::Value::Null}
+            }),
+        );
+        assert!(provider.prepare_cache_request(request.clone()).is_ok());
+    }
+
+    #[test]
+    fn admitted_openai_native_thinking_survives_backend_preflight() {
+        let capability =
+            ThinkingCapabilityV1::effort(ThinkingEncodingV1::OpenaiChat, &["low", "high"], None);
+        let provider = bound_qwen(capability);
+        let mut request = request(ThinkingRequestV1::enabled().with_effort("high"));
+        request.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"reasoning_effort":"high"}),
+        );
+        assert!(provider.prepare_cache_request(request).is_ok());
+    }
+
+    #[test]
+    fn admitted_qwen_disable_and_budget_controls_survive_backend_preflight() {
+        let mut capability =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        capability.can_disable = true;
+        let provider = bound_qwen(capability);
+
+        let mut disabled = request(ThinkingRequestV1::disabled());
+        disabled.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"enable_thinking":false}),
+        );
+        assert!(provider.prepare_cache_request(disabled).is_ok());
+
+        let mut budget = request(ThinkingRequestV1::enabled().with_budget(16_384));
+        budget.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"enable_thinking":true,"thinking_budget":16_384}),
+        );
+        assert!(provider.prepare_cache_request(budget).is_ok());
+    }
+
+    #[test]
+    fn admitted_zai_native_thinking_object_survives_backend_preflight() {
+        let capability =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::ZaiOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(capability);
+        let mut request = request(ThinkingRequestV1::enabled().with_budget(16_384));
+        request.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"thinking":{"type":"enabled","budget_tokens":16_384}}),
+        );
+        assert!(provider.prepare_cache_request(request).is_ok());
+    }
+
+    #[test]
+    fn qualified_thinking_encoding_is_enforced_before_transparent_forwarding() {
+        let zai = ThinkingCapabilityV1::budget(ThinkingEncodingV1::ZaiOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(zai);
+        let mut qwen_spelling = request(ThinkingRequestV1::disabled());
+        qwen_spelling.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"enable_thinking":false}),
+        );
+        assert!(provider.prepare_cache_request(qwen_spelling).is_err());
+
+        let qwen = ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(qwen);
+        let mut zai_spelling = request(ThinkingRequestV1::disabled());
+        zai_spelling.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"thinking":{"type":"disabled"}}),
+        );
+        assert!(provider.prepare_cache_request(zai_spelling).is_err());
+    }
+
+    #[test]
+    fn admitted_responses_effort_survives_backend_preflight() {
+        let capability = ThinkingCapabilityV1::effort(
+            ThinkingEncodingV1::OpenaiResponses,
+            &["low", "high"],
+            None,
+        );
+        let provider = bound_responses(capability);
+        let mut request = request(ThinkingRequestV1::enabled().with_effort("high"));
+        request.model = "responses-fixture".into();
+        request.extensions.insert(
+            "openai_responses".into(),
+            serde_json::json!({"reasoning":{"effort":"high","summary":"auto"}}),
+        );
+        assert!(provider.prepare_cache_request(request.clone()).is_ok());
+
+        request.extensions.insert(
+            "openai_responses".into(),
+            serde_json::json!({"reasoning_effort":"high"}),
+        );
+        assert!(provider.prepare_cache_request(request).is_ok());
+    }
+
+    #[test]
+    fn qwen_budget_only_model_admits_budget_and_rejects_effort() {
+        let capability =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(capability);
+        let budget = ThinkingRequestV1::enabled().with_budget(16_384);
+        let prepared = provider
+            .prepare_cache_request(request(budget.clone()))
+            .unwrap();
+        assert_eq!(
+            prepared.compiled_thinking,
+            Some(ThinkingEncodingV1::QwenOpenaiChat)
+        );
+        let body = provider.encode_execution_request(&request(budget)).unwrap();
+        assert_eq!(body["thinking_budget"], 16_384);
+        assert!(body.get("reasoning_effort").is_none());
+
+        let effort = ThinkingRequestV1::enabled().with_effort("medium");
+        assert!(provider.prepare_cache_request(request(effort)).is_err());
+    }
+
+    #[test]
+    fn qwen_effort_capability_is_exact_and_has_no_family_aliases() {
+        let capability = ThinkingCapabilityV1::effort(
+            ThinkingEncodingV1::QwenOpenaiChat,
+            &["low", "medium", "xhigh"],
+            Some("medium"),
+        );
+        let provider = bound_qwen(capability);
+        let admitted = ThinkingRequestV1::enabled().with_effort("medium");
+        let body = provider
+            .encode_execution_request(&request(admitted))
+            .unwrap();
+        assert_eq!(body["reasoning_effort"], "medium");
+
+        for alias in ["high", "max"] {
+            let rejected = ThinkingRequestV1::enabled().with_effort(alias);
+            assert!(
+                provider.prepare_cache_request(request(rejected)).is_err(),
+                "alias {alias} must not be admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen_can_combine_exact_effort_with_admitted_budget() {
+        let mut capability = ThinkingCapabilityV1::effort(
+            ThinkingEncodingV1::QwenOpenaiChat,
+            &["low", "medium", "xhigh"],
+            None,
+        );
+        capability.budget_tokens = Some(sandhi_core::chat::ThinkingBudgetCapabilityV1 {
+            min: 1024,
+            max: 131_072,
+        });
+        capability.allow_effort_and_budget = true;
+        let provider = bound_qwen(capability);
+        let thinking = ThinkingRequestV1::enabled()
+            .with_effort("medium")
+            .with_budget(16_384);
+        let mut native = request(thinking.clone());
+        native.extensions.insert(
+            "openai".into(),
+            serde_json::json!({
+                "reasoning_effort":"medium",
+                "thinking_budget":16_384
+            }),
+        );
+        assert!(provider.prepare_cache_request(native).is_ok());
+        let body = provider
+            .encode_execution_request(&request(thinking))
+            .unwrap();
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert_eq!(body["thinking_budget"], 16_384);
+    }
+
+    #[test]
+    fn disable_requires_model_and_encoding_capability() {
+        let no_disable =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(no_disable);
+        assert!(provider
+            .prepare_cache_request(request(ThinkingRequestV1::disabled()))
+            .is_err());
+
+        let mut can_disable =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        can_disable.can_disable = true;
+        let provider = bound_qwen(can_disable);
+        let body = provider
+            .encode_execution_request(&request(ThinkingRequestV1::disabled()))
+            .unwrap();
+        assert_eq!(body["enable_thinking"], false);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking_budget").is_none());
+    }
+
+    #[test]
+    fn provider_compiled_thinking_is_private_and_family_checked() {
+        let capability =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1024, 131_072);
+        let provider = bound_qwen(capability);
+        let mut external = request(ThinkingRequestV1::enabled().with_budget(16_384));
+        external.compiled_thinking = Some(ThinkingEncodingV1::QwenOpenaiChat);
+        assert!(provider.prepare_cache_request(external).is_err());
+
+        let mismatch =
+            ThinkingCapabilityV1::budget(ThinkingEncodingV1::AnthropicMessages, 1024, 131_072);
+        let provider = bound_qwen(mismatch);
+        assert!(provider
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_budget(16_384)))
+            .is_err());
+    }
+}
+
+#[cfg(test)]
+mod dialect_cache_tests {
+    use super::*;
+    use sandhi_core::chat::{ThinkingEncodingV1, ThinkingRequestV1};
+
+    fn request(
+        extensions: serde_json::Value,
+        thinking: Option<ThinkingRequestV1>,
+        encoding: Option<ThinkingEncodingV1>,
+    ) -> ChatRequestV1 {
+        let mut request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "model": "cache-model",
+            "messages": [{"role": "user", "content": "stable prefix"}],
+            "extensions": extensions
+        }))
+        .unwrap();
+        request.thinking = thinking;
+        request.compiled_thinking = encoding;
+        request
+    }
+
+    /// A thinking change is a generation-policy change, not a prompt change.
+    /// Keeping it out of the cache input digest preserves a stable prefix hit
+    /// instead of silently turning every reasoning-level change into a cold read.
+    #[test]
+    fn thinking_changes_do_not_invalidate_the_cache_input_digest() {
+        let base = request(serde_json::json!({}), None, None);
+        let effort = request(
+            serde_json::json!({}),
+            Some(ThinkingRequestV1::enabled().with_effort("medium")),
+            Some(ThinkingEncodingV1::QwenOpenaiChat),
+        );
+        let budget = request(
+            serde_json::json!({}),
+            Some(ThinkingRequestV1::enabled().with_budget(16_384)),
+            Some(ThinkingEncodingV1::AnthropicMessages),
+        );
+        let expected = base.cache_input_sha256().unwrap();
+        assert_eq!(effort.cache_input_sha256().unwrap(), expected);
+        assert_eq!(budget.cache_input_sha256().unwrap(), expected);
+    }
+
+    /// Each source dialect owns different cache spellings. Qualified thinking
+    /// restoration must remove only thinking controls, never these cost levers.
+    #[test]
+    fn qualified_thinking_preserves_native_cache_controls_in_every_dialect() {
+        let mut openai = request(
+            serde_json::json!({
+                "openai": {
+                    "prompt_cache_options": {"mode": "on"},
+                    "prompt_cache_retention": "24h",
+                    "prompt_cache_key": "stable-key"
+                }
+            }),
+            Some(ThinkingRequestV1::enabled().with_effort("medium")),
+            Some(ThinkingEncodingV1::OpenaiChat),
+        );
+        openai.extensions.insert(
+            "openai".into(),
+            serde_json::json!({
+                "prompt_cache_options": {"mode": "on"},
+                "prompt_cache_retention": "24h",
+                "prompt_cache_key": "stable-key"
+            }),
+        );
+        let body = crate::typed::encode_openai_request(&openai).unwrap();
+        assert_eq!(body["prompt_cache_options"], json!({"mode":"on"}));
+        assert_eq!(body["prompt_cache_retention"], "24h");
+        assert_eq!(body["prompt_cache_key"], "stable-key");
+
+        let responses = request(
+            serde_json::json!({
+                "openai_responses": {
+                    "prompt_cache_key": "responses-key",
+                    "reasoning": {"summary": "auto"}
+                }
+            }),
+            Some(ThinkingRequestV1::enabled().with_effort("medium")),
+            Some(ThinkingEncodingV1::OpenaiResponses),
+        );
+        let body = crate::openai_responses_typed::encode_responses_request_for_profile(
+            &responses,
+            OpenAiResponsesProfile::Standard,
+        )
+        .unwrap();
+        assert_eq!(body["prompt_cache_key"], "responses-key");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["reasoning"]["effort"], "medium");
+
+        let anthropic = request(
+            serde_json::json!({
+                "anthropic": {
+                    "system": [
+                        {"type":"text","text":"policy","cache_control":{"type":"ephemeral"}}
+                    ]
+                }
+            }),
+            Some(ThinkingRequestV1::enabled().with_budget(4096)),
+            Some(ThinkingEncodingV1::AnthropicMessages),
+        );
+        let mut anthropic = anthropic;
+        anthropic.max_output_tokens = Some(1024);
+        let body = crate::anthropic_typed::encode_anthropic_request(&anthropic).unwrap();
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+
+        let gemini = request(
+            serde_json::json!({"gemini": {"cachedContent": "caches/abc"}}),
+            Some(ThinkingRequestV1::enabled().with_budget(8192)),
+            Some(ThinkingEncodingV1::GeminiGenerateContent),
+        );
+        let body = crate::gemini_typed::encode_gemini_request(&gemini).unwrap();
+        assert_eq!(body["cachedContent"], "caches/abc");
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
+        );
+    }
 }

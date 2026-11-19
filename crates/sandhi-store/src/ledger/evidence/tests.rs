@@ -1342,14 +1342,19 @@ fn terminal_settlement_retains_unresolved_usage_and_accepts_measured_zero() {
                 if resolved {
                     RecoveryState::ReadyToSettle
                 } else {
-                    RecoveryState::UnresolvedObservation
+                    RecoveryState::UnresolvedObservation(
+                        UnresolvedObservationReason::ProviderUsageUnavailable,
+                    )
                 }
             );
             let result = ledger.settle_terminal_durable("team", &intent.execution_id);
             if resolved {
                 assert_eq!(unwrap_receipt(result.unwrap()).charged_tokens, 0);
             } else {
-                assert!(matches!(result, Err(EvidenceError::UnresolvedObservation)));
+                assert!(matches!(
+                    result,
+                    Err(EvidenceError::UnresolvedObservation(_))
+                ));
             }
             ledger
                 .reclaim_expired_durable(OffsetDateTime::now_utc() + Duration::hours(1))

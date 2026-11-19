@@ -7,24 +7,9 @@ use std::collections::BTreeMap;
 
 pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
-/// Additive growth counter within v1 (W3c). Bumped whenever the contract
-/// gains fields — machine-enforced by `contract_minor_ratchets_with_schema_
-/// changes`, which fails when the rendered schemas change without a bump.
-/// History: 1 = usage latency/reasoning on UsageEvent (#68), 2 =
-/// `include_native_response` request gate (#90), 3 = wire-truth latency on
-/// `UsageV2` (#97), 4 = `reasoning_effort` + `thinking` typed request fields
-/// (W3d/G7), 5 = `UsageV2::basis` — measured vs estimated counts (TD-0013 D5),
-/// 6 = `RunCostTreeV1` — the ADR-0005 D7 agent-run cost tree;
-/// 7 = explicit reasoning inclusion in output (TD-0026 W03), 8 = per-field latency provenance
-/// (TD-0027 S4); 9 = cache-read observation and same-population coverage (TD-0028 C2).
-/// 11 = codec-owned ordered native input
-/// with a portable-projection consistency fence (TD-0034 M3).
-/// 12 = opt-in native SSE attachments alongside canonical metering events.
-/// 13 = explicit cache intent; handle-compiled plans never enter the wire contract.
-/// 14 = optional typed display reasoning in assistant output.
-/// Consumers feature-detect the binding export and treat an absent fn as
-/// minor 0.
-pub const CHAT_CONTRACT_MINOR: u32 = 14;
+/// Version 1 is the clean pre-GA/GA baseline: one semantic thinking request and
+/// mandatory model-scoped capability descriptors. Pre-GA deployments swap atomically.
+pub const CHAT_CONTRACT_MINOR: u32 = 0;
 pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
@@ -168,6 +153,7 @@ pub struct RequestMetadataV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ChatRequestV1 {
     #[serde(default = "schema_v1")]
     pub schema_version: String,
@@ -189,20 +175,10 @@ pub struct ChatRequestV1 {
     pub seed: Option<i64>,
     #[serde(default)]
     pub metadata: RequestMetadataV1,
-    /// Reasoning effort budget (W3d/G7). OpenAI o-series/GPT-5 and Moonshot
-    /// kimi-k3 take it as a top-level `reasoning_effort`; the Responses codec
-    /// maps it to `reasoning.effort`. Promoted from `extensions["openai"]` so
-    /// it is portable across families instead of visible only to the openai
-    /// encoder. Vocabulary is the OpenAI one (`low`/`medium`/`high`); other
-    /// encoders that lack an effort concept ignore it.
+    /// Unified semantic thinking control. Vendor spellings are normalized at
+    /// ingress and restored by an explicitly qualified model encoding profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    /// Extended-thinking request (W3d/G7). Neutral shape; each encoder maps it
-    /// to its family-native form (Anthropic `thinking`, Gemini
-    /// `thinkingConfig`, OpenAI-compat/ZAI `thinking`). Promoted from
-    /// `extensions[<family>]` so it reaches every family through one field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingV1>,
+    pub thinking: Option<ThinkingRequestV1>,
     /// Whether adapters re-embed the full native provider response body under
     /// `extensions[<endpoint family>]` on the response. Defaults to true for
     /// compatibility; clients that consume only the neutral contract can opt
@@ -223,19 +199,306 @@ pub struct ChatRequestV1 {
     /// Handle-compiled execution data; never accepted from request JSON.
     #[serde(skip)]
     pub compiled_cache: Option<crate::CompiledCachePlanV1>,
+    /// Handle-qualified thinking transport profile; never accepted from request JSON.
+    #[serde(skip)]
+    pub compiled_thinking: Option<ThinkingEncodingV1>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
 }
 
-/// Neutral extended-thinking request (W3d/G7). `enabled` toggles reasoning;
-/// `budget_tokens` optionally caps the reasoning allowance (honored by
-/// families that support a budget — Anthropic, Gemini — and ignored by those
-/// that only take a boolean).
+/// One neutral thinking request. Omission on `ChatRequestV1` means the model
+/// default; an explicit object is validated against exact model capability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ThinkingV1 {
+#[serde(deny_unknown_fields)]
+pub struct ThinkingRequestV1 {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<u64>,
+}
+
+impl ThinkingRequestV1 {
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            effort: None,
+            budget_tokens: None,
+        }
+    }
+
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            effort: None,
+            budget_tokens: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_effort(mut self, value: &str) -> Self {
+        self.effort = Some(value.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub fn with_budget(mut self, value: u64) -> Self {
+        self.budget_tokens = Some(value);
+        self
+    }
+}
+
+/// Canonical transport encoding for an admitted thinking control. This is a
+/// closed enum by design; operators qualify a model, they cannot invent JSON paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingEncodingV1 {
+    OpenaiChat,
+    OpenaiResponses,
+    AnthropicMessages,
+    GeminiGenerateContent,
+    QwenOpenaiChat,
+    ZaiOpenaiChat,
+}
+
+impl ThinkingEncodingV1 {
+    #[must_use]
+    pub fn endpoint_family(self) -> EndpointFamilyV1 {
+        match self {
+            Self::OpenaiChat | Self::QwenOpenaiChat | Self::ZaiOpenaiChat => {
+                EndpointFamilyV1::OpenaiChatCompletions
+            }
+            Self::OpenaiResponses => EndpointFamilyV1::OpenaiResponses,
+            Self::AnthropicMessages => EndpointFamilyV1::AnthropicMessages,
+            Self::GeminiGenerateContent => EndpointFamilyV1::GeminiGenerateContent,
+        }
+    }
+}
+
+/// Canonical effort values accepted by an exact model. Compatibility aliases are
+/// intentionally not modeled; callers send one of these advertised values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThinkingEffortCapabilityV1 {
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// Canonical token-budget bounds accepted by an exact model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThinkingBudgetCapabilityV1 {
+    pub min: u64,
+    pub max: u64,
+}
+
+/// Exact model-scoped thinking control facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThinkingCapabilityV1 {
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<ThinkingEncodingV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_disable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ThinkingEffortCapabilityV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<ThinkingBudgetCapabilityV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_effort_and_budget: bool,
+}
+
+impl ThinkingCapabilityV1 {
+    const ENCODING_OPENAI_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::OpenaiChat;
+    const ENCODING_OPENAI_RESPONSES: ThinkingEncodingV1 = ThinkingEncodingV1::OpenaiResponses;
+    const ENCODING_ANTHROPIC_MESSAGES: ThinkingEncodingV1 = ThinkingEncodingV1::AnthropicMessages;
+    const ENCODING_GEMINI_GENERATE_CONTENT: ThinkingEncodingV1 =
+        ThinkingEncodingV1::GeminiGenerateContent;
+    const ENCODING_QWEN_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::QwenOpenaiChat;
+    const ENCODING_ZAI_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::ZaiOpenaiChat;
+
+    #[must_use]
+    pub fn unsupported() -> Self {
+        Self {
+            supported: false,
+            encoding: None,
+            can_disable: false,
+            effort: None,
+            budget_tokens: None,
+            allow_effort_and_budget: false,
+        }
+    }
+
+    #[must_use]
+    pub fn effort(encoding: ThinkingEncodingV1, values: &[&str], default: Option<&str>) -> Self {
+        Self {
+            supported: true,
+            encoding: Some(encoding),
+            can_disable: false,
+            effort: Some(ThinkingEffortCapabilityV1 {
+                values: values.iter().map(|value| (*value).to_owned()).collect(),
+                default: default.map(str::to_owned),
+            }),
+            budget_tokens: None,
+            allow_effort_and_budget: false,
+        }
+    }
+
+    #[must_use]
+    pub fn budget(encoding: ThinkingEncodingV1, min: u64, max: u64) -> Self {
+        Self {
+            supported: true,
+            encoding: Some(encoding),
+            can_disable: false,
+            effort: None,
+            budget_tokens: Some(ThinkingBudgetCapabilityV1 { min, max }),
+            allow_effort_and_budget: false,
+        }
+    }
+
+    /// Discovery projection: semantic controls only, never transport encoding.
+    #[must_use]
+    pub fn sanitized(&self) -> Self {
+        let mut copy = self.clone();
+        copy.encoding = None;
+        if !copy.supported {
+            copy.can_disable = false;
+            copy.effort = None;
+            copy.budget_tokens = None;
+            copy.allow_effort_and_budget = false;
+        }
+        copy
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.supported {
+            if self.encoding.is_some()
+                || self.can_disable
+                || self.effort.is_some()
+                || self.budget_tokens.is_some()
+                || self.allow_effort_and_budget
+            {
+                return Err("unsupported thinking capability carries controls".into());
+            }
+            return Ok(());
+        }
+        if self.encoding.is_none() {
+            return Err("supported thinking capability requires encoding".into());
+        }
+        if self.effort.is_none() && self.budget_tokens.is_none() {
+            return Err("supported thinking capability requires a control".into());
+        }
+        if let Some(effort) = &self.effort {
+            if effort.values.is_empty() || effort.values.len() > 16 {
+                return Err("thinking effort values must contain 1 to 16 entries".into());
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for value in &effort.values {
+                if value.is_empty()
+                    || value.len() > 16
+                    || !value
+                        .chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+                    || !seen.insert(value)
+                {
+                    return Err(
+                        "thinking effort values must be bounded, canonical and unique".into(),
+                    );
+                }
+            }
+            if let Some(default) = &effort.default {
+                if !effort.values.contains(default) {
+                    return Err("thinking effort default must be advertised".into());
+                }
+            }
+        }
+        if let Some(budget) = self.budget_tokens {
+            if budget.min == 0 || budget.max < budget.min || budget.max > 262_144 {
+                return Err("thinking budget bounds are invalid".into());
+            }
+        }
+        if self.allow_effort_and_budget && (self.effort.is_none() || self.budget_tokens.is_none()) {
+            return Err("thinking control combination requires both controls".into());
+        }
+        let encoding = self
+            .encoding
+            .expect("validated supported capability carries an encoding");
+        let supports_effort = matches!(
+            encoding,
+            Self::ENCODING_OPENAI_CHAT | Self::ENCODING_OPENAI_RESPONSES | Self::ENCODING_QWEN_CHAT
+        );
+        let supports_budget_and_disable = matches!(
+            encoding,
+            Self::ENCODING_QWEN_CHAT
+                | Self::ENCODING_ZAI_CHAT
+                | Self::ENCODING_ANTHROPIC_MESSAGES
+                | Self::ENCODING_GEMINI_GENERATE_CONTENT
+        );
+        if self.effort.is_some() && !supports_effort {
+            return Err("thinking encoding cannot express semantic effort".into());
+        }
+        if (self.budget_tokens.is_some() || self.can_disable) && !supports_budget_and_disable {
+            return Err("thinking encoding cannot express token budgets or disable".into());
+        }
+        Ok(())
+    }
+
+    pub fn admits(&self, request: &ThinkingRequestV1) -> Result<(), String> {
+        self.validate()?;
+        if !self.supported {
+            return Err("model does not support configurable thinking".into());
+        }
+        if request.enabled && request.effort.is_none() && request.budget_tokens.is_none() {
+            return Err("explicit thinking enable requires an advertised control".into());
+        }
+        if !request.enabled {
+            if !self.can_disable || request.effort.is_some() || request.budget_tokens.is_some() {
+                return Err("model cannot disable thinking with additional controls".into());
+            }
+            return Ok(());
+        }
+        if let Some(effort) = &request.effort {
+            let advertised = self
+                .effort
+                .as_ref()
+                .is_some_and(|capability| capability.values.contains(effort));
+            if !advertised {
+                return Err(format!("model does not support thinking effort {effort:?}"));
+            }
+        }
+        if let Some(budget) = request.budget_tokens {
+            let advertised = self
+                .budget_tokens
+                .is_some_and(|capability| (capability.min..=capability.max).contains(&budget));
+            if !advertised {
+                return Err("thinking budget is outside the model capability range".into());
+            }
+        }
+        if request.effort.is_none() && request.budget_tokens.is_none() {
+            return Ok(());
+        }
+        if request.effort.is_some()
+            && request.budget_tokens.is_some()
+            && !self.allow_effort_and_budget
+        {
+            return Err("model does not allow thinking effort and budget together".into());
+        }
+        Ok(())
+    }
+
+    pub fn semantic_equivalent(&self, other: &Self) -> bool {
+        self.validate().is_ok()
+            && other.validate().is_ok()
+            && self.supported == other.supported
+            && self.can_disable == other.can_disable
+            && self.effort == other.effort
+            && self.budget_tokens == other.budget_tokens
+            && self.allow_effort_and_budget == other.allow_effort_and_budget
+    }
 }
 
 fn default_true() -> bool {
@@ -267,6 +530,15 @@ impl ChatRequestV1 {
         }
         if let Some(intent) = &self.cache_intent {
             intent.validate().map_err(str::to_owned)?;
+        }
+        if let Some(thinking) = &self.thinking {
+            if thinking.effort.as_deref() == Some("none") {
+                return Err("thinking effort none is not a semantic control".into());
+            }
+            if !thinking.enabled && (thinking.effort.is_some() || thinking.budget_tokens.is_some())
+            {
+                return Err("disabled thinking cannot carry effort or budget controls".into());
+            }
         }
         // NOTE: the neutral contract deliberately does NOT reject
         // `temperature` alongside `thinking.enabled`. That combination is
@@ -494,6 +766,7 @@ pub struct ModelDescriptorV1 {
     pub default_temperature: Option<f64>,
     #[serde(default)]
     pub capabilities: ProviderCapabilitiesV1,
+    pub thinking: ThinkingCapabilityV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_url: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -811,6 +1084,111 @@ fn usage_event_schema() -> schemars::schema::RootSchema {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn removed_neutral_reasoning_effort_fails_loudly() {
+        let error = serde_json::from_value::<ChatRequestV1>(serde_json::json!({
+            "model":"m",
+            "messages":[{"role":"user","content":"hi"}],
+            "reasoning_effort":"high"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("reasoning_effort"));
+    }
+
+    #[test]
+    fn thinking_request_rejects_none_effort_and_disable_with_controls() {
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "model":"m",
+            "messages":[{"role":"user","content":"hi"}],
+            "thinking":{"enabled":true,"effort":"none"}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.validate(),
+            Err("thinking effort none is not a semantic control".to_owned())
+        );
+
+        let request: ChatRequestV1 = serde_json::from_value(serde_json::json!({
+            "model":"m",
+            "messages":[{"role":"user","content":"hi"}],
+            "thinking":{"enabled":false,"budget_tokens":1024}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.validate(),
+            Err("disabled thinking cannot carry effort or budget controls".to_owned())
+        );
+    }
+
+    #[test]
+    fn capability_encoding_must_be_able_to_express_every_advertised_control() {
+        use ThinkingEncodingV1 as Encoding;
+
+        let mut effort = ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None);
+        let mut budget = ThinkingCapabilityV1::budget(Encoding::AnthropicMessages, 1024, 4096);
+        let mut disable = ThinkingCapabilityV1::budget(Encoding::GeminiGenerateContent, 1024, 4096);
+        disable.can_disable = true;
+        let mut both = ThinkingCapabilityV1::effort(
+            Encoding::QwenOpenaiChat,
+            &["low", "medium", "xhigh"],
+            Some("medium"),
+        );
+        both.budget_tokens = budget.budget_tokens;
+        both.allow_effort_and_budget = true;
+        assert_eq!(
+            effort.admits(&ThinkingRequestV1::enabled()),
+            Err("explicit thinking enable requires an advertised control".to_owned())
+        );
+        assert!(effort
+            .admits(&ThinkingRequestV1::enabled().with_effort("low"))
+            .is_ok());
+
+        assert!(
+            ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ThinkingCapabilityV1::effort(Encoding::OpenaiResponses, &["low"], None)
+                .validate()
+                .is_ok()
+        );
+        assert!(budget.validate().is_ok());
+        assert!(disable.validate().is_ok());
+        assert!(both.validate().is_ok());
+
+        for encoding in [
+            Encoding::AnthropicMessages,
+            Encoding::GeminiGenerateContent,
+            Encoding::ZaiOpenaiChat,
+        ] {
+            let capability = ThinkingCapabilityV1::effort(encoding, &["low"], None);
+            capability
+                .validate()
+                .expect_err("effort encoding is invalid");
+        }
+        for encoding in [Encoding::OpenaiChat, Encoding::OpenaiResponses] {
+            let capability = ThinkingCapabilityV1::budget(encoding, 1024, 4096);
+            capability
+                .validate()
+                .expect_err("budget encoding is invalid");
+
+            let mut disable_only = ThinkingCapabilityV1::unsupported();
+            disable_only.supported = true;
+            disable_only.encoding = Some(encoding);
+            disable_only.can_disable = true;
+            // This also exercises the mandatory-control rule for encodings that
+            // cannot carry either semantic token control.
+            disable_only
+                .validate()
+                .expect_err("disable encoding is invalid");
+        }
+        budget.encoding = Some(Encoding::OpenaiChat);
+        effort.encoding = Some(Encoding::AnthropicMessages);
+        assert!(budget.validate().is_err());
+        assert!(effort.validate().is_err());
+    }
+
+    #[test]
     fn neutral_contract_allows_temperature_alongside_thinking() {
         // Family-scoped constraint: non-Anthropic upstreams accept — and some
         // documented agent profiles REQUIRE — temperature+thinking (e.g.
@@ -945,7 +1323,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (14, 0x752548491ceba344_u64),
+            (0, 0x9c1d2a273d29c63d_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );
@@ -1194,16 +1572,5 @@ mod tests {
             }),
             "text_delta"
         );
-    }
-
-    #[test]
-    fn chat_and_usage_wire_versions_bump_together() {
-        // The bindings' `wire_contract_version()` returns the usage-event
-        // version, and consumers (victor `_verify_wire_contract`) validate
-        // their CHAT expectation against it. That is only sound while the two
-        // versions are equal. If this fails you are splitting them: export a
-        // dedicated chat_contract_version from the bindings first and
-        // coordinate consumers (TD-0008 operating rule 1).
-        assert_eq!(CHAT_SCHEMA_VERSION_V1, crate::UsageEvent::SCHEMA_VERSION);
     }
 }

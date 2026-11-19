@@ -27,8 +27,10 @@ fn codex(
             endpoint_family: Family::OpenaiResponses,
             endpoint_profile: "chatgpt_codex".into(),
             models: vec![
-                serde_json::from_value(json!({"id":"model"})).unwrap(),
-                serde_json::from_value(json!({"id":"other-model"})).unwrap(),
+                serde_json::from_value(json!({"id":"model","thinking":{"supported":false}}))
+                    .unwrap(),
+                serde_json::from_value(json!({"id":"other-model","thinking":{"supported":false}}))
+                    .unwrap(),
             ],
             cache_policy: None,
         })

@@ -1489,8 +1489,34 @@ mod drain_contract_tests {
     }
 
     #[tokio::test]
+    async fn readiness_fails_closed_until_durable_recovery_completes() {
+        let (state, _sink, _directory) = state();
+        settlement::buffered::enable(&state, settlement::buffered::Config::default()).unwrap();
+        let app = build_app(state.clone());
+        let response = app
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"durable_accounting_recovery_unresolved");
+
+        settlement::buffered::recover(state.clone()).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn readiness_is_distinct_from_liveness_and_all_dialects_reject_drain() {
         let (state, sink, _directory) = state();
+        settlement::buffered::enable(&state, settlement::buffered::Config::default()).unwrap();
+        settlement::buffered::recover(state.clone()).await.unwrap();
         let app = build_app(state.clone());
         let ready = app
             .clone()
@@ -1755,7 +1781,13 @@ async fn catalog_models(Query(query): Query<CatalogQuery>) -> Response {
         );
     };
     match sandhi_providers::provider_descriptor(&provider) {
-        Some(descriptor) => Json(descriptor.models).into_response(),
+        Some(mut descriptor) => {
+            descriptor
+                .models
+                .iter_mut()
+                .for_each(|model| model.thinking = model.thinking.sanitized());
+            Json(descriptor.models).into_response()
+        }
         None => error(
             StatusCode::NOT_FOUND,
             &format!("unknown provider: {provider}"),
@@ -2117,10 +2149,19 @@ async fn handle_responses(
     .await
 }
 
+fn buffered_accounting_recovery_degraded(state: &Arc<ProxyState>) -> bool {
+    settlement::buffered::recovery_degraded(state)
+}
+
 /// `GET /metrics` — Prometheus text exposition (TD-0011 P2).
 async fn readiness(State(state): State<Arc<ProxyState>>) -> Response {
     let (status, body) = if state.buffered_accounting.get().is_none() {
         (StatusCode::SERVICE_UNAVAILABLE, "execution_not_initialized")
+    } else if buffered_accounting_recovery_degraded(&state) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable_accounting_recovery_unresolved",
+        )
     } else if state.lifecycle.is_running() {
         (StatusCode::OK, "ready")
     } else {
@@ -2187,37 +2228,34 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
         Err(response) => return response,
     };
     let discovered = match &provider {
-        Some(provider) => permitted_provider_models(&vk, provider)
-            .into_iter()
-            .map(|id| routing::DiscoveredModel {
-                target_models: vec![(vk.upstream_ref.clone(), id.clone())],
-                id,
-            })
-            .collect::<Vec<_>>(),
+        Some(provider) => match permitted_provider_models(&vk, provider) {
+            Ok(models) => models,
+            Err(message) => return ingress_error(dialect, StatusCode::BAD_GATEWAY, message),
+        },
         None => match routing::discovery(&state, &vk).await {
             Ok(models) => models,
             Err(message) => return ingress_error(dialect, StatusCode::BAD_GATEWAY, message),
         },
     };
-    let models = discovered
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<Vec<_>>();
     let body = match dialect {
         IngressDialect::Anthropic => json!({
-            "data": models.iter().map(|id| json!({
+            "sandhi_contract_version": 1,
+            "data": discovered.iter().map(|model| json!({
                 "type": "model",
-                "id": id,
-                "display_name": id,
+                "id": model.id,
+                "display_name": model.id,
+                "thinking": model.thinking.sanitized(),
             })).collect::<Vec<_>>(),
             "has_more": false,
         }),
         _ => json!({
             "object": "list",
-            "data": models.iter().map(|id| json!({
-                "id": id,
+            "sandhi_contract_version": 1,
+            "data": discovered.iter().map(|model| json!({
+                "id": model.id,
                 "object": "model",
-                "owned_by": provider.as_ref().map_or("sandhi",ProviderHandle::slug),
+                "owned_by": provider.as_ref().map_or("sandhi", ProviderHandle::slug),
+                "thinking": model.thinking.sanitized(),
             })).collect::<Vec<_>>(),
             "sandhi_streaming": streaming_policy_metadata(&state, &discovered),
         }),
@@ -2270,13 +2308,12 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
         Err(response) => return response,
     };
     let discovered = match &provider {
-        Some(provider) => permitted_provider_models(&vk, provider)
-            .into_iter()
-            .map(|id| routing::DiscoveredModel {
-                target_models: vec![(vk.upstream_ref.clone(), id.clone())],
-                id,
-            })
-            .collect::<Vec<_>>(),
+        Some(provider) => match permitted_provider_models(&vk, provider) {
+            Ok(models) => models,
+            Err(message) => {
+                return ingress_error(IngressDialect::Gemini, StatusCode::BAD_GATEWAY, message)
+            }
+        },
         None => match routing::discovery(&state, &vk).await {
             Ok(models) => models,
             Err(message) => {
@@ -2284,19 +2321,183 @@ async fn list_models_gemini(State(state): State<Arc<ProxyState>>, headers: Heade
             }
         },
     };
-    let models = discovered
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<Vec<_>>();
     Json(json!({
-        "models": models.iter().filter(|id|sandhi_core::model_id_is_path_safe(id)).map(|id| json!({
-            // Gemini names a model by its resource path, and its SDK strips the prefix back off.
-            "name": format!("models/{id}"),
-            "displayName": id,
-            "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
-        })).collect::<Vec<_>>(),
+        "sandhi_contract_version": 1,
+        "models": discovered
+            .iter()
+            .filter(|model| sandhi_core::model_id_is_path_safe(&model.id))
+            .map(|model| json!({
+                // Gemini names a model by its resource path, and the SDK strips the prefix back off.
+                "name": format!("models/{}", model.id),
+                "displayName": model.id,
+                "thinking": model.thinking.sanitized(),
+                "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+            }))
+            .collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod discovery_contract_tests {
+    use super::*;
+    use sandhi_core::{
+        chat::ThinkingCapabilityV1, EndpointFamilyV1, InMemorySink, ModelDescriptorV1,
+    };
+    use sandhi_providers::BackendBinding;
+    use tower::ServiceExt;
+
+    fn explicit_qwen() -> ProviderHandle {
+        let capability = ThinkingCapabilityV1::effort(
+            sandhi_core::chat::ThinkingEncodingV1::QwenOpenaiChat,
+            &["low", "medium", "xhigh"],
+            Some("medium"),
+        );
+        let descriptor: ModelDescriptorV1 = serde_json::from_value(json!({
+            "id":"qwen-fixture",
+            "thinking":capability
+        }))
+        .unwrap();
+        ProviderRuntime::new()
+            .openai_compat(
+                "qwen",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+                HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(BackendBinding {
+                id: "qwen".into(),
+                revision: 1,
+                provider: "qwen".into(),
+                credential_ref: "qwen:fixture".into(),
+                credential_generation: 1,
+                endpoint_family: EndpointFamilyV1::OpenaiChatCompletions,
+                endpoint_profile: "standard".into(),
+                models: vec![descriptor],
+                cache_policy: None,
+            })
+    }
+
+    fn state(provider: ProviderHandle, allowed: Option<Vec<&str>>) -> Arc<ProxyState> {
+        let keys = KeyStore::new();
+        keys.insert(VirtualKey {
+            id: "vk-discovery".into(),
+            upstream_ref: "echo".into(),
+            models: allowed.map(|models| models.into_iter().map(str::to_owned).collect()),
+            ..Default::default()
+        });
+        Arc::new(ProxyState::new(
+            keys,
+            ProxyLedger::in_memory(),
+            Arc::new(InMemorySink::new()),
+            HashMap::from([("echo".into(), provider)]),
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn discovery_contract_is_sanitized_and_exact_for_registered_backends() {
+        let response = build_app(state(
+            explicit_qwen(),
+            Some(vec!["qwen-fixture", "undeclared"]),
+        ))
+        .oneshot(
+            axum::http::Request::get("/v1/models")
+                .header("authorization", "Bearer vk-discovery")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["sandhi_contract_version"], 1);
+
+        let declared = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "qwen-fixture")
+            .unwrap();
+        assert_eq!(declared["thinking"]["supported"], true);
+        assert_eq!(
+            declared["thinking"]["effort"]["values"],
+            json!(["low", "medium", "xhigh"])
+        );
+        assert_eq!(declared["thinking"]["effort"]["default"], "medium");
+        assert!(declared["thinking"].get("encoding").is_none());
+
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+        let raw = bytes.as_ref();
+        assert!(!String::from_utf8_lossy(raw).contains("\"encoding\""));
+        assert!(!String::from_utf8_lossy(raw).contains("reasoning_effort_values"));
+    }
+
+    #[test]
+    fn host_catalog_discovery_reuses_exact_model_scoped_metadata() {
+        let provider = ProviderRuntime::new().openai_compat(
+            "moonshot",
+            "http://127.0.0.1:1/v1",
+            "synthetic",
+            HeaderMap::new(),
+            Some(0),
+            None,
+            None,
+            None,
+        );
+        let vk = VirtualKey {
+            id: "vk-discovery".into(),
+            upstream_ref: "echo".into(),
+            models: Some(vec!["kimi-k3".into()]),
+            ..Default::default()
+        };
+        let models = permitted_provider_models(&vk, &provider).unwrap();
+        let model = models.iter().find(|model| model.id == "kimi-k3").unwrap();
+        assert_eq!(
+            model.thinking.effort.as_ref().unwrap().values,
+            vec!["low".to_owned(), "high".to_owned(), "max".to_owned()]
+        );
+        assert!(model.thinking.encoding.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_discovered_capability_fails_rather_than_omitting_controls() {
+        let provider = explicit_qwen();
+        let binding = provider.backend_binding().unwrap().clone();
+        let mut models = binding.models;
+        models[0].thinking = ThinkingCapabilityV1::unsupported();
+        models[0].thinking.encoding = Some(sandhi_core::chat::ThinkingEncodingV1::QwenOpenaiChat);
+        let invalid = ProviderRuntime::new()
+            .openai_compat(
+                "qwen",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+                HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(BackendBinding { models, ..binding });
+        let response = build_app(state(invalid, None))
+            .oneshot(
+                axum::http::Request::get("/v1/models")
+                    .header("authorization", "Bearer vk-discovery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
 }
 
 /// Shared auth + upstream resolution for the discovery endpoints.
@@ -2364,38 +2565,81 @@ async fn resolve_for_discovery(
 /// With no allowlist the catalog is returned as-is. With an allowlist, entries the catalog does
 /// not know about are still listed — the catalog holds transport facts, not an authority on which
 /// models exist, so omitting an allowed-but-uncatalogued model would under-report what works.
-fn permitted_provider_models(vk: &VirtualKey, provider: &ProviderHandle) -> Vec<String> {
-    if let Some(binding) = provider.backend_binding() {
-        return binding
-            .models
-            .iter()
-            .filter(|model| vk.permits_model(&model.id))
-            .map(|model| model.id.clone())
-            .collect();
-    }
-    permitted_models(vk, provider.slug())
-}
-
-fn permitted_models(vk: &VirtualKey, slug: &str) -> Vec<String> {
-    let catalog: Vec<String> = sandhi_providers::provider_descriptor(slug)
-        .map(|d| d.models.into_iter().map(|m| m.id).collect())
-        .unwrap_or_default();
-    match vk.models.as_deref() {
-        None | Some([]) => catalog,
+fn permitted_provider_models(
+    vk: &VirtualKey,
+    provider: &ProviderHandle,
+) -> Result<Vec<routing::DiscoveredModel>, &'static str> {
+    let exact_backend = provider.backend_binding().is_some();
+    let descriptors: Vec<sandhi_core::ModelDescriptorV1> = if let Some(binding) =
+        provider.backend_binding()
+    {
+        binding.models.clone()
+    } else {
+        sandhi_providers::provider_descriptor(provider.slug())
+            .filter(|descriptor| descriptor.endpoint_family == provider.family().endpoint_family())
+            .map(|descriptor| descriptor.models)
+            .unwrap_or_default()
+    };
+    let permitted: Vec<sandhi_core::ModelDescriptorV1> = match vk.models.as_deref() {
+        None | Some([]) => descriptors,
         Some(allowed) => {
-            let mut out: Vec<String> = catalog
-                .iter()
-                .filter(|id| allowed.iter().any(|a| a.eq_ignore_ascii_case(id)))
-                .cloned()
+            let mut out: Vec<_> = descriptors
+                .into_iter()
+                .filter(|declared| {
+                    allowed.iter().any(|allowed| {
+                        allowed.eq_ignore_ascii_case(&declared.id)
+                            || declared
+                                .aliases
+                                .iter()
+                                .any(|alias| alias.eq_ignore_ascii_case(allowed))
+                    })
+                })
                 .collect();
-            for a in allowed {
-                if !out.iter().any(|id| id.eq_ignore_ascii_case(a)) {
-                    out.push(a.clone());
+            for allowed_id in allowed {
+                if exact_backend {
+                    continue;
+                }
+                let already_listed = out.iter().any(|declared| {
+                    declared.id.eq_ignore_ascii_case(allowed_id)
+                        || declared
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.eq_ignore_ascii_case(allowed_id))
+                });
+                if !already_listed {
+                    out.push(sandhi_core::ModelDescriptorV1 {
+                        id: allowed_id.clone(),
+                        aliases: Vec::new(),
+                        max_input_tokens: None,
+                        max_output_tokens: None,
+                        default_temperature: None,
+                        capabilities: Default::default(),
+                        thinking: sandhi_core::chat::ThinkingCapabilityV1::unsupported(),
+                        endpoint_url: None,
+                        extensions: std::collections::BTreeMap::new(),
+                    });
                 }
             }
             out
         }
-    }
+    };
+    permitted
+        .into_iter()
+        .map(|mut declared| {
+            let thinking = provider
+                .thinking_capability(&declared.id)
+                .map_err(|_| "provider model thinking capability is invalid")?;
+            if !thinking.semantic_equivalent(&declared.thinking) {
+                return Err("provider model thinking capability changed");
+            }
+            declared.thinking = thinking;
+            Ok(routing::DiscoveredModel {
+                id: declared.id.clone(),
+                thinking: declared.thinking.sanitized(),
+                target_models: vec![(vk.upstream_ref.clone(), declared.id)],
+            })
+        })
+        .collect()
 }
 
 /// `POST /{v1|v1beta}/models/{model}:{generateContent|streamGenerateContent}`.
@@ -3221,6 +3465,8 @@ impl RequestAccounting {
         // Both linked leases belong to the durable execution. The canonical
         // settlement transaction charges both or neither; refusal/cancellation
         // leaves unknown liability held instead of invoking legacy settle(0).
+        let execution_id = owned.execution.intent().execution_id.clone();
+        let attempt_id = owned.execution.attempt_id().map(str::to_string);
         let pending = owned
             .execution
             .into_settlement(usage.clone())
@@ -3268,7 +3514,13 @@ impl RequestAccounting {
                     )) => failure.diagnostic_code(),
                     _ => "missing_or_interrupted_result",
                 };
-                tracing::warn!(request_id = %self.request_id, reason, "tracked terminal settlement unresolved");
+                tracing::warn!(
+                    request_id = %self.request_id,
+                    execution_id = %execution_id,
+                    attempt_id = attempt_id.as_deref().unwrap_or("unavailable"),
+                    reason,
+                    "tracked_terminal_settlement_unresolved"
+                );
                 false
             }
         }

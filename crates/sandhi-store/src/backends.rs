@@ -97,6 +97,16 @@ impl BackendDefinition {
                     "backend model aliases, endpoint overrides and extensions are not supported",
                 );
             }
+            if model.thinking.validate().is_err() {
+                return Err("backend model thinking capability is invalid");
+            }
+            if model
+                .thinking
+                .encoding
+                .is_some_and(|encoding| encoding.endpoint_family() != self.endpoint.endpoint_family)
+            {
+                return Err("backend model thinking encoding does not match its endpoint family");
+            }
         }
         if let Some(policy) = &self.cache_policy {
             use sandhi_core::{
@@ -463,10 +473,78 @@ fn get_record(conn: &Connection, id: &str) -> Result<Option<BackendRecord>, Back
 }
 
 #[cfg(test)]
+mod thinking_validation_tests {
+    use super::*;
+
+    fn definition(models: serde_json::Value) -> BackendDefinition {
+        serde_json::from_value(serde_json::json!({
+            "id":"source",
+            "provider":"vendor-one",
+            "credential_ref":"vendor:fixture",
+            "endpoint":{"endpoint_family":"openai_chat_completions"},
+            "models":models
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn backend_models_require_valid_model_scoped_thinking_metadata() {
+        assert!(
+            serde_json::from_value::<BackendDefinition>(serde_json::json!({
+                "id":"source",
+                "provider":"vendor-one",
+                "credential_ref":"vendor:fixture",
+                "endpoint":{"endpoint_family":"openai_chat_completions"},
+                "models":[{"id":"fixture"}]
+            }))
+            .is_err(),
+            "thinking capability is mandatory, not inferred"
+        );
+
+        let invalid = [
+            serde_json::json!({"supported":false,"encoding":"openai_chat"}),
+            serde_json::json!({"supported":true}),
+            serde_json::json!({"supported":true,"encoding":"openai_chat"}),
+            serde_json::json!({"supported":true,"encoding":"openai_chat","effort":{"values":[]}}),
+            serde_json::json!({"supported":true,"encoding":"openai_chat","budget_tokens":{"min":0,"max":4096}}),
+            serde_json::json!({"supported":true,"encoding":"anthropic_messages","effort":{"values":["low"]}}),
+        ];
+        for thinking in invalid {
+            let model = definition(serde_json::json!([{"id":"fixture","thinking":thinking}]));
+            assert_eq!(
+                model.validate(),
+                Err("backend model thinking capability is invalid")
+            );
+        }
+    }
+
+    #[test]
+    fn backend_models_reject_legacy_thinking_extensions() {
+        let parsed = definition(serde_json::json!([{
+            "id":"fixture",
+            "thinking":{"supported":false},
+            "extensions":{"reasoning_effort_values":["low"]}
+        }]));
+        assert_eq!(
+            parsed.validate(),
+            Err("backend model aliases, endpoint overrides and extensions are not supported")
+        );
+        let legacy: Result<BackendDefinition, _> = serde_json::from_value(serde_json::json!({
+            "id":"source",
+            "provider":"vendor-one",
+            "credential_ref":"vendor:fixture",
+            "endpoint":{"endpoint_family":"openai_chat_completions"},
+            "models":[{"id":"fixture","thinking":{"supported":false,"reasoning_effort_values":["low"]}}]
+        }));
+        assert!(legacy.is_err());
+    }
+}
+
+#[cfg(test)]
 mod namespace_tests {
     use super::*;
     fn definition(family: EndpointFamilyV1) -> BackendDefinition {
-        serde_json::from_value(serde_json::json!({"id":"source","provider":"vendor-one","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":family},"models":[{"id":"fixture"}]})).unwrap()
+        serde_json::from_value(serde_json::json!({"id":"source","provider":"vendor-one","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":family},"models":[{"id":"fixture","thinking":{"supported":false}}]})).unwrap()
     }
     fn legacy_connection(path: &str, definition: &BackendDefinition) -> Connection {
         let conn = Connection::open(path).unwrap();
@@ -567,7 +645,7 @@ mod namespace_tests {
             panic!("initial spend")
         };
         ledger.settle_durable(spend.id, 5).unwrap();
-        let original:ExecutionContext=serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"translation","upstream_ref":"backend/source","upstream_budget_scope":"upstream:anthropic","requested_model":"fixture","actual_model":"fixture","provider":"vendor-one","endpoint_family":"anthropic_messages","transport_binding_sha256":"a".repeat(64),"backend":{"id":"source","revision":1,"credential_ref":"vendor:fixture","credential_generation":1,"endpoint_profile":"standard"},"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
+        let original:ExecutionContext=serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"translation","upstream_ref":"backend/source","upstream_budget_scope":"upstream:anthropic","requested_model":"fixture","actual_model":"fixture","provider":"vendor-one","endpoint_family":"anthropic_messages","transport":{"upstream_host":null,"policy":{"buffered":{"duration_ms":30000}}},"transport_binding_sha256":"a".repeat(64),"backend":{"id":"source","revision":1,"credential_ref":"vendor:fixture","credential_generation":1,"endpoint_profile":"standard"},"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
         let IntentAdmission::Admitted(intent) = ledger
             .reserve_paired_contextual_durable(
                 "team",
@@ -603,6 +681,15 @@ mod namespace_tests {
                 outcome: TransportOutcome::Success,
                 provider_status: Some(200),
                 provider_request_id: None,
+                progress: crate::ledger::evidence::TransportProgress {
+                    response_headers_received: Some(true),
+                    stream_event_received: Some(false),
+                    first_stream_event_at_ms: None,
+                    time_to_first_stream_event_ms: None,
+                    timeout_phase: None,
+                    error_class: crate::ledger::evidence::TransportErrorClass::None,
+                    error_subtype: None,
+                },
             }),
             dropped_observations: 0,
             invalid: false,
@@ -699,7 +786,7 @@ mod namespace_tests {
         );
         assert!(matches!(
             ledger.settle_terminal_durable("team", &intent.execution_id),
-            Err(EvidenceError::UnresolvedObservation)
+            Err(EvidenceError::UnresolvedObservation(_))
         ));
         // A genuinely qualified old-v1 execution recovers through its original
         // namespace after the diagnostic identity/family update; no inference occurs.

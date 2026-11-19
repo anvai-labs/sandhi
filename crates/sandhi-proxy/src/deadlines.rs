@@ -270,6 +270,14 @@ impl StreamLimits {
         self.body_ms
     }
 
+    pub fn setup_ms(self) -> u64 {
+        self.setup_ms
+    }
+
+    pub fn idle_ms(self) -> u64 {
+        self.idle_ms
+    }
+
     fn validate(self, ceiling_ms: u64) -> Result<(), String> {
         if self.setup_ms == 0
             || self.idle_ms == 0
@@ -293,9 +301,10 @@ impl StreamLimits {
             .expect("validated streaming policy")
     }
     pub fn transport(self) -> sandhi_providers::StreamingDeadline {
-        sandhi_providers::StreamingDeadline::new(
+        sandhi_providers::StreamingDeadline::new_with_body(
             Duration::from_millis(self.setup_ms),
             Duration::from_millis(self.idle_ms),
+            Duration::from_millis(self.body_ms),
         )
     }
 }

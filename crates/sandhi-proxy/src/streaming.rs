@@ -129,7 +129,14 @@ where
             };
             tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(deadline) => Err(Failure::Deadline),
+                _ = tokio::time::sleep_until(deadline) => {
+                    if let Some(owned) = accounting.owned.as_ref() {
+                        owned.attempts.context.mark_timeout_phase(
+                            sandhi_providers::TimeoutPhase::Body,
+                        );
+                    }
+                    Err(Failure::Deadline)
+                }
                 _ = tx.closed() => Err(Failure::Disconnected),
                 _ = grace => Err(Failure::Shutdown),
                 result = async {

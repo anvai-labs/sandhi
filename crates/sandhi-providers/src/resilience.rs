@@ -17,7 +17,7 @@ use tokio::time::sleep;
 
 use crate::{
     AttemptContext, ByteStream, Provider, ProviderError, ProviderRequest, ProviderResponse,
-    StreamChunk,
+    StreamChunk, TimeoutError, TimeoutPhase,
 };
 
 mod qualified;
@@ -190,13 +190,14 @@ impl ResilientProvider {
 
 /// Run one attempt under a bound, mapping elapsed → `ProviderError::Timeout(bound)`.
 async fn bounded_until<T>(
+    phase: TimeoutPhase,
     bound: Duration,
     deadline: tokio::time::Instant,
     attempt_context: Option<&AttemptContext>,
     fut: impl Future<Output = Result<T, ProviderError>>,
 ) -> Result<T, ProviderError> {
     if deadline <= tokio::time::Instant::now() {
-        return Err(ProviderError::Timeout(bound));
+        return Err(ProviderError::Timeout(TimeoutError::new(phase, bound)));
     }
     match select(Box::pin(fut), Box::pin(tokio::time::sleep_until(deadline))).await {
         Either::Left((result, _timeout)) => result,
@@ -204,10 +205,10 @@ async fn bounded_until<T>(
             // Mark before the in-flight adapter future is dropped so its transport guard emits
             // timeout, not indistinguishable caller cancellation.
             if let Some(context) = attempt_context {
-                context.mark_timeout();
+                context.mark_timeout_phase(phase);
             }
             drop(in_flight);
-            Err(ProviderError::Timeout(bound))
+            Err(ProviderError::Timeout(TimeoutError::new(phase, bound)))
         }
     }
 }
@@ -259,13 +260,16 @@ impl Stream for IdleTimeout {
             Poll::Pending => match self.sleep.as_mut().poll(cx) {
                 Poll::Ready(()) => {
                     if let Some(context) = self.attempt_context.as_ref() {
-                        context.mark_timeout();
+                        context.mark_timeout_phase(TimeoutPhase::Idle);
                     }
                     // Drop the observed inner stream now, while the timeout marker is visible,
                     // so the terminal observation is not delayed until the caller drops us.
                     self.inner.take();
                     self.expired = true;
-                    Poll::Ready(Some(Err(ProviderError::Timeout(self.idle))))
+                    Poll::Ready(Some(Err(ProviderError::Timeout(TimeoutError::new(
+                        TimeoutPhase::Idle,
+                        self.idle,
+                    )))))
                 }
                 Poll::Pending => Poll::Pending,
             },
@@ -325,6 +329,7 @@ impl Provider for ResilientProvider {
             let bound =
                 deadline.unwrap_or_else(|| crate::BufferedDeadline::new(self.timeouts.complete));
             match bounded_until(
+                TimeoutPhase::Unknown,
                 bound.timeout,
                 bound.at,
                 attempt_context.as_ref(),
@@ -344,7 +349,10 @@ impl Provider for ResilientProvider {
                         if let Some(deadline) = deadline {
                             if tokio::time::timeout_at(deadline.at, wait).await.is_err() {
                                 self.breaker.record_failure();
-                                return Err(ProviderError::Timeout(deadline.timeout));
+                                return Err(ProviderError::Timeout(TimeoutError::new(
+                                    TimeoutPhase::Unknown,
+                                    deadline.timeout,
+                                )));
                             }
                         } else {
                             wait.await;
@@ -375,6 +383,7 @@ impl Provider for ResilientProvider {
                 .map(|policy| policy.setup)
                 .unwrap_or_else(|| crate::BufferedDeadline::new(self.timeouts.stream_setup));
             match bounded_until(
+                TimeoutPhase::Setup,
                 setup.timeout,
                 setup.at,
                 attempt_context.as_ref(),
@@ -407,7 +416,10 @@ impl Provider for ResilientProvider {
                                 .is_err()
                             {
                                 self.breaker.record_failure();
-                                return Err(ProviderError::Timeout(deadline.setup.timeout));
+                                return Err(ProviderError::Timeout(TimeoutError::new(
+                                    TimeoutPhase::Setup,
+                                    deadline.setup.timeout,
+                                )));
                             }
                         } else {
                             wait.await;
@@ -540,8 +552,9 @@ mod tests {
     fn timeout_error_is_retryable() {
         // Classification and policy are separate: a timeout may succeed on replay, but the
         // zero-retry default still refuses to make that replay bet implicitly.
-        assert!(is_retryable(&ProviderError::Timeout(Duration::from_secs(
-            30
+        assert!(is_retryable(&ProviderError::Timeout(TimeoutError::new(
+            TimeoutPhase::Unknown,
+            Duration::from_secs(30)
         ))));
     }
 
@@ -708,7 +721,7 @@ mod tests {
             crate::StreamingDeadline::new(Duration::from_secs(1), Duration::from_secs(1));
         let start = tokio::time::Instant::now();
         assert!(
-            matches!(deadline.scope(provider.stream(req())).await,Err(ProviderError::Timeout(d)) if d==Duration::from_secs(1))
+            matches!(deadline.scope(provider.stream(req())).await,Err(ProviderError::Timeout(timeout)) if timeout.bound==Duration::from_secs(1))
         );
         assert!(start.elapsed() <= Duration::from_secs(1));
         assert_eq!(physical.calls(), 1);
@@ -872,6 +885,8 @@ mod tests {
             observations[1].phase,
             AttemptPhase::Terminal {
                 outcome: AttemptOutcome::Timeout,
+                timeout_phase: Some(crate::TimeoutPhase::Setup),
+                error_subtype: Some(crate::TerminalErrorSubtype::Setup),
                 ..
             }
         ));
@@ -1198,7 +1213,8 @@ mod tests {
             };
             assert!(matches!(
                 s.next().await,
-                Some(Err(ProviderError::Timeout(duration))) if duration == Duration::from_millis(if scoped {5} else {20})
+                Some(Err(ProviderError::Timeout(timeout))) if timeout.phase == crate::TimeoutPhase::Idle
+                    && timeout.bound == Duration::from_millis(if scoped {5} else {20})
             ));
             assert_eq!(
                 one.1.load(Ordering::Relaxed),

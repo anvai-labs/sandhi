@@ -130,7 +130,10 @@ mod drain_errors {
                     let raw: crate::raw::RawChunkStream =
                         Box::pin(futures_util::stream::iter(vec![
                             Ok(wire),
-                            Err(ProviderError::Timeout(std::time::Duration::from_millis(10))),
+                            Err(ProviderError::Timeout(crate::TimeoutError::new(
+                                crate::TimeoutPhase::Idle,
+                                std::time::Duration::from_millis(10),
+                            ))),
                         ]));
                     Ok((raw, None))
                 },
