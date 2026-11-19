@@ -1105,7 +1105,10 @@ mod binding_tests {
             credential_generation: 1,
             endpoint_family: Family::OpenaiResponses,
             endpoint_profile: "standard".into(),
-            models: vec![serde_json::from_value(json!({"id":"model"})).unwrap()],
+            models: vec![serde_json::from_value(
+                json!({"id":"model","thinking":{"supported":false}}),
+            )
+            .unwrap()],
             cache_policy: None,
         })
     }

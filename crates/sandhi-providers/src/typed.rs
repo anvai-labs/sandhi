@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, LatencySource, MessageContent, ProviderErrorV1, ToolCallV1,
-    ToolChoiceMode, ToolChoiceV1, UsageCompleteness, UsageV2,
+    ContentPart, FinishReasonV1, LatencySource, MessageContent, ProviderErrorV1,
+    ThinkingEncodingV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, UsageCompleteness, UsageV2,
 };
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, pin::Pin, sync::Arc};
@@ -395,6 +395,8 @@ pub struct ProviderHandle {
     raw: Option<crate::raw::RawForwarder>,
     /// Built-in transport supports setup/idle deadlines independently of raw forwarding.
     streaming_deadline_capable: bool,
+    /// Sanitized configured host retained even when raw forwarding is fenced off.
+    diagnostic_upstream_host: Option<String>,
     credential_expires_at: Option<u64>,
     // Private transport identity. Never serialize this standalone credential-derived
     // digest, log it or expose it through inventory. Routing/cache hashes wrap it.
@@ -423,6 +425,7 @@ impl ProviderHandle {
             source_convention: None,
             raw: None,
             streaming_deadline_capable: false,
+            diagnostic_upstream_host: None,
             credential_expires_at: None,
             credential_identity: None,
             credential_account_fenced: false,
@@ -535,6 +538,12 @@ impl ProviderHandle {
     /// (same-family transparent plane) or route through `ChatRequestV1` translation
     /// (cross-family plane). A custom-slug row must resolve by CONFIG, not by
     /// [`ProviderFamily::for_slug`].
+    /// Non-secret configured transport host for bounded terminal diagnostics.
+    #[must_use]
+    pub fn diagnostic_upstream_host(&self) -> Option<String> {
+        self.diagnostic_upstream_host.clone()
+    }
+
     #[must_use]
     pub fn family(&self) -> ProviderFamily {
         self.family
@@ -548,10 +557,11 @@ impl ProviderHandle {
     }
 
     fn observed_context(&self, context: crate::AttemptContext) -> crate::AttemptContext {
-        match self.provider_identity.as_deref() {
+        let context = match self.provider_identity.as_deref() {
             Some(identity) => context.with_configured_provider(identity),
             None => context,
-        }
+        };
+        context.with_configured_upstream_host(self.diagnostic_upstream_host().as_deref())
     }
 
     /// Configured provider identity for diagnostics; never a budget namespace.
@@ -627,6 +637,52 @@ impl ProviderHandle {
 
     pub fn backend_binding(&self) -> Option<&BackendBinding> {
         self.backend_binding.as_deref()
+    }
+
+    /// Non-secret model metadata for admission/discovery. Explicit backend
+    /// declarations are authoritative; host-owned handles fall back to their
+    /// curated provider catalog. Unknown models have no catalog facts.
+    #[must_use]
+    pub fn model_descriptor(&self, model: &str) -> Option<sandhi_core::ModelDescriptorV1> {
+        self.backend_binding()
+            .and_then(|binding| {
+                binding.models.iter().find(|declared| {
+                    declared.id.eq_ignore_ascii_case(model)
+                        || declared
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.eq_ignore_ascii_case(model))
+                })
+            })
+            .cloned()
+            .or_else(|| {
+                crate::catalog::provider_descriptor(self.slug())
+                    .filter(|provider| provider.endpoint_family == self.family().endpoint_family())
+                    .and_then(|provider| {
+                        provider.models.into_iter().find(|declared| {
+                            declared.id.eq_ignore_ascii_case(model)
+                                || declared
+                                    .aliases
+                                    .iter()
+                                    .any(|alias| alias.eq_ignore_ascii_case(model))
+                        })
+                    })
+            })
+    }
+
+    /// Validated, non-secret thinking facts for an exact model.
+    pub fn thinking_capability(
+        &self,
+        model: &str,
+    ) -> Result<sandhi_core::chat::ThinkingCapabilityV1, ProviderError> {
+        let capability = self.model_descriptor(model).map_or_else(
+            sandhi_core::chat::ThinkingCapabilityV1::unsupported,
+            |descriptor| descriptor.thinking,
+        );
+        capability
+            .validate()
+            .map_err(ProviderError::InvalidRequest)?;
+        Ok(capability)
     }
 
     pub fn permits_model(&self, model: &str) -> bool {
@@ -949,6 +1005,23 @@ fn private_credential_identity(config: &ProviderTransportConfig) -> String {
     .expect("serializable transport identity")
 }
 
+fn configured_upstream_host(base_url: &str) -> Option<String> {
+    let mut host = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))?;
+    if host.starts_with('[') && host.ends_with(']') {
+        host = host[1..host.len() - 1].to_string();
+    }
+    if host.contains(':') {
+        return host.parse::<std::net::Ipv6Addr>().is_ok().then_some(host);
+    }
+    (host.len() <= 255
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
+    .then_some(host)
+}
+
 fn account_fenced_config(config: &ProviderTransportConfig) -> bool {
     config.openai_responses_profile == OpenAiResponsesProfile::ChatGptCodex
         && config
@@ -1026,6 +1099,7 @@ impl ProviderRuntime {
             _ => unreachable!("gateway constructor validates dialect"),
         };
         let mut handle = ProviderHandle::new(inner).with_family(config.family);
+        handle.diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         handle.peer_role = role;
         handle
     }
@@ -1169,6 +1243,7 @@ impl ProviderRuntime {
         let raw_forwarder =
             Some(build_raw_forwarder(&config).with_openai_stream_usage_profile(profile));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport_with_openai_stream_usage_profile(config, profile);
         ProviderHandle {
@@ -1181,6 +1256,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1218,6 +1294,7 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1234,6 +1311,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1273,6 +1351,7 @@ impl ProviderRuntime {
         // Subscription payloads must always pass through the constrained codec.
         let raw_forwarder: Option<crate::raw::RawForwarder> = None;
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1289,6 +1368,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1347,6 +1427,7 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1362,6 +1443,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1391,6 +1473,7 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1403,6 +1486,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1434,6 +1518,7 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1446,6 +1531,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1475,6 +1561,7 @@ impl ProviderRuntime {
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
         let raw_forwarder = Some(build_raw_forwarder(&config));
         let credential_identity = Some(private_credential_identity(&config));
+        let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
         let raw = self.transport(config);
         ProviderHandle {
@@ -1487,6 +1574,7 @@ impl ProviderRuntime {
                 .and_then(|raw| raw.usage_convention().ok()),
             raw: raw_forwarder,
             streaming_deadline_capable: true,
+            diagnostic_upstream_host,
             credential_expires_at: None,
             backend_binding: None,
             credential_identity,
@@ -1708,18 +1796,8 @@ impl TypedOpenAiCompat {
             // Kimi K3's sampling contract requires temperature=1. The host-facing default is
             // intentionally normalized here so every FFI/proxy caller gets identical behavior.
             request.temperature = Some(1.0);
-            if let Some(effort) = request
-                .extensions
-                .get("openai")
-                .and_then(|value| value.get("reasoning_effort"))
-                .and_then(Value::as_str)
-            {
-                if !matches!(effort, "low" | "high" | "max") {
-                    return Err(ProviderError::InvalidRequest(format!(
-                        "Kimi K3 reasoning_effort must be low, high, or max; got {effort}"
-                    )));
-                }
-            }
+            // Exact values are admitted by the handle's model-scoped capability.
+            // This adapter owns only the unrelated Kimi sampling constraint.
         }
         Ok(())
     }
@@ -1811,23 +1889,85 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
     if let Some(format) = &request.response_format {
         body.insert("response_format".into(), format.clone());
     }
-    // W3d/G7: typed fields override any extensions-carried duplicate (inserted
-    // after the extensions clone). OpenAI chat / ZAI take reasoning_effort
-    // top-level and thinking as `{type, budget_tokens}`.
-    insert_optional(
-        &mut body,
+    // All vendor spellings were lifted into the semantic object at ingress. Remove
+    // their native copies before restoring only the encoding admitted for this
+    // provider dialect, so an extension duplicate can neither bypass nor fork control.
+    for key in [
         "reasoning_effort",
-        request.reasoning_effort.clone(),
-    );
-    if let Some(thinking) = &request.thinking {
-        body.insert("thinking".into(), encode_openai_thinking(thinking));
+        "thinking",
+        "enable_thinking",
+        "thinking_budget",
+    ] {
+        body.remove(key);
+    }
+    if let Some(thinking) = admitted_openai_thinking(request)? {
+        match request
+            .compiled_thinking
+            .expect("admitted thinking carries an encoding")
+        {
+            ThinkingEncodingV1::OpenaiChat => {
+                let Some(effort) = &thinking.effort else {
+                    return Err(ProviderError::InvalidRequest(
+                        "OpenAI chat thinking supports effort only".into(),
+                    ));
+                };
+                if !thinking.enabled || thinking.budget_tokens.is_some() {
+                    return Err(ProviderError::InvalidRequest(
+                        "OpenAI chat thinking supports enabled effort only".into(),
+                    ));
+                }
+                body.insert("reasoning_effort".into(), Value::String(effort.clone()));
+            }
+            ThinkingEncodingV1::QwenOpenaiChat => {
+                if !thinking.enabled {
+                    body.insert("enable_thinking".into(), Value::Bool(false));
+                }
+                if let Some(effort) = &thinking.effort {
+                    body.insert("reasoning_effort".into(), Value::String(effort.clone()));
+                }
+                if let Some(budget) = thinking.budget_tokens {
+                    body.insert("thinking_budget".into(), json!(budget));
+                }
+            }
+            ThinkingEncodingV1::ZaiOpenaiChat => {
+                if thinking.effort.is_some() {
+                    return Err(ProviderError::InvalidRequest(
+                        "ZAI thinking does not support semantic effort".into(),
+                    ));
+                }
+                body.insert("thinking".into(), encode_openai_thinking(thinking));
+            }
+            encoding => {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "thinking encoding {encoding:?} is not an OpenAI chat encoding"
+                )));
+            }
+        }
     }
     Ok(Value::Object(body))
 }
 
-/// OpenAI-compat / ZAI extended-thinking shape: `{type: enabled|disabled,
-/// budget_tokens?}`.
-pub(crate) fn encode_openai_thinking(thinking: &sandhi_core::chat::ThinkingV1) -> Value {
+fn admitted_openai_thinking(
+    request: &ChatRequestV1,
+) -> Result<Option<&sandhi_core::chat::ThinkingRequestV1>, ProviderError> {
+    let Some(thinking) = &request.thinking else {
+        if request.compiled_thinking.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "compiled thinking has no semantic request".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    if request.compiled_thinking.is_none() {
+        return Err(ProviderError::InvalidRequest(
+            "thinking control was not admitted by the provider handle".into(),
+        ));
+    }
+    Ok(Some(thinking))
+}
+
+/// ZAI extended-thinking shape: `{type: enabled|disabled, budget_tokens?}`.
+pub(crate) fn encode_openai_thinking(thinking: &sandhi_core::chat::ThinkingRequestV1) -> Value {
     let mut obj = Map::new();
     obj.insert(
         "type".into(),
@@ -2646,54 +2786,64 @@ mod tests {
         assert_eq!(body["top_p"], 0.8);
     }
 
-    // W3d/G7: promoted typed fields (reasoning_effort, thinking).
-    fn w3d_request(extra: Value) -> ChatRequestV1 {
-        let mut base = json!({
+    // v2 semantic thinking tests. Unit codecs verify qualified restoration only;
+    // model-scoped admission is separately pinned at the provider-handle boundary.
+    fn admitted_thinking_request(thinking: Value, encoding: ThinkingEncodingV1) -> ChatRequestV1 {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
             "model": "m",
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        base.as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        serde_json::from_value(base).unwrap()
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": thinking
+        }))
+        .unwrap();
+        ChatRequestV1 {
+            compiled_thinking: Some(encoding),
+            ..request
+        }
     }
 
     #[test]
-    fn openai_chat_encodes_reasoning_effort_and_thinking() {
-        let body = encode_openai_request(&w3d_request(json!({
-            "reasoning_effort": "high",
-            "thinking": {"enabled": true, "budget_tokens": 2048}
-        })))
+    fn openai_chat_encodes_only_admitted_effort() {
+        let body = encode_openai_request(&admitted_thinking_request(
+            json!({"enabled": true, "effort": "high"}),
+            ThinkingEncodingV1::OpenaiChat,
+        ))
         .unwrap();
         assert_eq!(body["reasoning_effort"], "high");
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
-    fn openai_chat_disabled_thinking_encodes_disabled() {
-        let body = encode_openai_request(&w3d_request(json!({
-            "thinking": {"enabled": false}
-        })))
+    fn zai_encodes_disabled_native_thinking() {
+        let body = encode_openai_request(&admitted_thinking_request(
+            json!({"enabled": false}),
+            ThinkingEncodingV1::ZaiOpenaiChat,
+        ))
         .unwrap();
-        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body["thinking"].get("budget_tokens").is_none());
     }
 
     #[test]
-    fn typed_reasoning_effort_overrides_extensions_duplicate() {
-        // Precedence: the typed field wins over a stale extensions copy.
-        let body = encode_openai_request(&w3d_request(json!({
-            "reasoning_effort": "high",
-            "extensions": {"openai": {"reasoning_effort": "low"}}
-        })))
-        .unwrap();
+    fn semantic_effort_replaces_extensions_duplicate() {
+        let mut request = admitted_thinking_request(
+            json!({"enabled": true, "effort": "high"}),
+            ThinkingEncodingV1::OpenaiChat,
+        );
+        request
+            .extensions
+            .insert("openai".into(), json!({"reasoning_effort":"low"}));
+        let body = encode_openai_request(&request).unwrap();
         assert_eq!(body["reasoning_effort"], "high");
     }
 
     #[test]
     fn absent_w3d_fields_stay_off_the_wire() {
-        let body = encode_openai_request(&w3d_request(json!({}))).unwrap();
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let body = encode_openai_request(&request).unwrap();
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("thinking").is_none());
     }
@@ -2712,11 +2862,6 @@ mod tests {
         request.temperature = Some(0.7);
         provider.apply_constraints(&mut request).unwrap();
         assert_eq!(request.temperature, Some(1.0));
-
-        request
-            .extensions
-            .insert("openai".into(), json!({"reasoning_effort":"medium"}));
-        assert!(provider.apply_constraints(&mut request).is_err());
     }
 
     #[test]
@@ -2946,6 +3091,24 @@ mod tests {
             escape_hatch.raw_forwarder().is_none(),
             "an escape-hatch handle has no transport config to forward with"
         );
+    }
+
+    #[test]
+    fn credential_expiry_preserves_ipv6_diagnostic_host() {
+        let provider = ProviderRuntime::new()
+            .openai_responses(
+                "openai",
+                "http://[::1]:18444/v1",
+                "synthetic",
+                HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_credential_expiry(4_000_000_000);
+        assert!(provider.raw_forwarder().is_none());
+        assert_eq!(provider.diagnostic_upstream_host().as_deref(), Some("::1"));
     }
 
     /// TD-0022 D3 follow-up: the STATIC (handle-construction) headers reach every family
@@ -3886,7 +4049,7 @@ mod tests {
         assert!(matches!(
             err,
             crate::ProviderError::Timeout(d)
-                if d == std::time::Duration::from_secs_f64(0.05)
+                if d.bound == std::time::Duration::from_secs_f64(0.05)
         ));
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }

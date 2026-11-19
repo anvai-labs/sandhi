@@ -19,6 +19,33 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.22.0] — Source candidate, 2026-11-19
+
+- Add one semantic chat thinking control with exact model-scoped capability facts. Admitted
+  effort values and token-budget ranges are model-specific, capability encoding is closed to
+  qualified transports, aliases and `effort: "none"` are rejected, and absent capabilities fail
+  closed rather than falling back to provider-name or model-prefix inference.
+- Keep all four public SDK ingress dialects stable. Each dialect still accepts its native
+  thinking spelling and Sandhi restores the exact qualified source spelling on egress. Removed
+  neutral pre-GA controls such as top-level `reasoning_effort` now fail loudly instead of being
+  ignored; chat contract version remains `1` for the clean pre-GA/GA baseline.
+- Expose sanitized thinking facts with model discovery while continuing to omit backend names,
+  URLs, credential references and secrets. Registered backends are exact model authority and no
+  longer synthesize undeclared discovery entries.
+- Freeze effective setup/idle/body transport policy in execution context, record upstream host,
+  response-header and first-stream progress, TTFT when observed, exact timeout phase and safe
+  error classification, including the effective buffered duration. Advertised model limits now
+  match the limits enforced on transparent and raw provider transports, including the absolute
+  stream body budget.
+- Retain zero-usage provider failures as explicit unresolved tombstones with stable
+  `transport_evidence_incomplete` or `provider_usage_unavailable` reasons. Reservations remain
+  held, no automatic replay or provider substitution is authorized, and `/readyz` reports
+  `durable_accounting_recovery_unresolved` until durable recovery completes.
+- Add an offline pre-GA ledger rebuild helper. It leaves the source database untouched, creates
+  a consistent SQLite copy, transforms old context/attempt evidence into the clean version-1
+  shape, records unknown historical streaming limits as unavailable, and writes a SHA-256
+  manifest for the rebuilt copy. Deployment is an all-writers-stopped atomic swap.
+
 ## [0.21.0] — Source candidate, 2026-11-17
 
 - Add native SentinelPass SP-1 exact-entry credential retrieval. Vault metadata stores only

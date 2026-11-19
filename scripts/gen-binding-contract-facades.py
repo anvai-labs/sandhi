@@ -165,6 +165,7 @@ class RequestMetadataV1(TypedDict, total=False):
     route: str
 class ThinkingV1(TypedDict):
     enabled: bool
+    effort: NotRequired[str]
     budget_tokens: NotRequired[int]
 NativeInputFeatureV1 = Literal["opaque_state", "resource_reference", "unsupported_content", "native_control"]
 class NativeInputV1(TypedDict):
@@ -188,7 +189,6 @@ class ChatRequestV1(TypedDict):
     response_format: NotRequired[JsonValue]
     seed: NotRequired[int]
     metadata: NotRequired[RequestMetadataV1]
-    reasoning_effort: NotRequired[str]
     thinking: NotRequired[ThinkingV1]
     include_native_response: NotRequired[bool]
     # Default false. Native SSE attachments plus canonical events, never concatenate both.
@@ -262,7 +262,51 @@ class NativeStreamFrameV1(TypedDict):
     endpoint_family: str
     sse: str
 ChatStreamEventV1 = dict[str, JsonValue]
-ProviderDescriptorV1 = dict[str, JsonValue]
+class ThinkingEffortCapabilityV1(TypedDict):
+    values: list[str]
+    default: NotRequired[str]
+class ThinkingBudgetCapabilityV1(TypedDict):
+    min: int
+    max: int
+class ThinkingCapabilityV1(TypedDict):
+    supported: bool
+    encoding: NotRequired[Literal[
+        "openai_chat", "openai_responses", "anthropic_messages",
+        "gemini_generate_content", "qwen_openai_chat", "zai_openai_chat"
+    ]]
+    can_disable: NotRequired[bool]
+    effort: NotRequired[ThinkingEffortCapabilityV1]
+    budget_tokens: NotRequired[ThinkingBudgetCapabilityV1]
+    allow_effort_and_budget: NotRequired[bool]
+class ProviderCapabilitiesV1(TypedDict, total=False):
+    streaming: bool
+    tools: bool
+    parallel_tool_calls: bool
+    vision: bool
+    reasoning: bool
+    structured_output: bool
+    audio_input: bool
+    file_input: bool
+    prompt_cache_usage: bool
+class ModelDescriptorV1(TypedDict):
+    id: str
+    aliases: NotRequired[list[str]]
+    max_input_tokens: NotRequired[int]
+    max_output_tokens: NotRequired[int]
+    default_temperature: NotRequired[float]
+    capabilities: NotRequired[ProviderCapabilitiesV1]
+    thinking: NotRequired[ThinkingCapabilityV1]
+    endpoint_url: NotRequired[str]
+    extensions: NotRequired[dict[str, JsonValue]]
+class ProviderDescriptorV1(TypedDict):
+    schema_version: Literal["1"]
+    slug: str
+    aliases: NotRequired[list[str]]
+    endpoint_family: str
+    base_url: str
+    capabilities: NotRequired[ProviderCapabilitiesV1]
+    models: NotRequired[list[ModelDescriptorV1]]
+    extensions: NotRequired[dict[str, JsonValue]]
 
 class TypedEventStream(AsyncIterator[str]):
     async def __anext__(self) -> str: ...
@@ -341,7 +385,7 @@ export type ChatMessageV1 =
   | {{ role: "function"; content: MessageContent; name: string }}
 export interface ToolDefinitionV1 {{ name: string; parameters: JsonValue; description?: string; strict?: boolean }}
 export interface RequestMetadataV1 {{ session_id?: string; virtual_key_id?: string; subject_id?: string; group_id?: string; route?: string }}
-export interface ThinkingV1 {{ enabled: boolean; budget_tokens?: number }}
+export interface ThinkingV1 {{ enabled: boolean; effort?: string; budget_tokens?: number }}
 export type NativeInputFeatureV1 = "opaque_state" | "resource_reference" | "unsupported_content" | "native_control"
 export interface NativeInputV1 {{
   endpoint_family: "openai_chat_completions" | "openai_responses" | "anthropic_messages" | "gemini_generate_content" | "cohere_chat" | "ollama_chat" | "bedrock_converse" | "host_callback"
@@ -354,7 +398,7 @@ export interface ChatRequestV1 {{
   schema_version?: "1"; model: string; messages: ChatMessageV1[]; tools?: ToolDefinitionV1[]
   tool_choice?: "none" | "auto" | "required" | {{ name: string }}; temperature?: number
   max_output_tokens?: number; stop?: string[]; response_format?: JsonValue; seed?: number
-  metadata?: RequestMetadataV1; reasoning_effort?: string; thinking?: ThinkingV1
+  metadata?: RequestMetadataV1; thinking?: ThinkingV1
   include_native_response?: boolean
   /** Default false; Chat/Messages/Responses/Gemini only. Native frames supplement
    * canonical accounting events; render either native frames or canonical content. */
@@ -409,9 +453,31 @@ export type ChatStreamEventV1 =
   | {{ event: "usage"; usage: UsageV2 }}
   | {{ event: "finish"; reason: FinishReasonV1 }}
   | {{ event: "error"; error: ProviderErrorV1 }}
+export type ThinkingEncodingV1 =
+  | "openai_chat" | "openai_responses" | "anthropic_messages"
+  | "gemini_generate_content" | "qwen_openai_chat" | "zai_openai_chat"
+export interface ThinkingEffortCapabilityV1 {{ values: string[]; default?: string }}
+export interface ThinkingBudgetCapabilityV1 {{ min: number; max: number }}
+export interface ProviderCapabilitiesV1 {{
+  streaming?: boolean; tools?: boolean; parallel_tool_calls?: boolean; vision?: boolean
+  reasoning?: boolean; structured_output?: boolean; audio_input?: boolean
+  file_input?: boolean; prompt_cache_usage?: boolean
+}}
+export interface ThinkingCapabilityV1 {{
+  supported: boolean; encoding?: ThinkingEncodingV1; can_disable?: boolean
+  effort?: ThinkingEffortCapabilityV1; budget_tokens?: ThinkingBudgetCapabilityV1
+  allow_effort_and_budget?: boolean
+}}
+export interface ModelDescriptorV1 {{
+  id: string; aliases?: string[]; max_input_tokens?: number; max_output_tokens?: number
+  default_temperature?: number; capabilities?: ProviderCapabilitiesV1
+  thinking?: ThinkingCapabilityV1; endpoint_url?: string
+  extensions?: Record<string, JsonValue>
+}}
 export interface ProviderDescriptorV1 {{
   schema_version: "1"; slug: string; aliases?: string[]; endpoint_family: string; base_url: string
-  capabilities: Record<string, boolean>; models?: JsonValue[]; extensions?: Record<string, JsonValue>
+  capabilities?: ProviderCapabilitiesV1; models?: ModelDescriptorV1[]
+  extensions?: Record<string, JsonValue>
 }}
 '''
 

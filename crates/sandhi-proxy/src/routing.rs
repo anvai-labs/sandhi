@@ -7,7 +7,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use sandhi_core::{cache_digest, ChatMessageV1, ChatRequestV1, NativeInputFeatureV1, VirtualKey};
+use sandhi_core::{
+    cache_digest, chat::ThinkingCapabilityV1, ChatMessageV1, ChatRequestV1, NativeInputFeatureV1,
+    VirtualKey,
+};
 use sandhi_providers::ProviderHandle;
 use sandhi_store::routes::{Affinity, Error, Pin, RouteDefinition, RouteRecord, Selection, Target};
 use serde::{Deserialize, Serialize};
@@ -41,6 +44,7 @@ pub(crate) struct Selected {
 #[derive(Clone)]
 pub(crate) struct DiscoveredModel {
     pub id: String,
+    pub thinking: ThinkingCapabilityV1,
     pub target_models: Vec<(String, String)>,
 }
 
@@ -323,6 +327,61 @@ impl Selected {
     }
 }
 
+fn declared_target(
+    provider: &ProviderHandle,
+    target: &Target,
+) -> Option<sandhi_core::ModelDescriptorV1> {
+    provider
+        .backend_binding()
+        .filter(|binding| binding.id == target.backend)?
+        .models
+        .iter()
+        .find(|model| model.id == target.model)
+        .cloned()
+}
+
+fn target_thinking(
+    provider: &ProviderHandle,
+    target: &Target,
+) -> Result<ThinkingCapabilityV1, &'static str> {
+    let descriptor = declared_target(provider, target)
+        .ok_or("route target model must match an exact declared backend model")?;
+    descriptor
+        .thinking
+        .validate()
+        .map_err(|_| "route target thinking capability is invalid")?;
+    if descriptor
+        .thinking
+        .encoding
+        .is_some_and(|encoding| encoding.endpoint_family() != provider.family().endpoint_family())
+    {
+        return Err("route target thinking encoding does not match its backend family");
+    }
+    Ok(descriptor.thinking)
+}
+
+fn semantic_route_capability(
+    providers: &std::collections::HashMap<String, ProviderHandle>,
+    model: &sandhi_store::routes::LogicalModel,
+) -> Result<ThinkingCapabilityV1, &'static str> {
+    let mut first: Option<ThinkingCapabilityV1> = None;
+    for target in &model.targets {
+        let provider = providers
+            .get(&format!("backend/{}", target.backend))
+            .ok_or("route requires registered explicit backends")?;
+        let capability = target_thinking(provider, target)?;
+        if let Some(first) = &first {
+            if !first.semantic_equivalent(&capability) {
+                return Err(
+                    "route targets must have semantically equivalent thinking capabilities",
+                );
+            }
+        }
+        first.get_or_insert(capability);
+    }
+    first.ok_or("logical route model requires a target")
+}
+
 pub(crate) fn validate_targets(
     state: &ProxyState,
     definition: &RouteDefinition,
@@ -337,18 +396,8 @@ pub(crate) fn validate_targets(
     if providers.contains_key(&definition.route_ref()) {
         return Err("logical route cannot shadow a host-owned upstream");
     }
-    for target in definition.models.iter().flat_map(|model| &model.targets) {
-        let provider = providers
-            .get(&format!("backend/{}", target.backend))
-            .ok_or("route requires registered explicit backends")?;
-        let binding = provider
-            .backend_binding()
-            .ok_or("route requires registered explicit backends")?;
-        if binding.id != target.backend
-            || !binding.models.iter().any(|model| model.id == target.model)
-        {
-            return Err("route target model must match an exact declared backend model");
-        }
+    for model in &definition.models {
+        semantic_route_capability(&providers, model)?;
     }
     Ok(())
 }
@@ -384,7 +433,7 @@ pub(crate) async fn discovery(
         .providers
         .lock()
         .map_err(|_| "backend registry is unavailable")?;
-    Ok(record
+    let discovered = record
         .definition
         .models
         .iter()
@@ -396,20 +445,25 @@ pub(crate) async fn discovery(
                     .is_some_and(|provider| available(provider, target))
             })
         })
-        .map(|model| DiscoveredModel {
-            id: model.id.clone(),
-            target_models: model
-                .targets
-                .iter()
-                .filter(|target| {
-                    providers
-                        .get(&format!("backend/{}", target.backend))
-                        .is_some_and(|provider| available(provider, target))
-                })
-                .map(|target| (format!("backend/{}", target.backend), target.model.clone()))
-                .collect(),
+        .map(|model| {
+            let thinking = semantic_route_capability(&providers, model)?;
+            Ok::<DiscoveredModel, &'static str>(DiscoveredModel {
+                id: model.id.clone(),
+                thinking,
+                target_models: model
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        providers
+                            .get(&format!("backend/{}", target.backend))
+                            .is_some_and(|provider| available(provider, target))
+                    })
+                    .map(|target| (format!("backend/{}", target.backend), target.model.clone()))
+                    .collect(),
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(discovered)
 }
 
 pub(crate) async fn active(state: &ProxyState, reference: &str) -> bool {
@@ -644,6 +698,125 @@ mod tests {
     use axum::http;
     use sandhi_providers::{BackendBinding, ProviderRuntime};
 
+    fn route_handle(id: &str, capability: ThinkingCapabilityV1) -> ProviderHandle {
+        let descriptor: sandhi_core::ModelDescriptorV1 = serde_json::from_value(json!({
+            "id":"physical",
+            "thinking":capability
+        }))
+        .unwrap();
+        ProviderRuntime::new()
+            .openai_compat(
+                id,
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+                http::HeaderMap::new(),
+                Some(0),
+                None,
+                None,
+                None,
+            )
+            .with_backend_binding(BackendBinding {
+                id: id.into(),
+                revision: 1,
+                provider: id.into(),
+                credential_ref: "fixture:default".into(),
+                credential_generation: 1,
+                endpoint_family: sandhi_core::EndpointFamilyV1::OpenaiChatCompletions,
+                endpoint_profile: "standard".into(),
+                models: vec![descriptor],
+                cache_policy: None,
+            })
+    }
+
+    #[test]
+    fn logical_routes_require_semantically_equivalent_thinking_targets() {
+        let effort = ThinkingCapabilityV1::effort(
+            sandhi_core::chat::ThinkingEncodingV1::QwenOpenaiChat,
+            &["low", "medium", "xhigh"],
+            Some("medium"),
+        );
+        let same_effort_other_encoding = ThinkingCapabilityV1::effort(
+            sandhi_core::chat::ThinkingEncodingV1::OpenaiChat,
+            &["low", "medium", "xhigh"],
+            Some("medium"),
+        );
+        let budget = ThinkingCapabilityV1::budget(
+            sandhi_core::chat::ThinkingEncodingV1::QwenOpenaiChat,
+            1024,
+            131_072,
+        );
+
+        let model = |targets: &[(&str, &str)]| sandhi_store::routes::LogicalModel {
+            id: "agent".into(),
+            targets: targets
+                .iter()
+                .map(|(backend, model)| sandhi_store::routes::Target {
+                    backend: (*backend).into(),
+                    model: (*model).into(),
+                })
+                .collect(),
+        };
+
+        let compatible = std::collections::HashMap::from([
+            (
+                "backend/qwen".to_owned(),
+                route_handle("qwen", effort.clone()),
+            ),
+            (
+                "backend/openai".to_owned(),
+                route_handle("openai", same_effort_other_encoding),
+            ),
+        ]);
+        assert!(semantic_route_capability(
+            &compatible,
+            &model(&[("qwen", "physical"), ("openai", "physical")])
+        )
+        .is_ok());
+
+        let case_mismatched = std::collections::HashMap::from([(
+            "backend/qwen".to_owned(),
+            route_handle("qwen", effort.clone()),
+        )]);
+        assert!(
+            semantic_route_capability(&case_mismatched, &model(&[("qwen", "Physical")])).is_err()
+        );
+
+        let mismatched = std::collections::HashMap::from([
+            (
+                "backend/qwen".to_owned(),
+                route_handle("qwen", effort.clone()),
+            ),
+            ("backend/budget".to_owned(), route_handle("budget", budget)),
+        ]);
+        assert!(semantic_route_capability(
+            &mismatched,
+            &model(&[("qwen", "physical"), ("budget", "physical")])
+        )
+        .is_err());
+
+        let missing_target = std::collections::HashMap::from([(
+            "backend/qwen".to_owned(),
+            route_handle("qwen", effort),
+        )]);
+        assert!(
+            semantic_route_capability(&missing_target, &model(&[("absent", "physical")])).is_err()
+        );
+
+        let family_mismatched_capability = ThinkingCapabilityV1::budget(
+            sandhi_core::chat::ThinkingEncodingV1::AnthropicMessages,
+            1024,
+            131_072,
+        );
+        let family_mismatched = std::collections::HashMap::from([(
+            "backend/wrong".to_owned(),
+            route_handle("wrong", family_mismatched_capability),
+        )]);
+        assert!(
+            semantic_route_capability(&family_mismatched, &model(&[("wrong", "physical")]))
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn legacy_sql_pin_and_cache_binding_survive_namespace_startup_migration() {
         use sandhi_core::ChatMessageV1;
@@ -679,7 +852,7 @@ mod tests {
                     "synthetic",
                 )
                 .unwrap();
-            let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"primary","provider":"fixture","credential_ref":"fixture:default","endpoint":{"endpoint_family":family},"models":[{"id":"physical"}]})).unwrap();
+            let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"primary","provider":"fixture","credential_ref":"fixture:default","endpoint":{"endpoint_family":family},"models":[{"id":"physical","thinking":{"supported":false}}]})).unwrap();
             if matches!(
                 family,
                 sandhi_core::EndpointFamilyV1::OpenaiChatCompletions
@@ -895,7 +1068,10 @@ mod tests {
                 credential_generation: generation,
                 endpoint_family: sandhi_core::EndpointFamilyV1::OpenaiResponses,
                 endpoint_profile: "chatgpt_codex".into(),
-                models: vec![serde_json::from_value(json!({"id":"agent-model"})).unwrap()],
+                models: vec![serde_json::from_value(
+                    json!({"id":"agent-model","thinking":{"supported":false}}),
+                )
+                .unwrap()],
                 cache_policy: None,
             })
     }

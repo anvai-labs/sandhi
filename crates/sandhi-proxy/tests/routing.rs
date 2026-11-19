@@ -138,6 +138,16 @@ async fn discovery_reports_sanitized_exact_model_stream_limits() {
         }))
         .unwrap(),
     );
+    let (effective, _) = state
+        .streaming_deadlines
+        .as_ref()
+        .unwrap()
+        .resolve("backend/primary", "physical");
+    let transport = effective.transport();
+    assert_eq!(transport.setup_timeout().as_millis(), 30_000);
+    assert_eq!(transport.idle_timeout().as_millis(), 180_000);
+    assert_eq!(effective.dispatch_duration().as_millis(), 630_000u128);
+    assert_eq!(effective.body_lifetime().duration().as_millis(), 600_000);
     let response = build_app(state)
         .oneshot(
             Request::get("/v1/models")
@@ -390,7 +400,10 @@ fn provider(
         credential_generation: generation,
         endpoint_family: family,
         endpoint_profile: "standard".into(),
-        models: vec![serde_json::from_value(json!({"id":"physical"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"physical","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: None,
     })
 }

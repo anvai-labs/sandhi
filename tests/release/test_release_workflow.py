@@ -245,6 +245,7 @@ def check_aarch64_wheel(release, ci):
     arm = [entry for entry in matrix if entry["target"] == "aarch64-unknown-linux-gnu"]
     assert arm == [{"os": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "manylinux": "2014"}]
     action = uses(build, "PyO3/maturin-action")[0]
+    assert action["with"]["maturin-version"] == "1.16.0"
     assert action["with"]["target"] == "${{ matrix.target }}"
     assert action["with"]["manylinux"] == "${{ matrix.manylinux }}"
     assert "pypi-build" in needs(release["jobs"]["create-release"])
@@ -255,6 +256,7 @@ def check_aarch64_wheel(release, ci):
     assert "continue-on-error" not in smoke
     smoke_action = uses(smoke, "PyO3/maturin-action")[0]
     assert smoke_action["uses"] == action["uses"]
+    assert smoke_action["with"]["maturin-version"] == "1.16.0"
     assert smoke_action["with"]["args"] == action["with"]["args"]
     for key in ("target", "manylinux"):
         assert smoke_action["with"][key] == arm[0][key]

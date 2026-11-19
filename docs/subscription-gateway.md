@@ -152,31 +152,32 @@ hostname mismatch. Already installed wheels must be rebuilt/replaced to pick up
 this feature; a configuration variable cannot change an older wheel's feature set.
 
 
-## Model plus reasoning effort
+## Model plus thinking controls
 
-The foundational request already represents these independently:
-`ChatRequestV1.model` and optional `ChatRequestV1.reasoning_effort`. Clients
-should supply both explicitly when they need a stable reasoning default:
+The chat contract represents model selection and thinking independently:
+`ChatRequestV1.model` with optional semantic
+`ChatRequestV1.thinking`. Clients that need a stable reasoning policy send an exact
+control advertised by model discovery:
 
 ```json
-{"model":"gpt-6-luna","reasoning_effort":"medium","messages":[{"role":"system","content":"Classify the input."},{"role":"user","content":"hello"}]}
+{"model":"qwen3.8-plus","thinking":{"enabled":true,"effort":"medium"},"messages":[{"role":"user","content":"hello"}]}
 ```
 
-Both standard and subscription Responses codecs preserve the exact model and
-map effort to `reasoning.effort`; typed effort wins over extension duplicates.
-No model-name suffix, gateway-global default, or inference from temperature is
-introduced. Absent/null delegates to the model default; `"none"` is an explicit
-supported effort value. Effort does not select a credential or loosen policy,
-model allowlists, rate limits or token budgets.
+Discovery carries `sandhi_contract_version: 1` and a mandatory model-scoped
+`thinking` descriptor. Sandhi admits only the exact effort values and budget ranges
+listed for that model, rejects `effort: "none"`, and does not translate aliases.
+Omitting `thinking` delegates to the model default; an explicit enabled request must carry an
+advertised effort or budget; `{"enabled": false}` is the only canonical disable operation when
+that model advertises `can_disable`. Thinking does not select a credential or loosen model
+allowlists, rate limits, policy, or budgets.
 
-[GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) and
-[GPT-6 Sol](https://developers.openai.com/api/docs/models/gpt-6-sol) document
-none, low, medium, high, xhigh and max. This is model-specific metadata, not a
-universal scale. The neutral string also accommodates other provider labels.
-Compatible chat codecs forward a top-level field; existing native-family
-codecs have separate thinking controls and do not all map named effort. Do not
-advertise unsupported mappings as working merely because the neutral contract
-accepts the field. Gateway consumers should select a verified adapter/model.
+Qualified codecs map admitted semantic controls to the correct source spelling:
+OpenAI Chat emits top-level `reasoning_effort`, Responses emits
+`reasoning.effort`, Qwen emits its effort/budget/disable fields, ZAI emits its
+native `thinking` object, Anthropic emits Messages `thinking`, and Gemini emits
+`thinkingConfig.thinkingBudget`. An encoding that cannot express a control cannot
+advertise it. Callers must use gateway discovery rather than infer capability from
+provider names, model prefixes, or wire compatibility.
 
 Victor now shares a typed effort vocabulary between profile configuration,
 immutable session overrides and FEP-0037 classification. Message-hub uses a

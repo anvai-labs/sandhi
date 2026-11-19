@@ -132,8 +132,20 @@ def test_default_binary_initializes_the_original_ledger_and_advertises_its_contr
                 time.sleep(0.02)
         assert version["capabilities"]["execution_accounting"] == "paired_durable_v1"
         assert version["capabilities"]["durable_ledger"] is True
-        with urllib.request.urlopen(url + "/readyz", timeout=1) as response:
-            assert response.status == 200
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                with urllib.request.urlopen(url + "/readyz", timeout=1) as response:
+                    assert response.status == 200
+                    break
+            except urllib.error.HTTPError as error:
+                if time.monotonic() >= deadline or error.code != 503:
+                    raise
+                time.sleep(0.02)
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
         with sqlite3.connect(database) as connection:
             for table, original in historical.items():
                 assert connection.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall() == original

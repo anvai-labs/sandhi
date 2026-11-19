@@ -15,6 +15,7 @@
 
 use crate::{
     error_for_response, AnthropicAuthScheme, GeminiAuthScheme, ProviderError, ProviderFamily,
+    TimeoutError, TimeoutPhase,
 };
 use bytes::Bytes;
 use futures_core::Stream;
@@ -159,6 +160,25 @@ impl RawForwarder {
         self.extra_headers = crate::strip_transport_owned(headers);
         self
     }
+    /// Sanitized configured host only: no scheme, credentials, path, query, or secret.
+    #[must_use]
+    pub fn upstream_host(&self) -> Option<String> {
+        let mut host = reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))?;
+        if host.starts_with('[') && host.ends_with(']') {
+            host = host[1..host.len() - 1].to_string();
+        }
+        if host.contains(':') {
+            return host.parse::<std::net::Ipv6Addr>().is_ok().then_some(host);
+        }
+        (host.len() <= 255
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
+        .then_some(host)
+    }
+
     pub fn usage_convention(&self) -> Result<sandhi_core::UsageConventionV1, &'static str> {
         use sandhi_core::UsageConventionV1 as C;
         if self.family == ProviderFamily::Anthropic
@@ -303,7 +323,10 @@ impl RawForwarder {
         let deadline = crate::BufferedDeadline::current()
             .unwrap_or_else(|| crate::BufferedDeadline::new(self.complete_timeout));
         if deadline.at <= tokio::time::Instant::now() {
-            return Err(ProviderError::Timeout(deadline.timeout));
+            return Err(ProviderError::Timeout(TimeoutError::new(
+                TimeoutPhase::Unknown,
+                deadline.timeout,
+            )));
         }
         match tokio::time::timeout_at(deadline.at, async {
             let resp = self
@@ -330,7 +353,10 @@ impl RawForwarder {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(ProviderError::Timeout(deadline.timeout)),
+            Err(_) => Err(ProviderError::Timeout(TimeoutError::new(
+                TimeoutPhase::Unknown,
+                deadline.timeout,
+            ))),
         }
     }
 
@@ -351,7 +377,10 @@ impl RawForwarder {
             .map(|policy| policy.setup)
             .unwrap_or_else(|| crate::BufferedDeadline::new(self.stream_setup_timeout));
         if deadline.at <= tokio::time::Instant::now() {
-            return Err(ProviderError::Timeout(deadline.timeout));
+            return Err(ProviderError::Timeout(TimeoutError::new(
+                TimeoutPhase::Setup,
+                deadline.timeout,
+            )));
         }
         let resp = match tokio::time::timeout_at(deadline.at, async {
             let response = self.send(&url, out_body).await?;
@@ -365,7 +394,12 @@ impl RawForwarder {
         .await
         {
             Ok(result) => result?,
-            Err(_) => return Err(ProviderError::Timeout(deadline.timeout)),
+            Err(_) => {
+                return Err(ProviderError::Timeout(TimeoutError::new(
+                    TimeoutPhase::Setup,
+                    deadline.timeout,
+                )))
+            }
         };
         use futures_util::TryStreamExt;
         let stream = resp
@@ -719,7 +753,10 @@ impl RawForwarder {
             .map(|policy| policy.setup)
             .unwrap_or_else(|| crate::BufferedDeadline::new(self.stream_setup_timeout));
         if deadline.at <= tokio::time::Instant::now() {
-            return Err(ProviderError::Timeout(deadline.timeout));
+            return Err(ProviderError::Timeout(TimeoutError::new(
+                TimeoutPhase::Unknown,
+                deadline.timeout,
+            )));
         }
         let mut guard = context
             .as_ref()
@@ -758,7 +795,10 @@ impl RawForwarder {
                 }
             },
             Err(_) => {
-                let error = ProviderError::Timeout(deadline.timeout);
+                let error = ProviderError::Timeout(TimeoutError::new(
+                    TimeoutPhase::Setup,
+                    deadline.timeout,
+                ));
                 if let Some(guard) = guard.as_mut() {
                     guard.finish_error(&error);
                 }
@@ -911,7 +951,7 @@ fn with_idle_timeout<T: Send + 'static>(
                 Ok(Some(item)) => yield item,
                 Ok(None) => break,
                 Err(_) => {
-                    yield Err(ProviderError::Timeout(idle));
+                    yield Err(ProviderError::Timeout(TimeoutError::new(TimeoutPhase::Idle, idle)));
                     break;
                 }
             }
@@ -1093,6 +1133,16 @@ mod tests {
     use serde_json::{json, Value};
     use wiremock::matchers::{body_bytes, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn upstream_host_preserves_ipv6_literals() {
+        let forwarder = RawForwarder::new(
+            ProviderFamily::OpenAiCompat,
+            "http://[2001:db8::1]:18444/v1",
+            "synthetic",
+        );
+        assert_eq!(forwarder.upstream_host().as_deref(), Some("2001:db8::1"));
+    }
 
     // ---------------------------------------------------------------------------------------------
     // Envelope normalization
@@ -1963,7 +2013,9 @@ data: [DONE]\n\n";
             .forward("/v1/chat/completions", Bytes::from_static(b"{}"))
             .await
             .unwrap_err();
-        assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+        assert!(
+            matches!(err, ProviderError::Timeout(timeout) if timeout.phase == crate::TimeoutPhase::Unknown && timeout.bound == Duration::from_millis(10))
+        );
         let policy = crate::StreamingDeadline::new(Duration::from_secs(1), Duration::from_secs(1));
         assert!(policy
             .scope(forwarder.forward_stream_metered(
@@ -2005,7 +2057,9 @@ data: [DONE]\n\n";
             forwarder.forward("/v1/chat/completions", Bytes::from_static(b"{}"))
         );
         assert_eq!(long.unwrap().body, Bytes::from_static(b"{}"));
-        assert!(matches!(short, Err(ProviderError::Timeout(d)) if d == Duration::from_millis(10)));
+        assert!(
+            matches!(short, Err(ProviderError::Timeout(timeout)) if timeout.bound == Duration::from_millis(10))
+        );
         let before = server.received_requests().await.unwrap().len();
         let expired = crate::BufferedDeadline::new(Duration::from_millis(1));
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2044,7 +2098,9 @@ data: [DONE]\n\n";
             .await
             .err()
             .expect("stream setup should time out");
-        assert!(matches!(err, ProviderError::Timeout(d) if d == Duration::from_millis(10)));
+        assert!(
+            matches!(err, ProviderError::Timeout(timeout) if timeout.bound == Duration::from_millis(10))
+        );
     }
 
     #[tokio::test]
@@ -2146,7 +2202,7 @@ data: [DONE]\n\n";
                     }
                 })
                 .await;
-                timed_out.push(matches!(result, Ok(Some(ProviderError::Timeout(d))) if d == Duration::from_millis(400)));
+                timed_out.push(matches!(result, Ok(Some(ProviderError::Timeout(timeout))) if timeout.bound == Duration::from_millis(400)));
                 let closed = tokio::time::timeout(Duration::from_secs(3), &mut peer).await;
                 if closed.is_err() {
                     peer.abort();

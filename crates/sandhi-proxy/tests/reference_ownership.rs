@@ -134,7 +134,10 @@ fn provider(origin: &str, family: Family, codex: bool) -> ProviderHandle {
         credential_generation: 1,
         endpoint_family: family,
         endpoint_profile: if codex { "chatgpt_codex" } else { "standard" }.into(),
-        models: vec![serde_json::from_value(json!({"id":"fixture"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"fixture","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: None,
     })
 }

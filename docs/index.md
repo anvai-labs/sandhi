@@ -58,9 +58,9 @@ dispatch. Pricing and billing belong to downstream systems.
 
 !!! info "Published baseline"
     Sandhi **0.20.0** remains the published baseline with hierarchical rolling budgets.
-    The **0.21.0 source candidate** adds exact SentinelPass service grants, exact-model
-    streaming limits and the shared routing vocabulary; see the
-    [0.21 release guide](releases/v0.21.0.md) before evaluating it. Published consumer
+    The **0.22.0 source candidate** adds exact model-scoped thinking capability, transport
+    timeout evidence, unresolved-accounting readiness and the offline pre-GA ledger rebuild; see
+    the [0.22 release guide](releases/v0.22.0.md) before evaluating it. Published consumer
     qualifications must identify the exact binding they cover.
 
 ## One request, two responsibilities

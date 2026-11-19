@@ -48,7 +48,7 @@ impl RecoveryTask {
                             break;
                         }
                         if let Err(reason) = buffered::recover(state.clone()).await {
-                            tracing::warn!(reason, "durable accounting recovery incomplete");
+                            tracing::warn!(reason, "durable_accounting_recovery_unresolved");
                         }
                     }
                 }

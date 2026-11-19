@@ -7,7 +7,8 @@
 mod attempts;
 pub mod context;
 pub use attempts::{
-    AttemptEvidence, ObservedProvider, PhysicalAttempt, TransportOutcome, TransportTerminal,
+    AttemptEvidence, ObservedProvider, PhysicalAttempt, TransportErrorClass, TransportErrorSubtype,
+    TransportOutcome, TransportProgress, TransportTerminal, TransportTimeoutPhase,
 };
 mod dispatch;
 mod paired;
@@ -49,9 +50,19 @@ pub enum RecoveryState {
     MayHaveDispatched,
     ClosedBeforeDispatch(PreDispatchClosure),
     MissingObservation,
-    UnresolvedObservation,
+    /// A durable unresolved tombstone. The reservation remains held; no inferred
+    /// zero charge, automatic replay, or provider substitution may resolve it.
+    UnresolvedObservation(UnresolvedObservationReason),
     ReadyToSettle,
     Settled(SettlementReceipt),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnresolvedObservationReason {
+    /// Physical send/terminal evidence is missing or incomplete.
+    TransportEvidenceIncomplete,
+    /// The terminal fact exists, but final provider-reported usage does not.
+    ProviderUsageUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +117,7 @@ pub enum EvidenceError {
     IntentCapacity,
     MissingIntent,
     MissingObservation,
-    UnresolvedObservation,
+    UnresolvedObservation(UnresolvedObservationReason),
     TrackedSettlementRequired,
     ConflictingObservation,
     AlreadySettled,
@@ -134,7 +145,12 @@ impl std::fmt::Display for EvidenceError {
             Self::IntentCapacity => "durable execution intent capacity exhausted",
             Self::MissingIntent => "durable execution intent missing",
             Self::MissingObservation => "terminal observation missing",
-            Self::UnresolvedObservation => "terminal usage is not final provider-reported evidence",
+            Self::UnresolvedObservation(
+                UnresolvedObservationReason::TransportEvidenceIncomplete,
+            ) => "transport evidence is incomplete",
+            Self::UnresolvedObservation(UnresolvedObservationReason::ProviderUsageUnavailable) => {
+                "terminal usage is not final provider-reported evidence"
+            }
             Self::TrackedSettlementRequired => "tracked reservation requires terminal settlement",
             Self::ConflictingObservation => "terminal observation conflicts with stored evidence",
             Self::AlreadySettled => "reservation was settled before terminal observation",
@@ -351,19 +367,31 @@ fn read_observation(
 }
 
 // The one eligibility rule shared by recovery inventory and canonical settlement.
-fn terminal_charge(
+fn terminal_unresolved_reason(
     conn: &Connection,
     observed: &TerminalObservation,
-) -> Result<i64, EvidenceError> {
+) -> Result<Option<UnresolvedObservationReason>, EvidenceError> {
     if attempts::read(conn, &observed.execution_id)?
         .is_some_and(|a| a.evidence.is_none_or(|e| !e.complete()))
     {
-        return Err(EvidenceError::UnresolvedObservation);
+        return Ok(Some(
+            UnresolvedObservationReason::TransportEvidenceIncomplete,
+        ));
     }
     if observed.usage.completeness != UsageCompleteness::Final
         || observed.usage.basis != UsageBasis::ProviderReported
     {
-        return Err(EvidenceError::UnresolvedObservation);
+        return Ok(Some(UnresolvedObservationReason::ProviderUsageUnavailable));
+    }
+    Ok(None)
+}
+
+fn terminal_charge(
+    conn: &Connection,
+    observed: &TerminalObservation,
+) -> Result<i64, EvidenceError> {
+    if let Some(reason) = terminal_unresolved_reason(conn, observed)? {
+        return Err(EvidenceError::UnresolvedObservation(reason));
     }
     i64::try_from(
         observed
@@ -709,21 +737,27 @@ impl SqliteLedger {
                 continue;
             }
             let observed = read_observation(&tx, &execution_id, reservation_id, scope)?;
-            let charge = observed
+            let unresolved_reason = observed
                 .as_ref()
-                .map(|o| terminal_charge(&tx, o))
-                .transpose();
-            let charge = match charge {
-                Ok(value) => value,
-                Err(EvidenceError::UnresolvedObservation) => None,
-                Err(error) => return Err(error),
+                .map(|o| terminal_unresolved_reason(&tx, o))
+                .transpose()?
+                .flatten();
+            let charge = if unresolved_reason.is_some() {
+                None
+            } else {
+                observed
+                    .as_ref()
+                    .map(|o| terminal_charge(&tx, o))
+                    .transpose()?
             };
             let receipt = checked_terminal_receipt(&tx, scope, reservation_id, charge)?;
             let state = match (receipt, observed, charge) {
                 (Some(receipt), _, _) => RecoveryState::Settled(receipt),
                 (None, None, _) if fence.is_some() => RecoveryState::MayHaveDispatched,
                 (None, None, _) => RecoveryState::MissingObservation,
-                (None, Some(_), None) => RecoveryState::UnresolvedObservation,
+                (None, Some(_), None) => RecoveryState::UnresolvedObservation(
+                    unresolved_reason.ok_or(EvidenceError::CorruptObservation)?,
+                ),
                 (None, Some(_), Some(_)) => RecoveryState::ReadyToSettle,
             };
             entries.push(RecoveryEntry {

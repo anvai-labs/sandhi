@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode};
 use base64::Engine as _;
-use sandhi_core::chat::ThinkingV1;
+use sandhi_core::chat::ThinkingRequestV1;
 use sandhi_core::{
     ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1, ContentPart, FinishReasonV1,
     MessageContent, RequestMetadataV1, ToolCallV1, ToolChoiceMode, ToolChoiceV1, ToolDefinitionV1,
@@ -17,46 +17,170 @@ use serde_json::{json, Map, Value};
 mod fidelity;
 mod responses_stream;
 
-/// Lift the OpenAI-compat / ZAI `thinking` object (`{type, budget_tokens}`)
-/// into the neutral `ThinkingV1` at ingress (W3d/G7), so a promoted param
-/// reaches the typed field instead of surviving only inside the extensions
-/// body clone (which dies on any cross-family route).
-fn lift_openai_thinking(object: &Map<String, Value>) -> Option<ThinkingV1> {
-    let thinking = object.get("thinking")?.as_object()?;
-    let enabled = match thinking.get("type").and_then(Value::as_str) {
-        Some("disabled") => false,
-        _ => true, // "enabled" or a bare budget object both mean on
+/// Lift a strict native `{type, budget_tokens}` thinking object.
+fn lift_native_thinking(value: &Value) -> Result<Option<ThinkingRequestV1>, String> {
+    let Some(thinking) = value.as_object() else {
+        return Err("thinking must be an object".into());
     };
-    Some(ThinkingV1 {
+    if !thinking
+        .keys()
+        .all(|key| key == "type" || key == "budget_tokens")
+    {
+        return Err("thinking contains unsupported fields".into());
+    }
+    let enabled = match thinking.get("type").and_then(Value::as_str) {
+        Some("enabled") => true,
+        Some("disabled") => false,
+        _ => return Err("thinking.type must be enabled or disabled".into()),
+    };
+    let budget = thinking
+        .get("budget_tokens")
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| "thinking.budget_tokens must be an integer".to_owned())
+        })
+        .transpose()?;
+    if !enabled && budget.is_some() {
+        return Err("disabled thinking cannot carry a budget".into());
+    }
+    Ok(Some(ThinkingRequestV1 {
         enabled,
-        budget_tokens: thinking.get("budget_tokens").and_then(Value::as_u64),
-    })
+        effort: None,
+        budget_tokens: budget,
+    }))
 }
 
-/// Lift Gemini's `generationConfig.thinkingConfig.thinkingBudget` into the
-/// neutral `ThinkingV1` (W3d/G7). Budget 0 = disabled; a positive budget = on
-/// with a cap.
-fn lift_gemini_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingV1>, String> {
+/// Normalize the OpenAI Chat SDK's effort, Qwen extra-body controls, and ZAI
+/// native object into one semantic request. Duplicate spellings are errors.
+fn lift_openai_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingRequestV1>, String> {
+    let effort = object
+        .get("reasoning_effort")
+        .map(|value| {
+            if value.is_null() {
+                return Ok(None);
+            }
+            value
+                .as_str()
+                .map(|value| Some(value.to_owned()))
+                .ok_or_else(|| "reasoning_effort must be a string or null".to_owned())
+        })
+        .transpose()?
+        .flatten();
+    let enable = object
+        .get("enable_thinking")
+        .map(|value| {
+            if value.is_null() {
+                return Ok(None);
+            }
+            value
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| "enable_thinking must be a boolean or null".to_owned())
+        })
+        .transpose()?
+        .flatten();
+    let budget = object
+        .get("thinking_budget")
+        .map(|value| {
+            if value.is_null() {
+                return Ok(None);
+            }
+            value
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| "thinking_budget must be a non-negative integer or null".to_owned())
+        })
+        .transpose()?
+        .flatten();
+    let native = object
+        .get("thinking")
+        .map(lift_native_thinking)
+        .transpose()?
+        .flatten();
+    if effort.is_some() && native.is_some() {
+        return Err("reasoning_effort and thinking duplicate thinking controls".into());
+    }
+    if enable.is_some() && native.is_some() {
+        return Err("enable_thinking and thinking duplicate thinking controls".into());
+    }
+    if budget.is_some() && native.is_some() {
+        return Err("thinking_budget and thinking duplicate thinking controls".into());
+    }
+    if effort.is_some() && enable.is_some() {
+        return Err("reasoning_effort and enable_thinking duplicate thinking controls".into());
+    }
+    if let Some("none") = effort.as_deref() {
+        return Err("reasoning effort none is not canonical; use enable_thinking=false".into());
+    }
+    let mut enabled_sources = Vec::new();
+    if effort.is_some() || budget.is_some() {
+        enabled_sources.push(true);
+    }
+    if let Some(enable) = enable {
+        enabled_sources.push(enable);
+    }
+    if let Some(native) = &native {
+        enabled_sources.push(native.enabled);
+    }
+    let source_present =
+        effort.is_some() || enable.is_some() || budget.is_some() || native.is_some();
+    if enabled_sources
+        .iter()
+        .any(|value| *value != enabled_sources[0])
+    {
+        return Err("thinking controls conflict".into());
+    }
+    let enabled = *enabled_sources.first().unwrap_or(&true);
+    let request = ThinkingRequestV1 {
+        enabled,
+        effort,
+        budget_tokens: budget.or_else(|| native.as_ref().and_then(|value| value.budget_tokens)),
+    };
+    if !source_present {
+        return Ok(None);
+    }
+    Ok(Some(request))
+}
+
+/// Normalize Anthropic's native thinking object.
+fn lift_anthropic_thinking(
+    object: &Map<String, Value>,
+) -> Result<Option<ThinkingRequestV1>, String> {
+    Ok(object
+        .get("thinking")
+        .map(lift_native_thinking)
+        .transpose()?
+        .flatten())
+}
+
+/// Lift Gemini's canonical `generationConfig.thinkingConfig.thinkingBudget`.
+fn lift_gemini_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingRequestV1>, String> {
     let Some(config) = object
         .get("generationConfig")
-        .and_then(|v| v.get("thinkingConfig"))
+        .and_then(|value| value.get("thinkingConfig"))
     else {
         return Ok(None);
     };
-    if config.get("thinkingBudget").is_some() && config.get("thinking_budget").is_some() {
-        return Err("Gemini thinking budget aliases must not both be supplied".into());
-    }
-    let Some(budget) = config
+    let budget = config
         .get("thinkingBudget")
-        .or_else(|| config.get("thinking_budget"))
-        .and_then(Value::as_u64)
-    else {
+        .or_else(|| config.get("thinking_budget"));
+    if config.get("thinkingBudget").is_some() && config.get("thinking_budget").is_some() {
+        return Err("Gemini thinking budget spellings must not both be supplied".into());
+    }
+    let Some(budget) = budget else {
         return Ok(None);
     };
-    Ok(Some(ThinkingV1 {
-        enabled: budget != 0,
-        budget_tokens: (budget != 0).then_some(budget),
-    }))
+    if budget.is_null() {
+        return Ok(None);
+    }
+    let budget = budget
+        .as_u64()
+        .ok_or_else(|| "Gemini thinkingBudget must be a non-negative integer".to_owned())?;
+    if budget == 0 {
+        return Ok(Some(ThinkingRequestV1::disabled()));
+    }
+    Ok(Some(ThinkingRequestV1::enabled().with_budget(budget)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,9 +719,7 @@ fn decode_gemini_request(
         response_format: None,
         seed: None,
         metadata,
-        // W3d/G7: Gemini has no effort concept; thinking rides
-        // generationConfig.thinkingConfig.thinkingBudget.
-        reasoning_effort: None,
+        // Gemini thinking rides generationConfig.thinkingConfig.thinkingBudget.
         thinking: lift_gemini_thinking(object)?,
         // #90's native-response gate, matching every other dialect's decode.
         include_native_response: true,
@@ -605,6 +727,7 @@ fn decode_gemini_request(
         native_input: None,
         cache_intent: None,
         compiled_cache: None,
+        compiled_thinking: None,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
         extensions,
     };
@@ -1038,13 +1161,13 @@ pub(crate) fn decode_openai_request(
         metadata,
         // W3d/G7: lift promoted params to typed fields so they survive a
         // cross-family route (they otherwise live only in the openai body clone).
-        reasoning_effort: optional_string(object, "reasoning_effort")?,
-        thinking: lift_openai_thinking(object),
+        thinking: lift_openai_thinking(object)?,
         include_native_response: true,
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
         compiled_cache: None,
+        compiled_thinking: None,
         extensions: {
             let mut extensions = BTreeMap::from([("openai".into(), body.clone())]);
             for (family, bucket) in passthrough {
@@ -1295,13 +1418,13 @@ fn decode_anthropic_request(
         metadata,
         // W3d/G7: Anthropic `thinking` uses the same {type, budget_tokens}
         // shape; no effort concept.
-        reasoning_effort: None,
-        thinking: lift_openai_thinking(object),
+        thinking: lift_anthropic_thinking(object)?,
         include_native_response: true,
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
         compiled_cache: None,
+        compiled_thinking: None,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
     };
     fidelity::capture(
@@ -1586,17 +1709,34 @@ fn decode_responses_request(
         seed: None,
         metadata,
         // W3d/G7: Responses expresses effort as `reasoning.effort`; no thinking.
-        reasoning_effort: object
+        // The SDK uses `effort: "none"` as its native disable spelling even though
+        // "none" is deliberately not a semantic effort value.
+        thinking: object
             .get("reasoning")
             .and_then(|reasoning| reasoning.get("effort"))
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        thinking: None,
+            .map(|value| {
+                if value.is_null() {
+                    return Ok(None);
+                }
+                value
+                    .as_str()
+                    .map(|effort| {
+                        if effort == "none" {
+                            Some(ThinkingRequestV1::disabled())
+                        } else {
+                            Some(ThinkingRequestV1::enabled().with_effort(effort))
+                        }
+                    })
+                    .ok_or_else(|| "reasoning.effort must be a string or null".to_owned())
+            })
+            .transpose()?
+            .flatten(),
         include_native_response: true,
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
         compiled_cache: None,
+        compiled_thinking: None,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),
     };
     fidelity::capture(&mut request, sandhi_core::EndpointFamilyV1::OpenaiResponses)?;
@@ -2582,23 +2722,80 @@ mod tests {
     }
 
     #[test]
-    fn openai_ingress_lifts_w3d_params_to_typed_fields() {
-        // W3d/G7: promoted params must reach the typed fields at ingress, not
-        // just survive inside the extensions body clone (which dies cross-family).
-        let (request, _) = decode_openai_request(
+    fn openai_ingress_lifts_vendor_controls_to_semantic_thinking() {
+        let request = decode_openai_request(
             json!({
                 "model": "gpt-5",
                 "messages": [{"role": "user", "content": "hi"}],
-                "reasoning_effort": "high",
+                "reasoning_effort": "high"
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap()
+        .0;
+        let thinking = request.thinking.expect("effort lifted");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.effort.as_deref(), Some("high"));
+
+        let request = decode_openai_request(
+            json!({
+                "model": "fixture",
+                "messages": [{"role": "user", "content": "hi"}],
                 "thinking": {"type": "enabled", "budget_tokens": 2048}
             }),
             RequestMetadataV1::default(),
         )
-        .unwrap();
-        assert_eq!(request.reasoning_effort.as_deref(), Some("high"));
-        let thinking = request.thinking.expect("thinking lifted");
+        .unwrap()
+        .0;
+        let thinking = request.thinking.expect("native thinking lifted");
         assert!(thinking.enabled);
         assert_eq!(thinking.budget_tokens, Some(2048));
+
+        let request = decode_openai_request(
+            json!({
+                "model": "fixture",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": serde_json::Value::Null,
+                "enable_thinking": serde_json::Value::Null,
+                "thinking_budget": serde_json::Value::Null
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap()
+        .0;
+        assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn responses_ingress_treats_null_effort_as_default() {
+        let (request, _) = decode_responses_request(
+            json!({
+                "model": "gpt-5",
+                "input": "hi",
+                "reasoning": {"effort": null, "summary": "auto"}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(request.thinking.is_none());
+        assert_eq!(
+            request.extensions["openai_responses"]["reasoning"]["summary"],
+            "auto"
+        );
+    }
+
+    #[test]
+    fn responses_ingress_maps_native_none_effort_to_semantic_disable() {
+        let (request, _) = decode_responses_request(
+            json!({
+                "model": "gpt-5",
+                "input": "hi",
+                "reasoning": {"effort": "none"}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert_eq!(request.thinking, Some(ThinkingRequestV1::disabled()));
     }
 
     #[test]
@@ -3087,27 +3284,56 @@ mod tests {
     }
 
     #[test]
-    fn gemini_ingress_lifts_thinking_budget() {
-        for key in ["thinkingBudget", "thinking_budget"] {
+    fn gemini_ingress_lifts_canonical_thinking_budget_only() {
+        let (request, _) = decode_gemini_request(
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        let thinking = request.thinking.expect("thinking lifted");
+        assert!(!thinking.enabled); // budget 0 = disabled
+        let error = decode_gemini_request(
+            json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+            "generationConfig":{"thinkingConfig":{
+                "thinkingBudget":0,"thinking_budget":1
+            }}}),
+            RequestMetadataV1::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("both"));
+        for config in [
+            serde_json::Value::Null,
+            json!({"thinkingBudget":2048}),
+            json!({"thinkingBudget":serde_json::Value::Null}),
+            json!({"thinking_budget":2048}),
+            json!({"thinking_budget":serde_json::Value::Null}),
+        ] {
             let (request, _) = decode_gemini_request(
-                json!({
-                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                    "generationConfig": {"thinkingConfig": {key: 0}}
-                }),
+                json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+                        "generationConfig":{"thinkingConfig":config}}),
                 RequestMetadataV1::default(),
             )
             .unwrap();
-            let thinking = request.thinking.expect("thinking lifted");
-            assert!(!thinking.enabled); // budget 0 = disabled
+            if config.is_null()
+                || config
+                    .as_object()
+                    .is_some_and(|object| object.values().all(Value::is_null))
+            {
+                assert!(request.thinking.is_none());
+            } else {
+                let thinking = request.thinking.expect("SDK budget lifted");
+                assert!(thinking.enabled);
+                assert_eq!(thinking.budget_tokens, Some(2048));
+            }
         }
-        assert!(decode_gemini_request(json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0,"thinking_budget":1}}}),RequestMetadataV1::default()).unwrap_err().contains("aliases"));
     }
 
     #[test]
     fn gemini_unrepresented_thinking_controls_stay_native_instead_of_disappearing() {
         for config in [
-            json!({"thinkingBudget":-1}),
-            json!({"thinking_budget":-1}),
             json!({"thinkingBudget":0,"includeThoughts":true}),
             json!({"thinkingLevel":"high"}),
         ] {
@@ -3130,6 +3356,22 @@ mod tests {
                 .native_input_for(sandhi_core::EndpointFamilyV1::GeminiGenerateContent)
                 .is_ok());
         }
+    }
+
+    #[test]
+    fn gemini_null_thinking_config_means_default() {
+        let (request, _) = decode_gemini_request(
+            json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}],
+                    "generationConfig":{"thinkingConfig":serde_json::Value::Null}}),
+            RequestMetadataV1::default(),
+        )
+        .unwrap();
+        assert!(request.thinking.is_none());
+        assert!(!request
+            .native_input
+            .expect("native input captured")
+            .nonportable_features
+            .contains(&sandhi_core::NativeInputFeatureV1::NativeControl));
     }
 
     #[test]

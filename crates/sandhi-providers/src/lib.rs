@@ -57,7 +57,8 @@ pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};
 pub use attempt::{
     AttemptContext, AttemptContextError, AttemptObservation, AttemptOutcome, AttemptPhase,
-    AttemptReceiver, QualifiedBufferedEvidence, ATTEMPT_OBSERVATION_VERSION,
+    AttemptReceiver, QualifiedBufferedEvidence, TerminalErrorClass, TerminalErrorSubtype,
+    ATTEMPT_OBSERVATION_VERSION,
 };
 pub use catalog::{
     openai_compat_descriptor, provider_descriptor, resolve_openai_compat_provider,
@@ -370,6 +371,30 @@ pub enum QualifiedStreamDelivery {
     Streaming,
 }
 
+/// The exact transport phase that expired. `Unknown` preserves legacy/local errors
+/// whose source cannot identify a phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutPhase {
+    Setup,
+    Idle,
+    Body,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutError {
+    pub phase: TimeoutPhase,
+    pub bound: std::time::Duration,
+}
+
+impl TimeoutError {
+    #[must_use]
+    pub fn new(phase: TimeoutPhase, bound: std::time::Duration) -> Self {
+        Self { phase, bound }
+    }
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProviderError {
@@ -399,7 +424,7 @@ pub enum ProviderError {
     CircuitOpen,
     /// The call (or stream setup / idle gap) exceeded the configured bound. Carries the bound
     /// for a self-describing message. Retryable — a timeout is a transient bet, like a 503.
-    Timeout(std::time::Duration),
+    Timeout(TimeoutError),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -441,7 +466,17 @@ impl std::fmt::Display for ProviderError {
             }
             ProviderError::Transport(e) => write!(f, "transport error: {e}"),
             ProviderError::CircuitOpen => write!(f, "circuit open (upstream failing)"),
-            ProviderError::Timeout(d) => write!(f, "timed out after {}s", d.as_secs_f32()),
+            ProviderError::Timeout(timeout) => write!(
+                f,
+                "timed out in {} phase after {}s",
+                match timeout.phase {
+                    TimeoutPhase::Setup => "setup",
+                    TimeoutPhase::Idle => "idle",
+                    TimeoutPhase::Body => "body",
+                    TimeoutPhase::Unknown => "unknown",
+                },
+                timeout.bound.as_secs_f32(),
+            ),
         }
     }
 }

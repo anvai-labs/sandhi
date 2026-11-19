@@ -129,11 +129,15 @@ def recovery_gateway(proxy_binary, gated_provider, tmp_path, request):
             try:
                 with httpx.Client(base_url=scheme + "://" + env["SANDHI_BIND"],
                                   timeout=3, verify=verify) as client:
-                    deadline = time.monotonic() + 15
+                    deadline = time.monotonic() + 30
                     while True:
                         assert process.poll() is None, "recovery gateway exited during startup"
                         try:
-                            if client.get("/readyz").status_code == 200:
+                            ready = client.get("/readyz")
+                            if ready.status_code == 200 or (
+                                ready.status_code == 503
+                                and "durable_accounting_recovery_unresolved" in ready.text
+                            ):
                                 break
                         except httpx.TransportError:
                             pass
@@ -486,9 +490,12 @@ def assert_physical_attempt(rows, *, terminal):
         assert encoded is None, "authorization alone must leave send status unknown"
         return
     evidence = json.loads(encoded)
-    assert evidence["version"] == 2 and evidence["attempt_id"] == identity
+    assert evidence["version"] == 1 and evidence["attempt_id"] == identity
     context = json.loads(rows["budget_execution_context"][0][2])
-    assert evidence["observed_provider"] == {"provider": context["provider"], "model": context["actual_model"]}
+    observed = evidence["observed_provider"]
+    assert observed["provider"] == context["provider"]
+    assert observed["model"] == context["actual_model"]
+    assert observed.get("upstream_host") is None or observed["upstream_host"]
     assert evidence["attempt_ordinal"] == 1
     assert evidence["dispatch_observed_at_ms"] is not None
     assert evidence["terminal"] is not None

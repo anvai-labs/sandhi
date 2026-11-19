@@ -98,6 +98,16 @@ pub(crate) struct Buffered {
     recovery: Mutex<Recovery>,
 }
 
+pub(crate) fn recovery_degraded(state: &ProxyState) -> bool {
+    let Some(owner) = state.buffered_accounting.get() else {
+        return true;
+    };
+    let Ok(cursor) = owner.recovery.try_lock() else {
+        return true;
+    };
+    !cursor.complete || cursor.unresolved != 0 || owner.jobs.retained() != 0
+}
+
 pub(crate) fn reference_authority(
     state: &ProxyState,
 ) -> Option<(
@@ -260,6 +270,8 @@ pub(crate) async fn handle(
             dialect,
             streaming: wants_stream,
             transparent,
+            streaming_limits,
+            buffered_deadline: Some(transport),
         },
         &upstream_scope,
     ) {
@@ -584,7 +596,7 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
                 }
                 Ok(count)
             })
-            .map_err(|_| "accounting recovery unresolved")?;
+            .map_err(|_| "durable_accounting_recovery_unresolved")?;
             settled += result;
             if cursor.current.is_none() && cursor.scopes.is_none() {
                 cursor.complete = true;

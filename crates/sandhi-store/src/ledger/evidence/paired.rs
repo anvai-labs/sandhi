@@ -171,7 +171,7 @@ mod tests {
     fn context() -> context::ExecutionContext {
         serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"transparent",
             "upstream_ref":"openai:default","upstream_budget_scope":"upstream:models","requested_model":"model","actual_model":"model","provider":"models",
-            "endpoint_family":"openai_chat_completions","transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap()
+            "endpoint_family":"openai_chat_completions","transport":{"upstream_host":"upstream.test","policy":{"buffered":{"duration_ms":30000}}},"transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap()
     }
     fn admit(ledger: &mut SqliteLedger) -> ExecutionIntent {
         let IntentAdmission::Admitted(intent) = ledger
@@ -350,6 +350,15 @@ mod tests {
                 outcome: TransportOutcome::Success,
                 provider_status: Some(200),
                 provider_request_id: Some("fixture-request".into()),
+                progress: TransportProgress {
+                    response_headers_received: Some(true),
+                    stream_event_received: Some(true),
+                    first_stream_event_at_ms: Some(995),
+                    time_to_first_stream_event_ms: Some(5),
+                    timeout_phase: None,
+                    error_class: TransportErrorClass::None,
+                    error_subtype: None,
+                },
             }),
             dropped_observations: 0,
             invalid: false,
@@ -439,7 +448,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             ledger.settle_terminal_durable("team", &intent.execution_id),
-            Err(EvidenceError::UnresolvedObservation)
+            Err(EvidenceError::UnresolvedObservation(_))
         ));
         assert!(ledger.settle_durable(back.id, 0).is_err());
         assert!(matches!(
@@ -481,7 +490,9 @@ mod tests {
                 .unwrap()
                 .entries[0]
                 .state,
-            RecoveryState::UnresolvedObservation
+            RecoveryState::UnresolvedObservation(
+                UnresolvedObservationReason::ProviderUsageUnavailable
+            )
         ));
     }
     #[test]
@@ -786,7 +797,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 ledger.settle_terminal_durable("team", &intent.execution_id),
-                Err(EvidenceError::UnresolvedObservation)
+                Err(EvidenceError::UnresolvedObservation(_))
             ));
             assert_eq!(
                 ledger
@@ -794,7 +805,9 @@ mod tests {
                     .unwrap()
                     .entries[0]
                     .state,
-                RecoveryState::UnresolvedObservation
+                RecoveryState::UnresolvedObservation(
+                    UnresolvedObservationReason::TransportEvidenceIncomplete
+                )
             );
             assert_eq!(ledger.reserved_durable("team").unwrap(), 100);
             assert_eq!(ledger.reserved_durable("upstream:models").unwrap(), 100);

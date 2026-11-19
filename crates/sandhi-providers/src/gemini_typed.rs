@@ -5,7 +5,8 @@ use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
+    ContentPart, FinishReasonV1, MessageContent, ThinkingEncodingV1, ToolCallV1, ToolChoiceMode,
+    ToolChoiceV1,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -334,15 +335,20 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
     if let Some(stop) = &request.stop {
         generation.insert("stopSequences".into(), json!(stop));
     }
-    // W3d/G7: Gemini expresses thinking as generationConfig.thinkingConfig.
-    // `thinkingBudget: 0` disables; a positive budget caps it; enabled with no
-    // budget leaves the model default (omit thinkingBudget). Typed field wins
-    // over an extensions duplicate. `reasoning_effort` has no Gemini analogue —
-    // explicitly ignored (consumer-decision row).
+    // Gemini has a single canonical budget spelling. Remove lifted aliases
+    // before restoring only a handle-admitted semantic control; unrelated
+    // thinking options remain untouched.
     if let Some(thinking) = &request.thinking {
-        // Typed budget changes must not erase other family-owned controls when
-        // a compatible native request is re-encoded (for example, to inject an
-        // output cap). Normalize the two accepted budget spellings only.
+        if request.compiled_thinking != Some(ThinkingEncodingV1::GeminiGenerateContent) {
+            return Err(ProviderError::InvalidRequest(
+                "thinking control was not admitted for Gemini generateContent".into(),
+            ));
+        }
+        if thinking.effort.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "Gemini thinking supports budget only, not effort".into(),
+            ));
+        }
         let mut thinking_config = generation
             .get("thinkingConfig")
             .and_then(Value::as_object)
@@ -356,6 +362,10 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
             thinking_config.insert("thinkingBudget".into(), json!(budget));
         }
         generation.insert("thinkingConfig".into(), Value::Object(thinking_config));
+    } else if request.compiled_thinking.is_some() {
+        return Err(ProviderError::InvalidRequest(
+            "compiled thinking has no semantic request".into(),
+        ));
     }
     if !generation.is_empty() {
         body.insert("generationConfig".into(), Value::Object(generation));
@@ -825,33 +835,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn w3d_thinking_maps_to_thinking_config_and_effort_is_ignored() {
+    fn admitted_gemini_thinking(budget: Option<u64>, enabled: bool) -> ChatRequestV1 {
+        let thinking = sandhi_core::chat::ThinkingRequestV1 {
+            enabled,
+            effort: None,
+            budget_tokens: budget,
+        };
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model": "gemini-test",
-            "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "high",
-            "thinking": {"enabled": true, "budget_tokens": 8192}
+            "messages": [{"role": "user", "content": "hi"}]
         }))
         .unwrap();
-        let body = encode_gemini_request(&request).unwrap();
-        assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            8192
-        );
-        assert!(body.get("reasoning_effort").is_none());
+        ChatRequestV1 {
+            thinking: Some(thinking),
+            compiled_thinking: Some(ThinkingEncodingV1::GeminiGenerateContent),
+            ..request
+        }
+    }
 
-        // Disabled thinking pins the budget to 0.
-        let off: ChatRequestV1 = serde_json::from_value(json!({
-            "model": "gemini-test",
-            "messages": [{"role": "user", "content": "hi"}],
-            "thinking": {"enabled": false}
-        }))
-        .unwrap();
-        let body = encode_gemini_request(&off).unwrap();
+    #[test]
+    fn semantic_budget_maps_to_canonical_thinking_config() {
+        let body = encode_gemini_request(&admitted_gemini_thinking(Some(8192), true)).unwrap();
         assert_eq!(
-            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
-            0
+            body["generationConfig"]["thinkingConfig"],
+            json!({"thinkingBudget": 8192})
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_pins_budget_to_zero() {
+        let body = encode_gemini_request(&admitted_gemini_thinking(None, false)).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            json!({"thinkingBudget": 0})
         );
     }
 

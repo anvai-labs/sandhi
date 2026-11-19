@@ -41,6 +41,32 @@ pub enum AttemptOutcome {
     IncompleteStream,
 }
 
+/// Safe terminal class used for bounded diagnostics; never a provider body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalErrorClass {
+    None,
+    Timeout,
+    Transport,
+    Provider,
+    Cancelled,
+    IncompleteStream,
+}
+
+/// Safe provider-selected subtype. Values are enum-like and bounded before persistence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalErrorSubtype {
+    Setup,
+    Idle,
+    Body,
+    UnknownTimeout,
+    Network,
+    HttpStatus,
+    Caller,
+    Incomplete,
+}
+
 /// A lifecycle observation for one actual adapter send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptObservation {
@@ -50,6 +76,7 @@ pub struct AttemptObservation {
     pub attempt_ordinal: u64,
     pub provider: String,
     pub model: Option<String>,
+    pub upstream_host: Option<String>,
     pub observed_at_unix_ms: i64,
     pub phase: AttemptPhase,
 }
@@ -66,6 +93,13 @@ pub enum AttemptPhase {
         provider_request_id: Option<String>,
         usage: Option<ParsedUsage>,
         usage_completeness: UsageCompleteness,
+        response_headers_received: bool,
+        stream_event_received: bool,
+        first_stream_event_at_ms: Option<i64>,
+        time_to_first_stream_event_ms: Option<u64>,
+        timeout_phase: Option<crate::TimeoutPhase>,
+        error_class: TerminalErrorClass,
+        error_subtype: Option<TerminalErrorSubtype>,
     },
 }
 
@@ -120,6 +154,7 @@ enum QualifiedResponseEvidence {
 
 struct AttemptCancellation {
     reason: AtomicU8,
+    timeout_phase: AtomicU8,
     parent: Option<Arc<AttemptCancellation>>,
 }
 
@@ -127,6 +162,7 @@ struct AttemptCancellation {
 #[derive(Clone)]
 pub struct AttemptContext {
     configured_provider: Option<Arc<str>>,
+    configured_upstream_host: Option<Arc<str>>,
     shared: Arc<SharedAttemptContext>,
     cancellation: Arc<AttemptCancellation>,
 }
@@ -160,6 +196,7 @@ impl AttemptContext {
         Ok((
             Self {
                 configured_provider: None,
+                configured_upstream_host: None,
                 shared: Arc::new(SharedAttemptContext {
                     execution_id,
                     nonce,
@@ -171,6 +208,7 @@ impl AttemptContext {
                 }),
                 cancellation: Arc::new(AttemptCancellation {
                     reason: AtomicU8::new(CANCELLED),
+                    timeout_phase: AtomicU8::new(TIMEOUT_PHASE_UNKNOWN),
                     parent: None,
                 }),
             },
@@ -203,6 +241,23 @@ impl AttemptContext {
     /// Factory/handle-owned diagnostic label, never caller wire metadata or dispatch authority.
     pub(crate) fn with_configured_provider(mut self, provider: &str) -> Self {
         self.configured_provider = Some(Arc::from(bounded_label(provider, MAX_PROVIDER_BYTES)));
+        self
+    }
+
+    pub(crate) fn with_configured_upstream_host(mut self, host: Option<&str>) -> Self {
+        self.configured_upstream_host = host
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 255
+                    && (if value.contains(':') {
+                        value.parse::<std::net::Ipv6Addr>().is_ok()
+                    } else {
+                        value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+                    })
+            })
+            .map(Arc::from);
         self
     }
 
@@ -268,16 +323,21 @@ impl AttemptContext {
     pub(crate) fn fresh_call(&self) -> Self {
         Self {
             configured_provider: self.configured_provider.clone(),
+            configured_upstream_host: self.configured_upstream_host.clone(),
             shared: self.shared.clone(),
             cancellation: Arc::new(AttemptCancellation {
                 reason: AtomicU8::new(CANCELLED),
+                timeout_phase: AtomicU8::new(TIMEOUT_PHASE_UNKNOWN),
                 parent: Some(self.cancellation.clone()),
             }),
         }
     }
 
-    pub(crate) fn mark_timeout(&self) {
+    pub fn mark_timeout_phase(&self, phase: crate::TimeoutPhase) {
         self.cancellation.reason.store(TIMED_OUT, Ordering::Release);
+        self.cancellation
+            .timeout_phase
+            .store(phase as u8, Ordering::Release);
     }
 
     fn timed_out(&self) -> bool {
@@ -289,6 +349,26 @@ impl AttemptContext {
             scope = current.parent.as_deref();
         }
         false
+    }
+
+    fn timeout_phase(&self) -> Option<crate::TimeoutPhase> {
+        if !self.timed_out() {
+            return None;
+        }
+        let mut scope = Some(self.cancellation.as_ref());
+        while let Some(current) = scope {
+            let phase = current.timeout_phase.load(Ordering::Acquire);
+            if phase != TIMEOUT_PHASE_UNKNOWN {
+                return match phase {
+                    TIMEOUT_PHASE_SETUP => Some(crate::TimeoutPhase::Setup),
+                    TIMEOUT_PHASE_IDLE => Some(crate::TimeoutPhase::Idle),
+                    TIMEOUT_PHASE_BODY => Some(crate::TimeoutPhase::Body),
+                    _ => Some(crate::TimeoutPhase::Unknown),
+                };
+            }
+            scope = current.parent.as_deref();
+        }
+        Some(crate::TimeoutPhase::Unknown)
     }
 
     pub(crate) fn begin(&self, provider: &str, model: Option<&str>) -> Option<AttemptGuard> {
@@ -326,6 +406,10 @@ impl AttemptContext {
             terminal: false,
             running_usage: None,
             response_facts: AttemptResponseFacts::default(),
+            dispatched_at_unix_ms: now_unix_ms(),
+            stream_event_received: false,
+            first_stream_event_at_ms: None,
+            time_to_first_stream_event_ms: None,
         };
         guard.emit(AttemptPhase::Dispatch);
         Some(guard)
@@ -355,6 +439,10 @@ impl std::error::Error for AttemptContextError {}
 
 const CANCELLED: u8 = 0;
 const TIMED_OUT: u8 = 1;
+const TIMEOUT_PHASE_SETUP: u8 = crate::TimeoutPhase::Setup as u8;
+const TIMEOUT_PHASE_IDLE: u8 = crate::TimeoutPhase::Idle as u8;
+const TIMEOUT_PHASE_BODY: u8 = crate::TimeoutPhase::Body as u8;
+const TIMEOUT_PHASE_UNKNOWN: u8 = crate::TimeoutPhase::Unknown as u8;
 
 pub(crate) struct AttemptGuard {
     context: AttemptContext,
@@ -365,6 +453,10 @@ pub(crate) struct AttemptGuard {
     terminal: bool,
     running_usage: Option<ParsedUsage>,
     response_facts: AttemptResponseFacts,
+    dispatched_at_unix_ms: i64,
+    stream_event_received: bool,
+    first_stream_event_at_ms: Option<i64>,
+    time_to_first_stream_event_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -429,6 +521,11 @@ impl AttemptGuard {
             attempt_ordinal: self.ordinal,
             provider: self.provider.clone(),
             model: self.model.clone(),
+            upstream_host: self
+                .context
+                .configured_upstream_host
+                .as_deref()
+                .map(str::to_string),
             observed_at_unix_ms: now_unix_ms(),
             phase,
         };
@@ -446,6 +543,20 @@ impl AttemptGuard {
 
     pub(crate) fn set_response_facts(&mut self, facts: &AttemptResponseFacts) {
         self.response_facts = facts.clone();
+    }
+
+    pub(crate) fn record_stream_event(&mut self) {
+        if !self.stream_event_received {
+            self.stream_event_received = true;
+            let at = now_unix_ms();
+            self.first_stream_event_at_ms = Some(at);
+            self.time_to_first_stream_event_ms = Some(
+                (at - self.dispatched_at_unix_ms)
+                    .max(0)
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            );
+        }
     }
 
     pub(crate) fn cancellation_outcome(&self) -> AttemptOutcome {
@@ -494,6 +605,9 @@ impl AttemptGuard {
     }
 
     pub(crate) fn finish_error(&mut self, error: &ProviderError) {
+        if let ProviderError::Timeout(timeout) = error {
+            self.context.mark_timeout_phase(timeout.phase);
+        }
         let (outcome, status, request_id) = match error {
             ProviderError::Auth => (AttemptOutcome::ProviderRejected, None, None),
             ProviderError::RateLimited => (AttemptOutcome::ProviderRejected, Some(429), None),
@@ -546,12 +660,46 @@ impl AttemptGuard {
             return;
         }
         self.terminal = true;
+        let response_headers_received = self.response_values().0.is_some();
+        let timeout_phase = if outcome == AttemptOutcome::Timeout {
+            self.context.timeout_phase()
+        } else {
+            None
+        };
+        let error_class = match outcome {
+            AttemptOutcome::Success => TerminalErrorClass::None,
+            AttemptOutcome::ProviderRejected => TerminalErrorClass::Provider,
+            AttemptOutcome::TransportError => TerminalErrorClass::Transport,
+            AttemptOutcome::Timeout => TerminalErrorClass::Timeout,
+            AttemptOutcome::Cancelled => TerminalErrorClass::Cancelled,
+            AttemptOutcome::IncompleteStream => TerminalErrorClass::IncompleteStream,
+        };
+        let error_subtype = match outcome {
+            AttemptOutcome::Success => None,
+            AttemptOutcome::ProviderRejected => Some(TerminalErrorSubtype::HttpStatus),
+            AttemptOutcome::TransportError => Some(TerminalErrorSubtype::Network),
+            AttemptOutcome::Timeout => timeout_phase.map(|phase| match phase {
+                crate::TimeoutPhase::Setup => TerminalErrorSubtype::Setup,
+                crate::TimeoutPhase::Idle => TerminalErrorSubtype::Idle,
+                crate::TimeoutPhase::Body => TerminalErrorSubtype::Body,
+                crate::TimeoutPhase::Unknown => TerminalErrorSubtype::UnknownTimeout,
+            }),
+            AttemptOutcome::Cancelled => Some(TerminalErrorSubtype::Caller),
+            AttemptOutcome::IncompleteStream => Some(TerminalErrorSubtype::Incomplete),
+        };
         self.emit(AttemptPhase::Terminal {
             outcome,
             provider_status,
             provider_request_id,
             usage,
             usage_completeness,
+            response_headers_received,
+            stream_event_received: self.stream_event_received,
+            first_stream_event_at_ms: self.first_stream_event_at_ms,
+            time_to_first_stream_event_ms: self.time_to_first_stream_event_ms,
+            timeout_phase,
+            error_class,
+            error_subtype,
         });
     }
 
@@ -841,6 +989,7 @@ impl Stream for ObservedStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 if let Some(guard) = self.guard.as_mut() {
+                    guard.record_stream_event();
                     if let Some(usage) = chunk.usage_running {
                         guard.running_usage = Some(usage);
                     }
@@ -1103,7 +1252,7 @@ mod tests {
         while !recorded.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
-        timeout_context.mark_timeout();
+        timeout_context.mark_timeout_phase(crate::TimeoutPhase::Unknown);
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
 
@@ -1265,7 +1414,7 @@ mod tests {
         let timed_out_parent = root.fresh_call();
         let timed_out_child = timed_out_parent.fresh_call();
         let unaffected_sibling = root.fresh_call();
-        timed_out_parent.mark_timeout();
+        timed_out_parent.mark_timeout_phase(crate::TimeoutPhase::Setup);
         drop(timed_out_parent);
 
         drop(timed_out_child.begin("provider", Some("child")).unwrap());
@@ -1279,13 +1428,20 @@ mod tests {
             .drain()
             .into_iter()
             .filter_map(|observation| match observation.phase {
-                AttemptPhase::Terminal { outcome, .. } => Some(outcome),
+                AttemptPhase::Terminal {
+                    outcome,
+                    timeout_phase,
+                    ..
+                } => Some((outcome, timeout_phase)),
                 AttemptPhase::Dispatch => None,
             })
             .collect();
         assert_eq!(
             terminals,
-            vec![AttemptOutcome::Timeout, AttemptOutcome::Cancelled]
+            vec![
+                (AttemptOutcome::Timeout, Some(crate::TimeoutPhase::Setup)),
+                (AttemptOutcome::Cancelled, None)
+            ]
         );
     }
 

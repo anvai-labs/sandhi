@@ -328,15 +328,15 @@ pub fn wire_contract_version() -> String {
 }
 
 /// The neutral chat-contract (ChatRequestV1/ChatStreamEventV1) major version this
-/// build targets. Today equal to `wire_contract_version()` (pinned by a
-/// sandhi-core test); exported separately so a future split cannot silently
-/// invalidate consumer handshakes that validate the chat contract.
+/// build targets. As of the clean version-1 thinking-control contract this is
+/// distinct from `wire_contract_version()`; consumers must handshake with this
+/// chat-specific value rather than the usage-event version.
 #[napi]
 pub fn chat_contract_version() -> String {
     sandhi_core::chat::CHAT_SCHEMA_VERSION_V1.to_string()
 }
 
-/// Additive growth counter within the v1 chat contract (W3c). Consumers
+/// Growth counter within the current chat contract major version. Consumers
 /// feature-detect this export — an older binding without it reads as minor 0
 /// — and gate trust in newer additive fields on a minimum minor.
 #[napi]
@@ -381,6 +381,11 @@ pub fn chat_contract_schema_json(name: String) -> Result<String> {
 pub fn provider_descriptor_json(provider: String) -> Result<String> {
     let descriptor = sandhi_providers::provider_descriptor(&provider)
         .ok_or_else(|| Error::from_reason(format!("unknown provider: {provider}")))?;
+    let mut descriptor = descriptor;
+    descriptor
+        .models
+        .iter_mut()
+        .for_each(|model| model.thinking = model.thinking.sanitized());
     serde_json::to_string(&descriptor)
         .map_err(|error| Error::from_reason(format!("serialize provider descriptor: {error}")))
 }
@@ -391,7 +396,11 @@ pub fn provider_descriptor_json(provider: String) -> Result<String> {
 pub fn provider_models_json(provider: String) -> Result<String> {
     let descriptor = sandhi_providers::provider_descriptor(&provider)
         .ok_or_else(|| Error::from_reason(format!("unknown provider: {provider}")))?;
-    serde_json::to_string(&descriptor.models)
+    let mut models = descriptor.models;
+    models
+        .iter_mut()
+        .for_each(|model| model.thinking = model.thinking.sanitized());
+    serde_json::to_string(&models)
         .map_err(|error| Error::from_reason(format!("serialize provider models: {error}")))
 }
 

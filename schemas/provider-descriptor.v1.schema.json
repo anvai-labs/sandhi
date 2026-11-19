@@ -135,6 +135,17 @@
           ],
           "format": "uint64",
           "minimum": 0.0
+        },
+        "thinking": {
+          "description": "Omission means the model cannot configure thinking. An explicit unsupported descriptor serializes identically.",
+          "default": {
+            "supported": false
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThinkingCapabilityV1"
+            }
+          ]
         }
       }
     },
@@ -178,6 +189,110 @@
           "type": "boolean"
         }
       }
+    },
+    "ThinkingBudgetCapabilityV1": {
+      "description": "Canonical token-budget bounds accepted by an exact model.",
+      "type": "object",
+      "required": [
+        "max",
+        "min"
+      ],
+      "properties": {
+        "max": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "min": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThinkingCapabilityV1": {
+      "description": "Exact model-scoped thinking control facts.",
+      "type": "object",
+      "required": [
+        "supported"
+      ],
+      "properties": {
+        "allow_effort_and_budget": {
+          "type": "boolean"
+        },
+        "budget_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThinkingBudgetCapabilityV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "can_disable": {
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThinkingEffortCapabilityV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "encoding": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThinkingEncodingV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThinkingEffortCapabilityV1": {
+      "description": "Canonical effort values accepted by an exact model. Compatibility aliases are intentionally not modeled; callers send one of these advertised values.",
+      "type": "object",
+      "required": [
+        "values"
+      ],
+      "properties": {
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ThinkingEncodingV1": {
+      "description": "Canonical transport encoding for an admitted thinking control. This is a closed enum by design; operators qualify a model, they cannot invent JSON paths.",
+      "type": "string",
+      "enum": [
+        "openai_chat",
+        "openai_responses",
+        "anthropic_messages",
+        "gemini_generate_content",
+        "qwen_openai_chat",
+        "zai_openai_chat"
+      ]
     }
   }
 }

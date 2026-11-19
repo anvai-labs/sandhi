@@ -117,7 +117,10 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
         credential_generation: 1,
         endpoint_family: family,
         endpoint_profile: endpoint_profile.into(),
-        models: vec![serde_json::from_value(json!({"id":"gpt-4o-mini"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"gpt-4o-mini","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: None,
     })
 }
@@ -386,7 +389,7 @@ async fn persistent_gateway_clients_switch_profiles_and_join_source_receipts() {
                     );
                     assert_eq!(source["reasoning_included"], profile != "gemini");
                     assert_eq!(attempt["attempt_ordinal"], 1);
-                    assert_eq!(attempt["version"], 2);
+                    assert_eq!(attempt["version"], 1);
                     assert_eq!(
                         attempt["observed_provider"]["provider"],
                         format!("vendor-{profile}")
@@ -718,7 +721,7 @@ async fn old_only_upstream_cap_blocks_changed_vendor_and_family_before_dispatch(
     let dir = TestDirectory::new();
     let database = dir.path().join("namespace.db");
     let store = BackendStore::open(database.to_str().unwrap()).unwrap();
-    let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"pinned","provider":"first-vendor","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":"anthropic_messages"},"models":[{"id":"gpt-4o-mini"}]})).unwrap();
+    let mut definition:BackendDefinition=serde_json::from_value(json!({"id":"pinned","provider":"first-vendor","credential_ref":"vendor:fixture","endpoint":{"endpoint_family":"anthropic_messages"},"models":[{"id":"gpt-4o-mini","thinking":{"supported":false}}]})).unwrap();
     let before = store.put(&definition, None).unwrap();
     assert_eq!(before.upstream_budget_scope, "upstream:anthropic");
     definition.provider = "second-vendor".into();

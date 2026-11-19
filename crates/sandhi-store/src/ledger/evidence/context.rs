@@ -64,6 +64,39 @@ pub enum Operation {
 }
 /// No arbitrary extensions, prompt/body, raw identity hint, URL, header or secret.
 /// This is trusted composition data; deserialization does not confer authority.
+/// Effective server-selected stream deadlines, frozen before admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamingPolicyContext {
+    pub setup_ms: u64,
+    pub idle_ms: u64,
+    pub body_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportPolicyContext {
+    Buffered {
+        duration_ms: u64,
+    },
+    Streaming(StreamingPolicyContext),
+    /// Historical buffered rows only; the old pre-GA ledger did not freeze this duration.
+    #[serde(rename = "buffered_legacy_unavailable")]
+    HistoricalBufferedUnavailable,
+    /// Historical durable rows only. The limits were not frozen by the old pre-GA ledger and
+    /// cannot be inferred. Active admission validation rejects this variant.
+    #[serde(rename = "streaming_legacy_unavailable")]
+    HistoricalStreamingUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportContext {
+    /// Configured host only; scheme, credentials, path, and query never enter evidence.
+    pub upstream_host: Option<String>,
+    pub policy: TransportPolicyContext,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionContext {
@@ -79,6 +112,7 @@ pub struct ExecutionContext {
     pub actual_model: String,
     pub provider: String,
     pub endpoint_family: EndpointFamilyV1,
+    pub transport: TransportContext,
     /// Wrapped actual transport identity; never the standalone credential digest.
     pub transport_binding_sha256: String,
     pub route: Option<RouteContext>,
@@ -120,6 +154,28 @@ impl ExecutionContext {
             && label(&self.requested_model, 512)
             && label(&self.actual_model, 512)
             && label(&self.provider, 128)
+            && self.transport.upstream_host.as_ref().is_none_or(|host| {
+                !host.is_empty()
+                    && host.len() <= 255
+                    && (if host.contains(':') {
+                        host.parse::<std::net::Ipv6Addr>().is_ok()
+                    } else {
+                        host.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+                    })
+            })
+            && match (&self.delivery, &self.transport.policy) {
+                (Delivery::Buffered, TransportPolicyContext::Buffered { .. }) => true,
+                (
+                    Delivery::Streaming,
+                    TransportPolicyContext::Streaming(StreamingPolicyContext {
+                        setup_ms,
+                        idle_ms,
+                        body_ms,
+                    }),
+                ) => *setup_ms > 0 && *idle_ms > 0 && *body_ms > 0,
+                _ => false,
+            }
             && digest(&self.transport_binding_sha256)
             && self.content_policy_revision.is_none_or(|v| v > 0)
             && self.route.as_ref().is_none_or(|r| {
@@ -140,10 +196,14 @@ impl ExecutionContext {
                             | "chatgpt_codex"
                             | "anthropic_implicit_cache"
                             | "openai_terminal_chunk_usage"
+                            | "zai_final_choice_usage"
+                            | "deepseek_final_choice_usage"
                     )
                     && (b.endpoint_profile != "anthropic_implicit_cache"
                         || self.endpoint_family == EndpointFamilyV1::AnthropicMessages)
                     && (b.endpoint_profile != "openai_terminal_chunk_usage"
+                        && b.endpoint_profile != "zai_final_choice_usage"
+                        && b.endpoint_profile != "deepseek_final_choice_usage"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
                     && (b.endpoint_profile != "chatgpt_codex"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiResponses)
@@ -163,6 +223,28 @@ impl ExecutionContext {
             return Err(EvidenceError::InvalidInput);
         }
         Ok(encoded)
+    }
+
+    fn validate_historical(&self) -> Result<(), EvidenceError> {
+        if self.transport.upstream_host.is_some()
+            || self.transport.policy
+                != match self.delivery {
+                    Delivery::Buffered => TransportPolicyContext::HistoricalBufferedUnavailable,
+                    Delivery::Streaming => TransportPolicyContext::HistoricalStreamingUnavailable,
+                }
+        {
+            return Err(EvidenceError::InvalidInput);
+        }
+        let mut active_equivalent = self.clone();
+        active_equivalent.transport.policy = match self.delivery {
+            Delivery::Buffered => TransportPolicyContext::Buffered { duration_ms: 1 },
+            Delivery::Streaming => TransportPolicyContext::Streaming(StreamingPolicyContext {
+                setup_ms: 1,
+                idle_ms: 1,
+                body_ms: 1,
+            }),
+        };
+        active_equivalent.validate()
     }
 }
 
@@ -196,9 +278,13 @@ pub(super) fn read(
             let value: ExecutionContext =
                 serde_json::from_str(&encoded).map_err(|_| EvidenceError::CorruptObservation)?;
             if value
-                .encode()
-                .map_err(|_| EvidenceError::CorruptObservation)?
-                != encoded
+                .validate_historical()
+                .map_err(|_| EvidenceError::CorruptObservation)
+                .is_err()
+                && value
+                    .encode()
+                    .map_err(|_| EvidenceError::CorruptObservation)?
+                    != encoded
             {
                 return Err(EvidenceError::CorruptObservation);
             }
@@ -355,6 +441,12 @@ mod tests {
             actual_model: "physical".into(),
             provider: "openai".into(),
             endpoint_family: EndpointFamilyV1::OpenaiChatCompletions,
+            transport: TransportContext {
+                upstream_host: Some("upstream.test".into()),
+                policy: TransportPolicyContext::Buffered {
+                    duration_ms: 30_000,
+                },
+            },
             transport_binding_sha256: "a".repeat(64),
             route: None,
             backend: None,
@@ -366,6 +458,41 @@ mod tests {
             content_policy_revision: None,
         }
     }
+
+    #[test]
+    fn terminal_chat_usage_profiles_can_freeze_durable_contexts() {
+        for profile in [
+            "openai_terminal_chunk_usage",
+            "zai_final_choice_usage",
+            "deepseek_final_choice_usage",
+        ] {
+            let mut value = context();
+            value.backend = Some(BackendContext {
+                id: "fixture".into(),
+                revision: 1,
+                credential_ref: "openai:fixture".into(),
+                credential_generation: 1,
+                endpoint_profile: profile.into(),
+            });
+            value
+                .validate()
+                .unwrap_or_else(|error| panic!("{profile}: {error:?}"));
+
+            value.endpoint_family = EndpointFamilyV1::AnthropicMessages;
+            assert!(value.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn durable_transport_host_accepts_ipv6_literals_only() {
+        let mut value = context();
+        value.transport.upstream_host = Some("2001:db8::1".into());
+        value.validate().unwrap();
+
+        value.transport.upstream_host = Some("2001:db8:not-ipv6".into());
+        assert!(value.validate().is_err());
+    }
+
     fn admit(
         ledger: &mut SqliteLedger,
         context: &ExecutionContext,
@@ -390,11 +517,13 @@ mod tests {
         assert!(!encoded.contains("operation"));
         let mut operation = historical.clone();
         operation.ingress = EndpointFamilyV1::OpenaiChatCompletions;
+        operation.endpoint_family = EndpointFamilyV1::OpenaiChatCompletions;
         operation.plane = Plane::Transparent;
         operation.operation = Some(Operation::Embedding);
         assert!(operation.validate().is_ok());
         operation.delivery = Delivery::Streaming;
         assert!(operation.validate().is_err());
+        operation.delivery = Delivery::Buffered;
         operation.operation = Some(Operation::TextCompletion);
         assert!(operation.validate().is_ok());
         operation.plane = Plane::Translation;
