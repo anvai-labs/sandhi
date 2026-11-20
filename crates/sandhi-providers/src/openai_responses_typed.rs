@@ -338,12 +338,17 @@ pub(crate) fn encode_responses_request_base(
                 "thinking control was not admitted for OpenAI responses".into(),
             ));
         }
-        if !thinking.enabled || thinking.budget_tokens.is_some() {
+        if thinking.budget_tokens.is_some() {
             return Err(ProviderError::InvalidRequest(
-                "OpenAI responses thinking supports enabled effort only".into(),
+                "OpenAI responses thinking does not support a token budget".into(),
             ));
         }
-        let Some(effort) = &thinking.effort else {
+        let effort = if thinking.enabled {
+            thinking.effort.as_deref()
+        } else {
+            Some("none")
+        };
+        let Some(effort) = effort else {
             return Err(ProviderError::InvalidRequest(
                 "OpenAI responses thinking requires an effort value".into(),
             ));
@@ -356,7 +361,7 @@ pub(crate) fn encode_responses_request_base(
                 "Responses reasoning must be a JSON object".into(),
             ));
         };
-        obj.insert("effort".into(), Value::String(effort.clone()));
+        obj.insert("effort".into(), Value::String(effort.into()));
     } else if request.compiled_thinking.is_some() {
         return Err(ProviderError::InvalidRequest(
             "compiled thinking has no semantic request".into(),

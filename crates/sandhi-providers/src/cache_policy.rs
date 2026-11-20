@@ -15,7 +15,13 @@ fn invalid(message: impl Into<String>) -> ProviderError {
 
 fn openai_control_matches(value: &Value, thinking: &sandhi_core::chat::ThinkingRequestV1) -> bool {
     match value {
-        Value::String(effort) => thinking.effort.as_deref() == Some(effort),
+        Value::String(effort) => {
+            if thinking.enabled {
+                thinking.effort.as_deref() == Some(effort)
+            } else {
+                effort == "none"
+            }
+        }
         Value::Bool(enabled) => thinking.enabled == *enabled,
         Value::Number(budget) => {
             thinking.enabled
@@ -73,11 +79,7 @@ fn openai_native_thinking_matches(body: &Map<String, Value>, request: &ChatReque
 }
 
 fn responses_native_thinking_matches(body: &Map<String, Value>, request: &ChatRequestV1) -> bool {
-    let Some(effort) = request
-        .thinking
-        .as_ref()
-        .and_then(|thinking| thinking.effort.as_deref())
-    else {
+    let Some(thinking) = &request.thinking else {
         return false;
     };
     let top_level = body.get("reasoning_effort");
@@ -89,7 +91,27 @@ fn responses_native_thinking_matches(body: &Map<String, Value>, request: &ChatRe
         .into_iter()
         .flatten()
         .filter(|value| !value.is_null())
-        .all(|value| value.as_str() == Some(effort))
+        .all(|value| value.is_string() && openai_control_matches(value, thinking))
+}
+
+fn openai_gateway_thinking_encoding(request: &ChatRequestV1) -> ThinkingEncodingV1 {
+    let native = request
+        .native_input
+        .as_ref()
+        .filter(|source| source.endpoint_family == Family::OpenaiChatCompletions)
+        .and_then(|_| request.extensions.get("openai"));
+    let has = |key| {
+        native
+            .and_then(|body| body.get(key))
+            .is_some_and(|value| !value.is_null())
+    };
+    if has("thinking") {
+        ThinkingEncodingV1::ZaiOpenaiChat
+    } else if has("enable_thinking") || has("thinking_budget") {
+        ThinkingEncodingV1::QwenOpenaiChat
+    } else {
+        ThinkingEncodingV1::OpenaiChat
+    }
 }
 
 fn openai_native_encoding_matches(
@@ -158,35 +180,41 @@ fn native_thinking_conflict(
                     && (encoding != Some(ThinkingEncodingV1::OpenaiResponses)
                         || !responses_native_thinking_matches(body, request)))
         }),
-        Family::AnthropicMessages => object("anthropic").is_some_and(|body| {
-            if request.thinking.is_some() {
-                body.get("thinking")
-                    .is_some_and(|thinking| !thinking.is_object())
-            } else {
-                body.contains_key("thinking")
-            }
-        }),
+        Family::AnthropicMessages => {
+            object("anthropic").is_some_and(
+                |body| match crate::thinking::decode_anthropic_thinking(body) {
+                    Ok(None) => false,
+                    Ok(native) => {
+                        encoding != Some(ThinkingEncodingV1::AnthropicMessages)
+                            || native != request.thinking
+                    }
+                    Err(_) => true,
+                },
+            )
+        }
         Family::GeminiGenerateContent => object("gemini").is_some_and(|body| {
-            body.get("generationConfig")
-                .and_then(|generation| generation.get("thinkingConfig"))
-                .is_some_and(|config| {
-                    if config.is_null() {
-                        return false;
-                    }
-                    let Some(config) = config.as_object() else {
-                        return true;
-                    };
-                    if config.is_empty() {
-                        return false;
-                    }
-                    let budget = config
-                        .get("thinkingBudget")
-                        .or_else(|| config.get("thinking_budget"));
-                    request.thinking.is_none() && budget.is_some_and(|value| !value.is_null())
-                        || config.keys().any(|key| {
-                            !matches!(key.as_str(), "thinkingBudget" | "thinking_budget")
-                        })
+            let extras = crate::thinking::gemini_generation_config(body)
+                .and_then(|config| {
+                    config
+                        .map(crate::thinking::gemini_thinking_config)
+                        .transpose()
                 })
+                .is_ok_and(|config| {
+                    config.flatten().is_some_and(|thinking| {
+                        thinking
+                            .keys()
+                            .any(|key| !crate::thinking::is_gemini_thinking_field(key))
+                    })
+                });
+            extras
+                || match crate::thinking::decode_gemini_thinking(body) {
+                    Ok(None) => false,
+                    Ok(native) => {
+                        encoding != Some(ThinkingEncodingV1::GeminiGenerateContent)
+                            || native != request.thinking
+                    }
+                    Err(_) => true,
+                }
         }),
         Family::CohereChat
         | Family::OllamaChat
@@ -482,7 +510,6 @@ impl ProviderHandle {
         &self,
         mut request: ChatRequestV1,
     ) -> Result<ChatRequestV1, ProviderError> {
-        let compiled_thinking = self.compile_thinking_request(&request)?;
         if self.peer_role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
             if request.compiled_cache.is_some() {
                 return Err(invalid(
@@ -490,10 +517,45 @@ impl ProviderHandle {
                 ));
             }
             request.validate().map_err(invalid)?;
-            request.compiled_thinking = compiled_thinking;
+            if request.compiled_thinking.is_some() {
+                return Err(invalid(
+                    "gateway peer cannot accept a client-compiled thinking control",
+                ));
+            }
+            let family = self.family().endpoint_family();
+            // A gateway peer knows the syntax of its immediate ingress dialect.
+            // The server knows the routed model and owns its capability admission.
+            let encoding = request
+                .thinking
+                .as_ref()
+                .map(|thinking| {
+                    if thinking.enabled
+                        && thinking.effort.is_none()
+                        && thinking.budget_tokens.is_none()
+                        && family != Family::AnthropicMessages
+                    {
+                        return Err(invalid("explicit thinking enable requires a control"));
+                    }
+                    match family {
+                        Family::OpenaiChatCompletions => {
+                            Ok(openai_gateway_thinking_encoding(&request))
+                        }
+                        Family::OpenaiResponses => Ok(ThinkingEncodingV1::OpenaiResponses),
+                        Family::AnthropicMessages => Ok(ThinkingEncodingV1::AnthropicMessages),
+                        Family::GeminiGenerateContent => {
+                            Ok(ThinkingEncodingV1::GeminiGenerateContent)
+                        }
+                        _ => Err(invalid(
+                            "thinking is unsupported by this gateway ingress dialect",
+                        )),
+                    }
+                })
+                .transpose()?;
+            native_thinking_conflict(&request, family, encoding)?;
+            request.compiled_thinking = encoding;
             return Ok(request);
         }
-        request.compiled_thinking = compiled_thinking;
+        request.compiled_thinking = self.compile_thinking_request(&request)?;
         request.compiled_cache = self.compile_cache_plan(&request)?;
         Ok(request)
     }
@@ -968,6 +1030,24 @@ pub(crate) fn encode_for_peer(
     let object = body
         .as_object_mut()
         .ok_or_else(|| invalid("gateway request requires an object"))?;
+    if family == Family::OpenaiChatCompletions
+        && request
+            .native_input
+            .as_ref()
+            .is_some_and(|native| native.endpoint_family == family)
+    {
+        // The SDK decoder separates the reserved target buckets from the
+        // OpenAI body. Restore them for the gateway that owns backend admission.
+        let extensions: Map<String, Value> = request
+            .extensions
+            .iter()
+            .filter(|(name, _)| name.as_str() != "openai")
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        if !extensions.is_empty() {
+            object.insert("sandhi_extensions".into(), Value::Object(extensions));
+        }
+    }
     if object.contains_key("sandhi_cache") {
         return Err(invalid(
             "gateway cache intent must use the typed cache_intent field",
@@ -1074,6 +1154,55 @@ mod thinking_admission_tests {
         request.model = "not-in-any-catalog".into();
         assert!(provider.preflight_request(&request).is_err());
         assert!(provider.encode_execution_request(&request).is_err());
+    }
+
+    #[test]
+    fn gateway_peer_encodes_thinking_for_a_server_owned_model_alias() {
+        let gateway =
+            crate::ProviderRuntime::new().gateway_peer(crate::typed::ProviderTransportConfig::new(
+                ProviderFamily::OpenAiCompat,
+                "openai",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+            ));
+        for (control, wire) in [
+            (ThinkingRequestV1::enabled().with_effort("medium"), "medium"),
+            (ThinkingRequestV1::disabled(), "none"),
+        ] {
+            let request = request(control);
+            assert!(gateway.model_descriptor(&request.model).is_none());
+            assert_eq!(
+                gateway.encode_execution_request(&request).unwrap()["reasoning_effort"],
+                wire
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_peer_preserves_sdk_chat_thinking_spellings_for_server_admission() {
+        let gateway =
+            crate::ProviderRuntime::new().gateway_peer(crate::typed::ProviderTransportConfig::new(
+                ProviderFamily::OpenAiCompat,
+                "openai",
+                "http://127.0.0.1:1/v1",
+                "synthetic",
+            ));
+        for (key, value) in [
+            ("thinking_budget", json!(2048)),
+            ("thinking", json!({"type":"enabled","budget_tokens":2048})),
+        ] {
+            let mut request = request(ThinkingRequestV1::enabled().with_budget(2048));
+            let mut body = json!({"messages":[{"role":"user","content":"hello"}]});
+            body[key] = value.clone();
+            request.extensions.insert("openai".into(), body);
+            request
+                .capture_native_input(EndpointFamilyV1::OpenaiChatCompletions, vec![])
+                .unwrap();
+            assert_eq!(
+                gateway.encode_execution_request(&request).unwrap()[key],
+                value
+            );
+        }
     }
 
     #[test]

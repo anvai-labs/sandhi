@@ -17,6 +17,7 @@ pub mod cache_read;
 pub mod chat;
 pub use cache_policy::*;
 pub mod native_input;
+pub mod native_references;
 pub use native_input::{NativeInputFeatureV1, NativeInputV1};
 pub mod conformance;
 pub mod peer;

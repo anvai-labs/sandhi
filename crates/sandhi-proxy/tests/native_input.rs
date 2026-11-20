@@ -718,7 +718,7 @@ async fn unadvertised_native_gemini_thinking_control_fails_before_reservation_an
         let upstream = MockServer::start().await;
         let (state, sink) = state(Family::GeminiGenerateContent, &upstream);
         let original = json!({"contents":[{"role":"user","parts":[{"text":"hello"}]}],
-            "generationConfig":{"thinkingConfig":{"thinkingLevel":"high"}}});
+            "generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}});
         let (status, body) = call(&state, Family::GeminiGenerateContent, original, stream).await;
         assert_eq!(
             status,

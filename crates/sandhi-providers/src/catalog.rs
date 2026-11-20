@@ -347,7 +347,17 @@ pub fn anthropic_models() -> Vec<ModelDescriptorV1> {
             max_output_tokens: Some(max_output),
             default_temperature: Some(1.0),
             capabilities: caps.clone(),
-            thinking: ThinkingCapabilityV1::unsupported(),
+            thinking: if id == "claude-sonnet-4-6" {
+                let mut capability = ThinkingCapabilityV1::effort(
+                    ThinkingEncodingV1::AnthropicMessages,
+                    &["low", "medium", "high", "max"],
+                    Some("high"),
+                );
+                capability.can_disable = true;
+                capability
+            } else {
+                ThinkingCapabilityV1::unsupported()
+            },
             endpoint_url: None,
             extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
         },
@@ -373,6 +383,12 @@ pub fn gemini_models() -> Vec<ModelDescriptorV1> {
     [
         ("gemini-3-pro", "Gemini 3 Pro", 1_048_576u64, 65_536u64),
         ("gemini-3-flash", "Gemini 3 Flash", 1_048_576, 65_536),
+        (
+            "gemini-3-flash-preview",
+            "Gemini 3 Flash Preview",
+            1_048_576,
+            65_536,
+        ),
     ]
     .into_iter()
     .map(
@@ -383,7 +399,15 @@ pub fn gemini_models() -> Vec<ModelDescriptorV1> {
             max_output_tokens: Some(max_output),
             default_temperature: Some(1.0),
             capabilities: caps.clone(),
-            thinking: ThinkingCapabilityV1::unsupported(),
+            thinking: if id == "gemini-3-flash-preview" {
+                ThinkingCapabilityV1::effort(
+                    ThinkingEncodingV1::GeminiGenerateContent,
+                    &["minimal", "low", "medium", "high"],
+                    Some("high"),
+                )
+            } else {
+                ThinkingCapabilityV1::unsupported()
+            },
             endpoint_url: None,
             extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
         },

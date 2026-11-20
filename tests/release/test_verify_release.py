@@ -131,7 +131,7 @@ class VerifyReleaseTests(unittest.TestCase):
     def test_complete_release_and_credential_isolation(self):
         output = []
         self.assertEqual(verify.main([VERSION, "--attempts", "1"], environ={}, client=self.client, emit=output.append), 0)
-        self.assertEqual(len(self.network.requests), 11)
+        self.assertEqual(len(self.network.requests), 7 + len(verify.CRATES))
         for request, timeout in self.network.requests:
             self.assertGreater(timeout, 0)
             self.assertLessEqual(timeout, 20)
@@ -428,14 +428,14 @@ class VerifyReleaseTests(unittest.TestCase):
             self.assertIn("SKIP crates: explicitly not expected; unverified", output)
             self.assertNotIn("All explicitly expected targets verified", output)
 
-    def test_all_four_crates_still_checked_after_one_fails(self):
+    def test_all_crates_still_checked_after_one_fails(self):
         missing = f"https://crates.io/api/v1/crates/{verify.CRATES[0]}/{VERSION}"
         self.routes[missing] = urllib.error.HTTPError(missing, 404, "absent", {}, None)
         output = []
         self.assertEqual(verify.main([VERSION, "--targets", "crates", "--attempts", "1"],
                                       environ={}, client=self.client, emit=output.append), 1)
-        self.assertEqual(len(self.network.requests), 4)
-        self.assertEqual(sum(line.startswith("OK sandhi-") for line in output), 3)
+        self.assertEqual(len(self.network.requests), len(verify.CRATES))
+        self.assertEqual(sum(line.startswith("OK sandhi-") for line in output), len(verify.CRATES) - 1)
 
 
 if __name__ == "__main__":

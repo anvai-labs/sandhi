@@ -549,6 +549,11 @@ impl ProviderHandle {
         self.family
     }
 
+    #[must_use]
+    pub fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     pub fn supports_native_stream(&self) -> bool {
         self.inner.supports_native_stream()
     }
@@ -1881,7 +1886,19 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
         body.insert("tool_choice".into(), encode_tool_choice(choice));
     }
     insert_optional(&mut body, "temperature", request.temperature);
-    insert_optional(&mut body, "max_tokens", request.max_output_tokens);
+    // A native Chat SDK request may use the modern field (required by some
+    // OpenAI models). Keep its spelling while applying the admitted limit.
+    let output_limit_field = if body
+        .get("max_completion_tokens")
+        .is_some_and(|v| !v.is_null())
+    {
+        body.remove("max_tokens");
+        "max_completion_tokens"
+    } else {
+        body.remove("max_completion_tokens");
+        "max_tokens"
+    };
+    insert_optional(&mut body, output_limit_field, request.max_output_tokens);
     insert_optional(&mut body, "seed", request.seed);
     if let Some(stop) = &request.stop {
         body.insert("stop".into(), json!(stop));
@@ -1906,17 +1923,22 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
             .expect("admitted thinking carries an encoding")
         {
             ThinkingEncodingV1::OpenaiChat => {
-                let Some(effort) = &thinking.effort else {
+                let effort = if thinking.enabled {
+                    thinking.effort.as_deref()
+                } else {
+                    Some("none")
+                };
+                let Some(effort) = effort else {
                     return Err(ProviderError::InvalidRequest(
                         "OpenAI chat thinking supports effort only".into(),
                     ));
                 };
-                if !thinking.enabled || thinking.budget_tokens.is_some() {
+                if thinking.budget_tokens.is_some() {
                     return Err(ProviderError::InvalidRequest(
-                        "OpenAI chat thinking supports enabled effort only".into(),
+                        "OpenAI chat thinking does not support a token budget".into(),
                     ));
                 }
-                body.insert("reasoning_effort".into(), Value::String(effort.clone()));
+                body.insert("reasoning_effort".into(), Value::String(effort.into()));
             }
             ThinkingEncodingV1::QwenOpenaiChat => {
                 if !thinking.enabled {

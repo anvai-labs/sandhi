@@ -957,7 +957,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sandhi-core"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "regex",
  "schemars",
@@ -969,14 +969,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandhi-dialect"
+version = "0.23.0"
+dependencies = [
+ "base64",
+ "http",
+ "sandhi-core",
+ "sandhi-providers",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "sandhi-gateway-py"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "futures-util",
  "pyo3",
  "pyo3-async-runtimes",
  "reqwest",
  "sandhi-core",
+ "sandhi-dialect",
  "sandhi-providers",
  "serde_json",
  "time",
@@ -985,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "async-stream",
  "async-trait",

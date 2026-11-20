@@ -38,7 +38,7 @@ import urllib.parse
 import urllib.request
 
 USER_AGENT = "sandhi-release-verify (https://github.com/anvai-labs/sandhi)"
-CRATES = ("sandhi-core", "sandhi-providers", "sandhi-store", "sandhi-proxy")
+CRATES = ("sandhi-core", "sandhi-providers", "sandhi-dialect", "sandhi-store", "sandhi-proxy")
 PYPI_PACKAGE = "sandhi-gateway"
 NPM_PACKAGE = "@anvailabs/sandhi"
 TARGETS = ("pypi", "crates", "npm", "github")
