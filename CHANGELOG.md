@@ -19,6 +19,11 @@ A partly published release remains incomplete even when some artifacts are avail
 
 ## [Unreleased]
 
+## [0.22.1] — Source candidate, 2026-11-20
+
+- Correct the release wheel metadata guard so composite manylinux filenames expand to their full internal `cp311-abi3-*` tag set. The previous guard expected one internal tag and incorrectly rejected valid manylinux2014/manylinux_2_17 wheels.
+- Retain the unpublished immutable `v0.22.0` tag and recover with a reviewed `v0.22.1` source version. The failed `v0.22.0` release skipped all registry and GitHub publishers.
+
 ## [0.22.0] — Source candidate, 2026-11-19
 
 - Add one semantic chat thinking control with exact model-scoped capability facts. Admitted

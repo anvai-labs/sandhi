@@ -145,7 +145,7 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
       - name: Verify built wheel release identity
         shell: bash
-        run: python3 scripts/check_wheel_metadata.py --wheel-dir dist --version "$RELEASE_VERSION"
+        run: python3 scripts/check_wheel_metadata.py --wheel-dir dist --version "$RELEASE_VERSION" --target "${{ matrix.target }}" --manylinux "${{ matrix.manylinux }}"
       - name: Install and import the built wheel
         shell: bash
         run: |
