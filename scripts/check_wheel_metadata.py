@@ -13,6 +13,14 @@ import tomllib
 import zipfile
 
 
+TARGET_PLATFORM_PATTERNS = {
+    "x86_64-unknown-linux-gnu": r"(?:manylinux[0-9_]+|linux)_x86_64",
+    "aarch64-unknown-linux-gnu": r"manylinux[0-9_]+_aarch64",
+    "aarch64-apple-darwin": r"macosx_[0-9]+_[0-9]+_arm64",
+    "x86_64-pc-windows-msvc": r"win_amd64",
+}
+
+
 def workspace_version(root: Path) -> str:
     document = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     version = document["workspace"]["package"]["version"]
@@ -23,7 +31,9 @@ def workspace_version(root: Path) -> str:
     return version
 
 
-def check_wheel(wheel: Path, expected_version: str) -> dict[str, str]:
+def check_wheel(
+    wheel: Path, expected_version: str, target: str, manylinux: str = "auto"
+) -> dict[str, str]:
     identity = re.fullmatch(
         rf"sandhi_gateway-{re.escape(expected_version)}-(cp311-abi3-.+)\.whl",
         wheel.name,
@@ -31,6 +41,43 @@ def check_wheel(wheel: Path, expected_version: str) -> dict[str, str]:
     if identity is None:
         raise ValueError(f"wheel filename identity/tag mismatch: {wheel.name}")
     filename_tag = identity.group(1)
+    if not re.fullmatch(r"cp311-abi3-[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*", filename_tag):
+        raise ValueError(f"wheel filename contains a malformed tag: {wheel.name}")
+    primary_tag, *alias_platform_tags = filename_tag.split(".")
+    interpreter_abi = "-".join(primary_tag.split("-", 2)[:2])
+    expected_tags = [
+        primary_tag,
+        *(f"{interpreter_abi}-{platform_tag}" for platform_tag in alias_platform_tags),
+    ]
+    if len(expected_tags) != len(set(expected_tags)):
+        raise ValueError("wheel filename contains duplicate tags")
+    target_pattern = TARGET_PLATFORM_PATTERNS.get(target)
+    if target_pattern is None:
+        raise ValueError(f"unsupported release wheel target: {target}")
+    advertised_platforms = {tag.split("-", 2)[-1] for tag in expected_tags}
+    if target in {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}:
+        architecture = target.split("-", 1)[0]
+        if manylinux != "2014":
+            raise ValueError(f"unsupported Linux wheel policy: manylinux={manylinux!r}")
+        required_platforms = {
+            f"manylinux2014_{architecture}",
+            f"manylinux_2_17_{architecture}",
+        }
+        if advertised_platforms != required_platforms:
+            raise ValueError(
+                f"wheel platforms {sorted(advertised_platforms)!r} do not exactly match "
+                f"the configured manylinux2014 policy for {target}"
+            )
+    else:
+        if manylinux != "auto":
+            raise ValueError(f"manylinux policy is not valid for {target}")
+        if len(expected_tags) != 1:
+            raise ValueError(f"{target} wheel must advertise exactly one deployment tag")
+        platform_tag = next(iter(advertised_platforms))
+        if re.fullmatch(target_pattern, platform_tag) is None:
+            raise ValueError(
+                f"wheel platform {platform_tag!r} is incompatible with release target {target}"
+            )
 
     with zipfile.ZipFile(wheel) as archive:
         metadata_names = [
@@ -59,7 +106,7 @@ def check_wheel(wheel: Path, expected_version: str) -> dict[str, str]:
             f"wheel generator mismatch: {wheel_metadata.get('Generator')!r}; expected Maturin 1.16.0"
         )
     tags = wheel_metadata.get_all("Tag", [])
-    if tags != [filename_tag]:
+    if len(tags) != len(set(tags)) or set(tags) != set(expected_tags):
         raise ValueError("internal wheel tags disagree with the wheel filename")
 
     return {
@@ -76,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheel-dir", type=Path, required=True)
     parser.add_argument("--version")
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--manylinux", default="auto")
     args = parser.parse_args(argv)
     try:
         expected = args.version or workspace_version(root)
@@ -86,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         wheels = sorted(args.wheel_dir.resolve().glob("*.whl"))
         if len(wheels) != 1:
             raise ValueError(f"expected exactly one built wheel, found {len(wheels)}")
-        result = check_wheel(wheels[0], expected)
+        result = check_wheel(wheels[0], expected, args.target, args.manylinux)
     except (OSError, KeyError, TypeError, ValueError, zipfile.BadZipFile) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
