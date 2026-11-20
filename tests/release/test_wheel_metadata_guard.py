@@ -24,9 +24,10 @@ def make_wheel(
     generator="maturin (1.16.0)",
     purelib="false",
     internal_tag=None,
+    filename_tag="manylinux2014_x86_64.manylinux_2_17_x86_64",
+    internal_tags=None,
 ):
-    platform_tag = "manylinux_2_34_x86_64"
-    wheel = path / f"sandhi_gateway-{version}-cp311-abi3-manylinux_2_34_x86_64.whl"
+    wheel = path / f"sandhi_gateway-{version}-cp311-abi3-{filename_tag}.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
             f"sandhi_gateway-{version}.dist-info/METADATA",
@@ -37,14 +38,26 @@ def make_wheel(
             "Wheel-Version: 1.0\n"
             f"Generator: {generator}\n"
             f"Root-Is-Purelib: {purelib}\n"
-            f"Tag: {internal_tag or 'cp311-abi3-' + platform_tag}\n",
+            + "".join(
+                f"Tag: {tag}\n"
+                for tag in (
+                    internal_tags
+                    or (
+                        (internal_tag,)
+                        if internal_tag
+                        else tuple(f"cp311-abi3-{tag}" for tag in filename_tag.split("."))
+                    )
+                )
+            ),
         )
     return wheel
 
 
 def test_accepts_exact_release_identity(tmp_path):
     wheel = make_wheel(tmp_path)
-    result = guard.check_wheel(wheel, "0.22.0")
+    result = guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
     assert result["name"] == "sandhi-gateway"
     assert result["version"] == "0.22.0"
     assert result["generator"] == "maturin (1.16.0)"
@@ -63,7 +76,98 @@ def test_accepts_exact_release_identity(tmp_path):
 def test_rejects_stale_or_wrong_wheel_identity(tmp_path, kwargs):
     wheel = make_wheel(tmp_path, **kwargs)
     with pytest.raises(ValueError, match="mismatch|native|tags"):
-        guard.check_wheel(wheel, "0.22.0")
+        guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
+
+
+def test_accepts_composite_manylinux_filename_aliases(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="manylinux2014_x86_64.manylinux_2_17_x86_64",
+        internal_tags=(
+            "cp311-abi3-manylinux2014_x86_64",
+            "cp311-abi3-manylinux_2_17_x86_64",
+        ),
+    )
+    result = guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
+    assert result["version"] == "0.22.0"
+
+
+def test_rejects_empty_composite_manylinux_filename_aliases(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="manylinux2014_x86_64..manylinux_2_17_x86_64",
+        internal_tags=(
+            "cp311-abi3-manylinux2014_x86_64",
+            "cp311-abi3-",
+            "cp311-abi3-manylinux_2_17_x86_64",
+        ),
+    )
+    with pytest.raises(ValueError, match="malformed tag"):
+        guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
+
+
+def test_rejects_duplicate_filename_tags(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64",
+        internal_tags=(
+            "cp311-abi3-manylinux2014_x86_64",
+            "cp311-abi3-manylinux_2_17_x86_64",
+        ),
+    )
+    with pytest.raises(ValueError, match="duplicate tags"):
+        guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
+
+
+def test_rejects_platform_tags_for_another_release_target(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="manylinux2014_x86_64.manylinux_2_17_aarch64",
+        internal_tags=(
+            "cp311-abi3-manylinux2014_x86_64",
+            "cp311-abi3-manylinux_2_17_aarch64",
+        ),
+    )
+    with pytest.raises(ValueError, match="incompatible with release target|exactly match the configured manylinux2014"):
+        guard.check_wheel(
+        wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+    )
+
+
+def test_rejects_composite_tags_for_a_different_glibc_baseline(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="manylinux_2_28_x86_64.manylinux2014_x86_64",
+        internal_tags=(
+            "cp311-abi3-manylinux_2_28_x86_64",
+            "cp311-abi3-manylinux2014_x86_64",
+        ),
+    )
+    with pytest.raises(ValueError, match="exactly match the configured manylinux2014"):
+        guard.check_wheel(
+            wheel, "0.22.0", target="x86_64-unknown-linux-gnu", manylinux="2014"
+        )
+
+
+def test_rejects_multiple_macos_deployment_tags(tmp_path):
+    wheel = make_wheel(
+        tmp_path,
+        filename_tag="macosx_14_0_arm64.macosx_11_0_arm64",
+        internal_tags=(
+            "cp311-abi3-macosx_14_0_arm64",
+            "cp311-abi3-macosx_11_0_arm64",
+        ),
+    )
+    with pytest.raises(ValueError, match="exactly one deployment tag"):
+        guard.check_wheel(wheel, "0.22.0", target="aarch64-apple-darwin")
 
 
 def test_release_pypi_build_invokes_the_guard():
@@ -72,4 +176,4 @@ def test_release_pypi_build_invokes_the_guard():
         step.get("run", "")
         for step in release["jobs"]["pypi-build"]["steps"]
     ]
-    assert 'python3 scripts/check_wheel_metadata.py --wheel-dir dist --version "$RELEASE_VERSION"' in release_commands
+    assert 'python3 scripts/check_wheel_metadata.py --wheel-dir dist --version "$RELEASE_VERSION" --target "${{ matrix.target }}" --manylinux "${{ matrix.manylinux }}"' in release_commands
