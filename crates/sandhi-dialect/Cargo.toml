@@ -1,0 +1,16 @@
+[package]
+name = "sandhi-dialect"
+description = "SDK request, response and stream codecs for the Sandhi chat contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+http = "1"
+sandhi-core = { path = "../sandhi-core", version = "0.23.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.23.0" }
+serde_json = "1"
+time = "0.3"

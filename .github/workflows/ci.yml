@@ -110,6 +110,7 @@ jobs:
               - 'crates/**'
               - 'tests/sdk-conformance/**'
               - 'bindings/python/requirements-test.txt'
+              - 'bindings/python/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -646,6 +647,10 @@ jobs:
       # Qualify release upgrades against real client requests before changing the pins.
       - name: Install the vendor SDKs and browser test driver
         run: python -m pip install --quiet -r tests/sdk-conformance/requirements.txt
+      - name: Build and install the wheel for SDK differential tests
+        run: |
+          maturin build --locked -m bindings/python/Cargo.toml --out target/sdk-conformance-wheel
+          python -m pip install --force-reinstall --no-deps target/sdk-conformance-wheel/*.whl
       - name: Install the dashboard test browser
         run: python -m playwright install --with-deps chromium
       - name: Drive the proxy with vendor SDKs and the served dashboard

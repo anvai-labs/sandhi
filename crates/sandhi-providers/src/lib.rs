@@ -52,6 +52,7 @@ mod peer;
 pub use peer::GatewayFailure;
 pub mod raw;
 pub mod resilience;
+pub mod thinking;
 pub mod token_estimate;
 pub mod typed;
 pub use anthropic::{Anthropic, AnthropicAuthScheme};

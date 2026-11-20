@@ -275,6 +275,19 @@ impl ThinkingEncodingV1 {
             Self::GeminiGenerateContent => EndpointFamilyV1::GeminiGenerateContent,
         }
     }
+
+    #[must_use]
+    pub fn permits_effort_spelling(self, effort: &str) -> bool {
+        match self {
+            Self::AnthropicMessages => {
+                matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+            }
+            Self::GeminiGenerateContent => {
+                matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh")
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Canonical effort values accepted by an exact model. Compatibility aliases are
@@ -429,9 +442,13 @@ impl ThinkingCapabilityV1 {
             .expect("validated supported capability carries an encoding");
         let supports_effort = matches!(
             encoding,
-            Self::ENCODING_OPENAI_CHAT | Self::ENCODING_OPENAI_RESPONSES | Self::ENCODING_QWEN_CHAT
+            Self::ENCODING_OPENAI_CHAT
+                | Self::ENCODING_OPENAI_RESPONSES
+                | Self::ENCODING_QWEN_CHAT
+                | Self::ENCODING_ANTHROPIC_MESSAGES
+                | Self::ENCODING_GEMINI_GENERATE_CONTENT
         );
-        let supports_budget_and_disable = matches!(
+        let supports_budget = matches!(
             encoding,
             Self::ENCODING_QWEN_CHAT
                 | Self::ENCODING_ZAI_CHAT
@@ -441,8 +458,24 @@ impl ThinkingCapabilityV1 {
         if self.effort.is_some() && !supports_effort {
             return Err("thinking encoding cannot express semantic effort".into());
         }
-        if (self.budget_tokens.is_some() || self.can_disable) && !supports_budget_and_disable {
-            return Err("thinking encoding cannot express token budgets or disable".into());
+        if self.effort.as_ref().is_some_and(|effort| {
+            effort
+                .values
+                .iter()
+                .any(|value| !encoding.permits_effort_spelling(value))
+        }) {
+            return Err("thinking encoding does not support an advertised effort spelling".into());
+        }
+        if self.budget_tokens.is_some() && !supports_budget {
+            return Err("thinking encoding cannot express token budgets".into());
+        }
+        if self.allow_effort_and_budget
+            && matches!(
+                encoding,
+                Self::ENCODING_ANTHROPIC_MESSAGES | Self::ENCODING_GEMINI_GENERATE_CONTENT
+            )
+        {
+            return Err("thinking encoding requires a choice between effort and budget".into());
         }
         Ok(())
     }
@@ -452,7 +485,11 @@ impl ThinkingCapabilityV1 {
         if !self.supported {
             return Err("model does not support configurable thinking".into());
         }
-        if request.enabled && request.effort.is_none() && request.budget_tokens.is_none() {
+        if request.enabled
+            && request.effort.is_none()
+            && request.budget_tokens.is_none()
+            && !(self.encoding == Some(Self::ENCODING_ANTHROPIC_MESSAGES) && self.effort.is_some())
+        {
             return Err("explicit thinking enable requires an advertised control".into());
         }
         if !request.enabled {
@@ -1126,7 +1163,7 @@ mod tests {
     fn capability_encoding_must_be_able_to_express_every_advertised_control() {
         use ThinkingEncodingV1 as Encoding;
 
-        let mut effort = ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None);
+        let effort = ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None);
         let mut budget = ThinkingCapabilityV1::budget(Encoding::AnthropicMessages, 1024, 4096);
         let mut disable = ThinkingCapabilityV1::budget(Encoding::GeminiGenerateContent, 1024, 4096);
         disable.can_disable = true;
@@ -1159,16 +1196,24 @@ mod tests {
         assert!(disable.validate().is_ok());
         assert!(both.validate().is_ok());
 
-        for encoding in [
-            Encoding::AnthropicMessages,
-            Encoding::GeminiGenerateContent,
-            Encoding::ZaiOpenaiChat,
-        ] {
-            let capability = ThinkingCapabilityV1::effort(encoding, &["low"], None);
-            capability
-                .validate()
-                .expect_err("effort encoding is invalid");
+        for encoding in [Encoding::AnthropicMessages, Encoding::GeminiGenerateContent] {
+            let mut capability = ThinkingCapabilityV1::effort(encoding, &["low"], None);
+            assert!(capability
+                .admits(&ThinkingRequestV1::enabled().with_effort("low"))
+                .is_ok());
+            assert_eq!(
+                capability.admits(&ThinkingRequestV1::enabled()).is_ok(),
+                encoding == Encoding::AnthropicMessages
+            );
+            capability.budget_tokens = budget.budget_tokens;
+            capability.allow_effort_and_budget = true;
+            assert!(capability.validate().is_err());
         }
+        assert!(
+            ThinkingCapabilityV1::effort(Encoding::ZaiOpenaiChat, &["low"], None)
+                .validate()
+                .is_err()
+        );
         for encoding in [Encoding::OpenaiChat, Encoding::OpenaiResponses] {
             let capability = ThinkingCapabilityV1::budget(encoding, 1024, 4096);
             capability
@@ -1186,9 +1231,7 @@ mod tests {
                 .expect_err("disable encoding is invalid");
         }
         budget.encoding = Some(Encoding::OpenaiChat);
-        effort.encoding = Some(Encoding::AnthropicMessages);
         assert!(budget.validate().is_err());
-        assert!(effort.validate().is_err());
     }
 
     #[test]

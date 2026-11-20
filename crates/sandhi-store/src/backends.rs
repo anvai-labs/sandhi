@@ -502,7 +502,7 @@ mod thinking_validation_tests {
             serde_json::json!({"supported":true,"encoding":"openai_chat"}),
             serde_json::json!({"supported":true,"encoding":"openai_chat","effort":{"values":[]}}),
             serde_json::json!({"supported":true,"encoding":"openai_chat","budget_tokens":{"min":0,"max":4096}}),
-            serde_json::json!({"supported":true,"encoding":"anthropic_messages","effort":{"values":["low"]}}),
+            serde_json::json!({"supported":true,"encoding":"gemini_generate_content","effort":{"values":["max"]}}),
         ];
         for thinking in invalid {
             let model = definition(serde_json::json!([{"id":"fixture","thinking":thinking}]));
@@ -511,6 +511,14 @@ mod thinking_validation_tests {
                 Err("backend model thinking capability is invalid")
             );
         }
+        let wrong_family = definition(serde_json::json!([{
+            "id":"fixture",
+            "thinking":{"supported":true,"encoding":"anthropic_messages","effort":{"values":["low"]}}
+        }]));
+        assert_eq!(
+            wrong_family.validate(),
+            Err("backend model thinking encoding does not match its endpoint family")
+        );
     }
 
     #[test]

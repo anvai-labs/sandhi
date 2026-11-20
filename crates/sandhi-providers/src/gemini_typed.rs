@@ -322,50 +322,64 @@ pub(crate) fn encode_gemini_request_base(request: &ChatRequestV1) -> Result<Valu
         };
         body.insert("toolConfig".into(), json!({"functionCallingConfig":config}));
     }
-    let mut generation = body
-        .remove("generationConfig")
-        .and_then(|value| value.as_object().cloned())
+    let mut generation = crate::thinking::gemini_generation_config(&body)
+        .map_err(|message| ProviderError::InvalidRequest(message.into()))?
+        .cloned()
         .unwrap_or_default();
+    body.remove("generationConfig");
+    body.remove("generation_config");
     if let Some(temperature) = request.temperature {
         generation.insert("temperature".into(), json!(temperature));
     }
     if let Some(max_tokens) = request.max_output_tokens {
+        generation.remove("max_output_tokens");
         generation.insert("maxOutputTokens".into(), max_tokens.into());
     }
     if let Some(stop) = &request.stop {
+        generation.remove("stop_sequences");
         generation.insert("stopSequences".into(), json!(stop));
     }
-    // Gemini has a single canonical budget spelling. Remove lifted aliases
-    // before restoring only a handle-admitted semantic control; unrelated
-    // thinking options remain untouched.
+    let mut thinking_config = crate::thinking::gemini_thinking_config(&generation)
+        .map_err(|message| ProviderError::InvalidRequest(message.into()))?
+        .cloned();
+    generation.remove("thinkingConfig");
+    generation.remove("thinking_config");
+    // Restore the handle-admitted control and its documented wire spelling.
     if let Some(thinking) = &request.thinking {
         if request.compiled_thinking != Some(ThinkingEncodingV1::GeminiGenerateContent) {
             return Err(ProviderError::InvalidRequest(
                 "thinking control was not admitted for Gemini generateContent".into(),
             ));
         }
-        if thinking.effort.is_some() {
+        if thinking.effort.is_some() && thinking.budget_tokens.is_some() {
             return Err(ProviderError::InvalidRequest(
-                "Gemini thinking supports budget only, not effort".into(),
+                "Gemini thinking requires a choice between level and budget".into(),
             ));
         }
-        let mut thinking_config = generation
-            .get("thinkingConfig")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let thinking_config = thinking_config.get_or_insert_with(Default::default);
         thinking_config.remove("thinkingBudget");
         thinking_config.remove("thinking_budget");
+        thinking_config.remove("thinkingLevel");
+        thinking_config.remove("thinking_level");
         if !thinking.enabled {
             thinking_config.insert("thinkingBudget".into(), json!(0));
         } else if let Some(budget) = thinking.budget_tokens {
             thinking_config.insert("thinkingBudget".into(), json!(budget));
+        } else if let Some(effort) = &thinking.effort {
+            if !ThinkingEncodingV1::GeminiGenerateContent.permits_effort_spelling(effort) {
+                return Err(ProviderError::InvalidRequest(
+                    "unsupported Gemini thinking level".into(),
+                ));
+            }
+            thinking_config.insert("thinkingLevel".into(), json!(effort.to_ascii_uppercase()));
         }
-        generation.insert("thinkingConfig".into(), Value::Object(thinking_config));
     } else if request.compiled_thinking.is_some() {
         return Err(ProviderError::InvalidRequest(
             "compiled thinking has no semantic request".into(),
         ));
+    }
+    if let Some(config) = thinking_config {
+        generation.insert("thinkingConfig".into(), Value::Object(config));
     }
     if !generation.is_empty() {
         body.insert("generationConfig".into(), Value::Object(generation));

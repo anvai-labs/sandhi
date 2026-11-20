@@ -58,6 +58,38 @@ async for event_json in provider.stream_json(json.dumps(request)):
     event = json.loads(event_json)  # response_start, text_delta, tool_call_*, usage, finish
 ```
 
+### SDK dialects in-process
+
+On the same handle, `complete_sdk_json` accepts a serialized SDK request and returns the
+selected dialect's response JSON. `stream_sdk_json` yields JSON records with `event`
+(the optional SSE event name) and `data` (the SDK payload). Iteration ends at stream EOF.
+The dialects are `openai_chat`, `openai_responses`, `anthropic_messages`, and
+`gemini_generate_content`. Supply Gemini's path model through `model=`. Use
+`metadata_json=` for `RequestMetadataV1` and `wire_headers_json=` for per-call headers.
+
+```python
+request = json.dumps({
+    "model": "openai/gpt-4o",
+    "messages": [{"role": "user", "content": "hello"}],
+})
+completion = json.loads(await provider.complete_sdk_json("openai_chat", request))
+
+events = provider.stream_sdk_json("openai_chat", request)
+try:
+    async for event_json in events:
+        frame = json.loads(event_json)
+finally:
+    await events.aclose()
+```
+
+`SandhiSdkError` carries JSON with `status`, `error` (the typed error), and `body`
+(the dialect error envelope). An upstream failure after stream setup can arrive as a
+dialect error event. Meaningful controls depend on the selected model and backend.
+The handle uses its configured credential. Use the HTTP gateway for virtual-key
+admission, durable budgets, and requests that depend on gateway-owned native references.
+
+### Neutral contract details
+
 At contract minor 12, streaming requests can set `include_native_stream: true` for
 Chat, Messages, Responses and Gemini handles. Default is false; other families
 reject true. Opt-in adds `native_frame` events alongside canonical events. Render
@@ -71,7 +103,7 @@ and refuse undeclared automatic capabilities before HTTP. Registered gateway
 backends can declare exact model/lifetime support; the internal compiled plan is
 excluded from JSON and schema. See the [backend guide](../../docs/operator/backends.md).
 
-The JSON bridge carries typed v1 data, not provider-native JSON. The handle retains its HTTP pool,
+The typed JSON methods carry neutral v1 data. The handle retains its HTTP pool,
 circuit breaker, retry policy, and timeouts. Invalid documents fail before network I/O; runtime
 failures raise `SandhiProviderError`, whose message contains a serialized `ProviderErrorV1`.
 `runtime.provider()` resolves catalog defaults or accepts an explicit protocol and

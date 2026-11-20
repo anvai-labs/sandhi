@@ -4,7 +4,7 @@
 //! authority. The resolved provider passes through without transport execution;
 //! callers must still reserve and authorize dispatch after preparation succeeds.
 use crate::{
-    codec::{self, decode_request, IngressDialect},
+    codec::{self, decode_request, HttpIngressError, IngressDialect},
     deadlines::{BufferedDeadlines, EffectiveDeadline, StreamLimits, StreamingDeadlines},
     dialect_label, header_str, ingress_error, ingress_family,
     metrics::{self, Metrics},

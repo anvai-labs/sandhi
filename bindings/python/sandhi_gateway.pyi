@@ -276,6 +276,17 @@ class TypedEventStream(AsyncIterator[str]):
 class SandhiProviderError(RuntimeError):
     """Provider-boundary error; the message is a serialized ProviderErrorV1 JSON payload."""
 
+class SandhiSdkError(SandhiProviderError):
+    """SDK call failure with status, a typed error, and the dialect error body."""
+
+class SdkEventStream(AsyncIterator[str]):
+    async def __anext__(self) -> str: ...
+    async def aclose(self) -> None: ...
+
+SdkDialect = Literal[
+    "openai_chat", "openai_responses", "anthropic_messages", "gemini_generate_content"
+]
+
 class TypedProvider:
     @property
     def provider(self) -> str: ...
@@ -285,6 +296,14 @@ class TypedProvider:
     def stream_json(
         self, request_json: str, wire_headers_json: Optional[str] = None
     ) -> TypedEventStream: ...
+    async def complete_sdk_json(
+        self, dialect: SdkDialect, request_json: str, *, model: str | None = None,
+        metadata_json: str | None = None, wire_headers_json: str | None = None
+    ) -> str: ...
+    def stream_sdk_json(
+        self, dialect: SdkDialect, request_json: str, *, model: str | None = None,
+        metadata_json: str | None = None, wire_headers_json: str | None = None
+    ) -> SdkEventStream: ...
 class ProviderRuntime:
     """Persistent typed provider factory.
 

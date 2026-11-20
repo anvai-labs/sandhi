@@ -213,6 +213,7 @@ pub(crate) fn encode_anthropic_request_base(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let effort_only = native && crate::thinking::anthropic_effort_only(&body);
     let native_system = body.get("system").and_then(Value::as_array).cloned();
     let native_tools = body.get("tools").and_then(Value::as_array).cloned();
     // Third-party prompt caching (proxy translation plane): OpenAI-compat
@@ -306,18 +307,16 @@ pub(crate) fn encode_anthropic_request_base(
         ProviderError::InvalidRequest("Anthropic requires max_output_tokens".into())
     })?;
     body.insert("max_tokens".into(), max_tokens.into());
-    // Anthropic rejects `temperature` when extended thinking is active
-    // (API error: "temperature is not supported when thinking is enabled").
-    // Belt-and-suspenders guard: Victor's policy layer strips it before
-    // building ChatRequestV1, but we also drop it here so any future client
-    // that sends both is protected at the encoder level.
-    let thinking_enabled = request
-        .thinking
-        .as_ref()
-        .map(|t| t.enabled)
-        .unwrap_or(false);
-    if let Some(temperature) = request.temperature {
-        if !thinking_enabled {
+    // Native output effort also applies when the caller leaves thinking off.
+    let thinking_enabled = !effort_only
+        && request
+            .thinking
+            .as_ref()
+            .is_some_and(|thinking| thinking.enabled);
+    if thinking_enabled && !native {
+        body.remove("temperature");
+    } else if !thinking_enabled {
+        if let Some(temperature) = request.temperature {
             body.insert("temperature".into(), json!(temperature));
         }
     }
@@ -380,22 +379,45 @@ pub(crate) fn encode_anthropic_request_base(
                 "thinking control was not admitted for Anthropic messages".into(),
             ));
         }
-        if thinking.effort.is_some() {
-            return Err(ProviderError::InvalidRequest(
-                "Anthropic thinking supports budget only, not effort".into(),
-            ));
+        if effort_only {
+            // Keeping the native mode implicit preserves the model's default.
+            return Ok(Value::Object(body));
         }
-        body.remove("thinking");
-        if thinking.enabled {
-            let mut obj = serde_json::Map::new();
-            obj.insert("type".into(), Value::String("enabled".into()));
-            if let Some(budget) = thinking.budget_tokens {
-                obj.insert("budget_tokens".into(), json!(budget));
+        let native = body.remove("thinking");
+        let control = if !thinking.enabled {
+            json!({"type":"disabled"})
+        } else if let Some(budget) = thinking.budget_tokens {
+            if thinking.effort.is_some() {
+                return Err(ProviderError::InvalidRequest(
+                    "Anthropic thinking requires a choice between effort and budget".into(),
+                ));
             }
-            body.insert("thinking".into(), Value::Object(obj));
+            json!({"type":"enabled","budget_tokens":budget})
         } else {
-            body.insert("thinking".into(), json!({"type":"disabled"}));
-        }
+            let mut control = json!({"type":"adaptive"});
+            if let Some(display) = native.as_ref().and_then(|config| config.get("display")) {
+                control["display"] = display.clone();
+            }
+            if let Some(effort) = &thinking.effort {
+                if !ThinkingEncodingV1::AnthropicMessages.permits_effort_spelling(effort) {
+                    return Err(ProviderError::InvalidRequest(
+                        "unsupported Anthropic effort".into(),
+                    ));
+                }
+                let output = body.entry("output_config").or_insert_with(|| json!({}));
+                if output.is_null() {
+                    *output = json!({});
+                }
+                output
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        ProviderError::InvalidRequest("output_config must be an object".into())
+                    })?
+                    .insert("effort".into(), json!(effort));
+            }
+            control
+        };
+        body.insert("thinking".into(), control);
     } else if request.compiled_thinking.is_some() {
         return Err(ProviderError::InvalidRequest(
             "compiled thinking has no semantic request".into(),
@@ -692,11 +714,33 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_effort_is_rejected_before_source_encoding() {
+    fn semantic_effort_maps_to_adaptive_thinking() {
         let mut request = admitted_budget_request(4096);
         request.thinking =
             Some(sandhi_core::chat::ThinkingRequestV1::enabled().with_effort("high"));
-        assert!(encode_anthropic_request(&request).is_err());
+        let body = encode_anthropic_request(&request).unwrap();
+        assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+        assert_eq!(body["output_config"], json!({"effort":"high"}));
+    }
+
+    #[test]
+    fn native_thinking_preserves_sdk_temperature() {
+        let mut request = admitted_budget_request(4096);
+        request.thinking =
+            Some(sandhi_core::chat::ThinkingRequestV1::enabled().with_effort("high"));
+        request.temperature = Some(0.4);
+        request.extensions.insert(
+            "anthropic".into(),
+            json!({"messages":[{"role":"user","content":"hi"}],"temperature":0.4,
+                   "thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}),
+        );
+        request
+            .capture_native_input(sandhi_core::EndpointFamilyV1::AnthropicMessages, vec![])
+            .unwrap();
+        assert_eq!(
+            encode_anthropic_request(&request).unwrap()["temperature"],
+            json!(0.4)
+        );
     }
 
     #[test]

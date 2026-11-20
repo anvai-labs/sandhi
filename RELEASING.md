@@ -1,7 +1,7 @@
 # Releasing Sandhi
 
 A stable `vX.Y.Z` tag on protected `main` drives one **required** release train:
-GitHub binaries, PyPI, all four Rust crates and all three npm packages. Missing credentials do
+GitHub binaries, PyPI, all five Rust crates and all three npm packages. Missing credentials do
 not remove a target from the contract. Prepare and commit the version before tagging; the tag
 must match that reviewed source version.
 
@@ -15,7 +15,7 @@ alone do not close remote authority setup or authorize a release tag.
 |---|---|
 | GitHub release | Linux x86_64 and macOS arm64 archives; each contains `sandhi-proxy` and `sandhi` |
 | PyPI | `sandhi-gateway` wheels covering Linux x86_64/aarch64, macOS arm64 and Windows amd64 |
-| crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-store`, `sandhi-proxy`, all non-yanked |
+| crates.io | `sandhi-core`, `sandhi-providers`, `sandhi-dialect`, `sandhi-store`, `sandhi-proxy`, all non-yanked |
 | npm | `@anvailabs/sandhi`, `@anvailabs/sandhi-linux-x64-gnu`, `@anvailabs/sandhi-darwin-arm64`; root optional dependencies pin both platform packages exactly |
 
 The committed `[workspace.package].version` in `Cargo.toml` is the software version authority.
