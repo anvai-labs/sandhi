@@ -260,6 +260,7 @@ def test_contract_discovery_and_schemas():
     descriptor = json.loads(sg.provider_descriptor_json("claude"))
     assert descriptor["slug"] == "anthropic"
     assert descriptor["endpoint_family"] == "anthropic_messages"
+    assert all("encoding" not in model["thinking"] for model in descriptor["models"])
     schema = json.loads(sg.chat_contract_schema_json("chat-request.v1"))
     assert "cache_intent" in schema["properties"]
     assert "compiled_cache" not in schema["properties"]
@@ -293,7 +294,9 @@ def test_catalog_serves_curated_model_data():
         assert model["max_output_tokens"] == 393_216
         assert model["capabilities"]["vision"] is vision
         assert model["capabilities"]["reasoning"] is True
-        assert model["extensions"]["reasoning_effort_values"] == ["low", "high", "max"]
+        assert model["thinking"]["effort"]["values"] == ["low", "high", "max"]
+        assert "encoding" not in model["thinking"]
+        assert "reasoning_effort_values" not in model.get("extensions", {})
         assert "default_temperature" not in model
     # Aggregators stay empty (dynamic hosting catalogs -- live discovery).
     assert json.loads(sg.provider_models_json("openrouter")) == []
@@ -301,6 +304,11 @@ def test_catalog_serves_curated_model_data():
     assert json.loads(sg.provider_models_json("inferflux")) == []
     with pytest.raises(KeyError):
         sg.provider_models_json("acme-unknown")
+
+
+def test_contract_versions_are_surface_specific():
+    assert sg.wire_contract_version() == "1"
+    assert sg.chat_contract_version() == "1"
 
 
 def test_parse_usage_keeps_cache_split_single_sourced():

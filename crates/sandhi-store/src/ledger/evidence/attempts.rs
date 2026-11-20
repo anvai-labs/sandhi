@@ -23,6 +23,7 @@ pub struct TransportTerminal {
     pub outcome: TransportOutcome,
     pub provider_status: Option<u16>,
     pub provider_request_id: Option<String>,
+    pub progress: TransportProgress,
 }
 
 /// Configured diagnostic identity observed at dispatch. These labels never
@@ -32,16 +33,91 @@ pub struct TransportTerminal {
 pub struct ObservedProvider {
     pub provider: String,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
 }
 
 impl ObservedProvider {
-    pub fn from_labels(provider: String, model: Option<String>) -> Option<Self> {
+    pub fn from_labels(
+        provider: String,
+        model: Option<String>,
+        upstream_host: Option<String>,
+    ) -> Option<Self> {
         let valid = |value: &str, cap: usize| {
             !value.is_empty() && value.len() <= cap && !value.chars().any(char::is_control)
         };
-        (valid(&provider, 128) && model.as_ref().is_none_or(|value| valid(value, 512)))
-            .then_some(Self { provider, model })
+        let valid_host = upstream_host.as_ref().is_none_or(|value| {
+            value.len() <= 255
+                && !value.is_empty()
+                && (if value.contains(':') {
+                    value.parse::<std::net::Ipv6Addr>().is_ok()
+                } else {
+                    value.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+                    })
+                })
+        });
+        (valid(&provider, 128)
+            && model.as_ref().is_none_or(|value| valid(value, 512))
+            && valid_host)
+            .then_some(Self {
+                provider,
+                model,
+                upstream_host,
+            })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportTimeoutPhase {
+    Setup,
+    Idle,
+    Body,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportErrorClass {
+    None,
+    Timeout,
+    Transport,
+    Provider,
+    Cancelled,
+    IncompleteStream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportErrorSubtype {
+    Setup,
+    Idle,
+    Body,
+    UnknownTimeout,
+    Network,
+    HttpStatus,
+    Caller,
+    Incomplete,
+}
+
+/// Source-observed lifecycle progress at terminal time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers_received: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_event_received: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_stream_event_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_to_first_stream_event_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_phase: Option<TransportTimeoutPhase>,
+    pub error_class: TransportErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_subtype: Option<TransportErrorSubtype>,
 }
 
 /// Transport facts only. Qualified usage is joined through the execution's
@@ -75,24 +151,49 @@ impl AttemptEvidence {
         let diagnostic_label = |value: &str, cap: usize| {
             !value.is_empty() && value.len() <= cap && !value.chars().any(char::is_control)
         };
-        if !matches!(self.version, 1 | 2)
-            || (self.version == 1 && self.observed_provider.is_some())
+        if self.version != 1
             || self.observed_provider.as_ref().is_some_and(|observed| {
                 !diagnostic_label(&observed.provider, 128)
                     || observed
                         .model
                         .as_ref()
                         .is_some_and(|model| !diagnostic_label(model, 512))
+                    || observed.upstream_host.as_ref().is_some_and(|host| {
+                        host.len() > 255
+                            || host.is_empty()
+                            || (if host.contains(':') {
+                                host.parse::<std::net::Ipv6Addr>().is_err()
+                            } else {
+                                host.chars().any(|character| {
+                                    !(character.is_ascii_alphanumeric()
+                                        || matches!(character, '.' | '-' | '_'))
+                                })
+                            })
+                    })
             })
             || self.attempt_ordinal != 1
             || self.dropped_observations > 2
             || self.dispatch_observed_at_ms.is_some_and(|at| !valid_ms(at))
-            || self.terminal.as_ref().is_some_and(|t| {
-                !valid_ms(t.observed_at_ms)
-                    || t.provider_status.is_some_and(|s| !(100..=999).contains(&s))
-                    || t.provider_request_id.as_ref().is_some_and(|s| {
-                        s.is_empty() || s.len() > 256 || s.chars().any(char::is_control)
+            || self.terminal.as_ref().is_some_and(|terminal| {
+                !valid_ms(terminal.observed_at_ms)
+                    || terminal
+                        .provider_status
+                        .is_some_and(|status| !(100..=999).contains(&status))
+                    || terminal.provider_request_id.as_ref().is_some_and(|value| {
+                        value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
                     })
+                    || terminal
+                        .progress
+                        .first_stream_event_at_ms
+                        .is_some_and(|at| !valid_ms(at))
+                    || terminal
+                        .progress
+                        .time_to_first_stream_event_ms
+                        .is_some_and(|value| value > u32::MAX as u64)
+                    || (terminal.progress.timeout_phase.is_some()
+                        && terminal.progress.error_class != TransportErrorClass::Timeout)
+                    || (terminal.progress.error_subtype.is_some()
+                        && terminal.progress.error_class == TransportErrorClass::None)
             })
         {
             return Err(EvidenceError::InvalidInput);
@@ -123,6 +224,7 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
         evidence_json TEXT CHECK(length(CAST(evidence_json AS BLOB))<=4096)
     );",
     )?;
+
     for (name, declaration) in [
         (
             "attempt_version",
@@ -284,34 +386,72 @@ impl SqliteLedger {
 }
 
 #[cfg(test)]
+pub(super) fn success_progress() -> TransportProgress {
+    TransportProgress {
+        response_headers_received: Some(true),
+        stream_event_received: Some(false),
+        first_stream_event_at_ms: None,
+        time_to_first_stream_event_ms: None,
+        timeout_phase: None,
+        error_class: TransportErrorClass::None,
+        error_subtype: None,
+    }
+}
+
+#[cfg(test)]
 mod diagnostic_version_tests {
     use super::*;
     #[test]
-    fn old_v1_stays_byte_identical_and_v2_labels_do_not_change_transport_completeness() {
-        let old = format!("{{\"version\":1,\"attempt_id\":\"{}\",\"attempt_ordinal\":1,\"dispatch_observed_at_ms\":1,\"terminal\":{{\"observed_at_ms\":2,\"outcome\":\"success\",\"provider_status\":200,\"provider_request_id\":null}},\"dropped_observations\":0,\"invalid\":false}}","a".repeat(64));
-        let mut evidence: AttemptEvidence = serde_json::from_str(&old).unwrap();
-        assert_eq!(evidence.encode().unwrap(), old);
-        assert!(evidence.complete());
-        evidence.version = 2;
-        evidence.observed_provider = Some(ObservedProvider {
-            provider: "configured-vendor".into(),
-            model: Some("physical-model".into()),
-        });
-        let encoded = evidence.encode().unwrap();
-        let reread: AttemptEvidence = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(reread, evidence);
-        assert!(evidence.complete());
-        evidence.observed_provider =
-            ObservedProvider::from_labels(String::new(), Some("model".into()));
-        assert!(evidence.observed_provider.is_none());
+    fn attempt_evidence_requires_source_observed_progress() {
+        let old = format!("{{\"version\":2,\"attempt_id\":\"{}\",\"attempt_ordinal\":1,\"dispatch_observed_at_ms\":1,\"terminal\":{{\"observed_at_ms\":2,\"outcome\":\"success\",\"provider_status\":200,\"provider_request_id\":null}},\"dropped_observations\":0,\"invalid\":false,\"observed_provider\":null}}", "a".repeat(64));
+        let evidence: Result<AttemptEvidence, _> = serde_json::from_str(&old);
+        assert!(evidence.is_err());
+
+        let mut evidence = AttemptEvidence {
+            version: 1,
+            observed_provider: None,
+            attempt_id: "a".repeat(64),
+            attempt_ordinal: 1,
+            dispatch_observed_at_ms: Some(1000),
+            terminal: Some(TransportTerminal {
+                observed_at_ms: 1001,
+                outcome: TransportOutcome::Success,
+                provider_status: Some(200),
+                provider_request_id: None,
+                progress: success_progress(),
+            }),
+            dropped_observations: 0,
+            invalid: false,
+        };
         assert!(evidence.encode().is_ok());
         assert!(evidence.complete());
+        evidence.observed_provider =
+            ObservedProvider::from_labels(String::new(), Some("model".into()), None);
+        assert!(evidence.observed_provider.is_none());
+        assert!(evidence.encode().is_ok());
         evidence.terminal = None;
         assert!(!evidence.complete());
-        evidence.version = 1;
+        evidence.terminal = Some(TransportTerminal {
+            observed_at_ms: 1001,
+            outcome: TransportOutcome::Success,
+            provider_status: Some(200),
+            provider_request_id: None,
+            progress: success_progress(),
+        });
         evidence.observed_provider = Some(ObservedProvider {
             provider: "vendor".into(),
             model: None,
+            upstream_host: Some("2001:db8::1".into()),
+        });
+        assert!(
+            ObservedProvider::from_labels("vendor".into(), None, Some("2001:db8::1".into()),)
+                .is_some()
+        );
+        assert!(evidence.encode().is_ok());
+        evidence.observed_provider = Some(ObservedProvider {
+            provider: "vendor".into(),
+            model: None,
+            upstream_host: Some("bad host".into()),
         });
         assert!(evidence.encode().is_err());
     }

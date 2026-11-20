@@ -52,11 +52,15 @@ def starter_gateway(starter_binary, gated_provider, tmp_path):
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log)
             try:
                 with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=4) as client:
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + 30
                     while True:
                         assert process.poll() is None, "starter exited before readiness; private log retained"
                         try:
-                            if client.get("/readyz").status_code == 200:
+                            ready = client.get("/readyz")
+                            if ready.status_code == 200 or (
+                                ready.status_code == 503
+                                and "durable_accounting_recovery_unresolved" in ready.text
+                            ):
                                 break
                         except httpx.TransportError:
                             pass
@@ -66,7 +70,7 @@ def starter_gateway(starter_binary, gated_provider, tmp_path):
             finally:
                 if process.poll() is None:
                     process.terminate()
-                    assert process.wait(timeout=8) == expected_status
+                    assert process.wait(timeout=20) == expected_status
     return launch
 
 

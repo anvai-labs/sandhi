@@ -2,7 +2,7 @@
 use super::{bounded_until, IdleTimeout, ResilientProvider};
 use crate::{
     AttemptContext, BufferedDeadline, ByteStream, ProviderError, ProviderRequest,
-    QualifiedProviderStream, QualifiedStreamDelivery, StreamChunk,
+    QualifiedProviderStream, QualifiedStreamDelivery, StreamChunk, TimeoutError, TimeoutPhase,
 };
 use futures_util::Stream;
 use std::{
@@ -33,15 +33,22 @@ pub(super) async fn stream(
     // The same physical operation owns a total deadline in both delivery
     // contracts. Heartbeats cannot keep an embedded projection-refusal drain
     // alive indefinitely after its client has stopped receiving content.
-    let whole = BufferedDeadline::current()
-        .unwrap_or_else(|| BufferedDeadline::new(provider.timeouts.complete));
     let mut setup = policy
         .map(|policy| policy.setup)
         .unwrap_or_else(|| BufferedDeadline::new(provider.timeouts.stream_setup));
+    let explicit_outer = BufferedDeadline::current();
+    let provider_outer = BufferedDeadline::new(provider.timeouts.complete);
+    let mut whole = policy
+        .and_then(|policy| policy.body_deadline())
+        .unwrap_or(provider_outer);
+    if explicit_outer.is_some_and(|outer| outer.at < whole.at) {
+        whole = explicit_outer.expect("checked explicit outer deadline");
+    }
     if whole.at < setup.at {
         setup = whole;
     }
     match bounded_until(
+        TimeoutPhase::Setup,
         setup.timeout,
         setup.at,
         context.as_ref(),
@@ -88,10 +95,13 @@ impl Stream for AbsoluteTimeout {
             || self.sleep.as_mut().poll(cx).is_ready()
         {
             if let Some(context) = &self.context {
-                context.mark_timeout();
+                context.mark_timeout_phase(TimeoutPhase::Body);
             }
             self.inner.take();
-            return Poll::Ready(Some(Err(ProviderError::Timeout(self.deadline.timeout))));
+            return Poll::Ready(Some(Err(ProviderError::Timeout(TimeoutError::new(
+                TimeoutPhase::Body,
+                self.deadline.timeout,
+            )))));
         }
         match self.inner.as_mut().unwrap().as_mut().poll_next(cx) {
             Poll::Ready(None) => {
@@ -190,7 +200,7 @@ mod tests {
                                 Ok(_) => observed += 1,
                                 Err(error) => {
                                     assert!(
-                                        matches!(error,ProviderError::Timeout(bound) if bound==Duration::from_millis(if scoped {12}else{20}))
+                                        matches!(error,ProviderError::Timeout(timeout) if timeout.bound==Duration::from_millis(if scoped {12}else{20}))
                                     );
                                     break;
                                 }
@@ -226,11 +236,67 @@ mod tests {
                         AttemptPhase::Terminal {
                             outcome: AttemptOutcome::Timeout,
                             provider_status: Some(200),
+                            response_headers_received: true,
+                            stream_event_received: true,
+                            timeout_phase: Some(crate::TimeoutPhase::Body),
+                            error_subtype: Some(crate::TerminalErrorSubtype::Body),
                             ..
                         }
                     ));
                 }
             }
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn advertised_body_policy_overrides_provider_whole_call_default() {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let provider = ResilientProvider::new(Arc::new(Heartbeats(sends.clone(), false)))
+            .with_timeouts(TimeoutConfig {
+                complete: Duration::from_millis(20),
+                stream_setup: Duration::from_millis(10),
+                idle: Some(Duration::from_millis(50)),
+            });
+        let (context, receiver) =
+            AttemptContext::single_attempt("execution", "c".repeat(64)).unwrap();
+        let started = tokio::time::Instant::now();
+        crate::StreamingDeadline::new_with_body(
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Duration::from_millis(35),
+        )
+        .scope(async {
+            let mut response = provider
+                .stream_qualified(
+                    ProviderRequest::new("fixture", serde_json::json!({}))
+                        .with_attempt_context(context),
+                    QualifiedStreamDelivery::Streaming,
+                )
+                .await
+                .unwrap();
+            let error = loop {
+                match response.stream.next().await.unwrap() {
+                    Ok(_) => continue,
+                    Err(error) => break error,
+                }
+            };
+            assert!(
+                matches!(error, crate::ProviderError::Timeout(timeout) if timeout.bound == Duration::from_millis(35))
+            );
+        })
+        .await;
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(45)
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let events = receiver.drain();
+        assert!(matches!(
+            events[1].phase,
+            crate::AttemptPhase::Terminal {
+                timeout_phase: Some(crate::TimeoutPhase::Body),
+                ..
+            }
+        ));
     }
 }

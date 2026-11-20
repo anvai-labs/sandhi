@@ -11,9 +11,12 @@ use sandhi_proxy::{
 };
 use sandhi_store::{
     ledger::evidence::{
-        context::{AccountingPolicy, Delivery, ExecutionContext, Operation, Plane},
-        AttemptEvidence, IntentAdmission, ObservedProvider, RecoveryState, TransportOutcome,
-        TransportTerminal,
+        context::{
+            AccountingPolicy, Delivery, ExecutionContext, Operation, Plane, TransportContext,
+            TransportPolicyContext,
+        },
+        AttemptEvidence, IntentAdmission, ObservedProvider, RecoveryState, TransportErrorClass,
+        TransportOutcome, TransportProgress, TransportTerminal,
     },
     SqliteLedger,
 };
@@ -38,6 +41,12 @@ fn context() -> ExecutionContext {
         actual_model: "fixture".into(),
         provider: "openai".into(),
         endpoint_family: EndpointFamilyV1::OpenaiChatCompletions,
+        transport: TransportContext {
+            upstream_host: Some("upstream.test".into()),
+            policy: TransportPolicyContext::Buffered {
+                duration_ms: 30_000,
+            },
+        },
         transport_binding_sha256: "0".repeat(64),
         route: None,
         backend: None,
@@ -71,7 +80,7 @@ fn seed(path: &Path, terminal: bool) -> String {
         .unwrap();
     if terminal {
         let attempt = AttemptEvidence {
-            version: 2,
+            version: 1,
             attempt_id: ledger
                 .physical_attempt_durable(CLIENT, &intent.execution_id)
                 .unwrap()
@@ -84,12 +93,22 @@ fn seed(path: &Path, terminal: bool) -> String {
                 outcome: TransportOutcome::Success,
                 provider_status: Some(200),
                 provider_request_id: Some("original-source-request".into()),
+                progress: TransportProgress {
+                    response_headers_received: Some(true),
+                    stream_event_received: Some(false),
+                    first_stream_event_at_ms: None,
+                    time_to_first_stream_event_ms: None,
+                    timeout_phase: None,
+                    error_class: TransportErrorClass::None,
+                    error_subtype: None,
+                },
             }),
             dropped_observations: 0,
             invalid: false,
             observed_provider: ObservedProvider::from_labels(
                 "openai".into(),
                 Some("fixture".into()),
+                Some("upstream.test".into()),
             ),
         };
         ledger
@@ -535,7 +554,7 @@ async fn public_driver_recovers_after_bounded_busy_storage_refusal_without_infer
     let reason = sandhi_proxy::settlement::buffered::recover(state.clone())
         .await
         .unwrap_err();
-    assert_eq!(reason, "accounting recovery unresolved");
+    assert_eq!(reason, "durable_accounting_recovery_unresolved");
     let addr = address();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_with_shutdown_timeout(

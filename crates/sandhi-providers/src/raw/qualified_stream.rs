@@ -172,6 +172,9 @@ impl Stream for QualifiedStream {
                 // Qualification failures are explicit snapshot facts. Forward
                 // even malformed bytes verbatim, never turn them into retryable
                 // transport errors or silently substitute a second request.
+                if let Some(guard) = self.guard.as_mut() {
+                    guard.record_stream_event();
+                }
                 let _ = self.observer.push(&bytes);
                 self.publish();
                 Poll::Ready(Some(Ok(bytes)))
@@ -303,7 +306,7 @@ mod tests {
                 }
             }
             if mode == "timeout" {
-                context.mark_timeout();
+                context.mark_timeout_phase(crate::TimeoutPhase::Unknown);
             }
             drop(stream);
             assert_eq!(drops.load(Ordering::SeqCst), 1, "{mode}");
@@ -423,7 +426,7 @@ mod tests {
                 }
             }
             if mode == "timeout" {
-                context.mark_timeout();
+                context.mark_timeout_phase(crate::TimeoutPhase::Unknown);
             }
             drop(stream);
             assert_eq!(drops.load(Ordering::SeqCst), 1, "{mode}");
@@ -548,7 +551,7 @@ mod tests {
                 }
             }
             if mode == "timeout_drop" {
-                context.mark_timeout();
+                context.mark_timeout_phase(crate::TimeoutPhase::Unknown);
             }
             drop(stream);
             assert_eq!(

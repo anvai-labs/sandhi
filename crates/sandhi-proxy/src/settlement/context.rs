@@ -3,7 +3,8 @@ use crate::{codec::IngressDialect, routing::DispatchPlan, ProxyState};
 use sandhi_core::{cache_digest, ChatRequestV1};
 use sandhi_providers::ProviderHandle;
 use sandhi_store::ledger::evidence::context::{
-    AccountingPolicy, BackendContext, CacheContext, Delivery, ExecutionContext, Plane, RouteContext,
+    AccountingPolicy, BackendContext, CacheContext, Delivery, ExecutionContext, Plane,
+    RouteContext, StreamingPolicyContext, TransportContext, TransportPolicyContext,
 };
 
 pub(crate) struct Selection {
@@ -14,6 +15,8 @@ pub(super) struct Surface {
     pub dialect: IngressDialect,
     pub streaming: bool,
     pub transparent: bool,
+    pub streaming_limits: Option<crate::deadlines::StreamLimits>,
+    pub buffered_deadline: Option<std::time::Duration>,
 }
 impl Selection {
     pub(super) fn freeze(
@@ -107,6 +110,24 @@ impl Selection {
             actual_model: request.model.clone(),
             provider: binding.map_or_else(|| provider.slug().into(), |b| b.provider.clone()),
             endpoint_family: provider.family().endpoint_family(),
+            transport: TransportContext {
+                upstream_host: provider.diagnostic_upstream_host(),
+                policy: match surface.streaming_limits {
+                    Some(limits) => TransportPolicyContext::Streaming(StreamingPolicyContext {
+                        setup_ms: limits.setup_ms(),
+                        idle_ms: limits.idle_ms(),
+                        body_ms: limits.body_ms(),
+                    }),
+                    None => {
+                        let duration = surface
+                            .buffered_deadline
+                            .ok_or("effective buffered transport deadline unavailable")?;
+                        let duration_ms = u64::try_from(duration.as_millis())
+                            .map_err(|_| "invalid buffered transport deadline")?;
+                        TransportPolicyContext::Buffered { duration_ms }
+                    }
+                },
+            },
             transport_binding_sha256,
             route: self.routing.as_ref().map(|plan| RouteContext {
                 id: plan.route_id.clone(),
@@ -170,6 +191,8 @@ mod namespace_tests {
             dialect: IngressDialect::OpenAi,
             streaming: false,
             transparent: true,
+            streaming_limits: None,
+            buffered_deadline: Some(std::time::Duration::from_secs(30)),
         };
         assert!(selection
             .freeze(
@@ -185,5 +208,11 @@ mod namespace_tests {
             .unwrap();
         assert_eq!(context.provider, "vendor-label");
         assert_eq!(context.upstream_budget_scope, "upstream:original");
+        assert_eq!(
+            context.transport.policy,
+            TransportPolicyContext::Buffered {
+                duration_ms: 30_000
+            }
+        );
     }
 }

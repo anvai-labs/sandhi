@@ -111,7 +111,10 @@ async fn tracked_codex_buffered_four_ingress_routes_join_attempt_usage_and_both_
                     credential_generation: 1,
                     endpoint_family: sandhi_core::EndpointFamilyV1::OpenaiResponses,
                     endpoint_profile: "chatgpt_codex".into(),
-                    models: vec![serde_json::from_value(json!({"id":"gpt-4o-mini"})).unwrap()],
+                    models: vec![serde_json::from_value(
+                        json!({"id":"gpt-4o-mini","thinking":{"supported":false}}),
+                    )
+                    .unwrap()],
                     cache_policy: None,
                 });
             assert!(provider.raw_forwarder().is_none());
@@ -160,6 +163,8 @@ async fn tracked_codex_buffered_four_ingress_routes_join_attempt_usage_and_both_
             assert_eq!(context["backend"]["endpoint_profile"], "chatgpt_codex");
             assert_eq!(context["delivery"], "buffered");
             assert_eq!(context["plane"], "translation");
+            assert_eq!(context["transport"]["upstream_host"], "127.0.0.1");
+            assert_eq!(attempt["observed_provider"]["upstream_host"], "127.0.0.1");
             assert_eq!(attempt["terminal"]["provider_request_id"], "codex-origin");
             assert_eq!(
                 attempt["terminal"]["outcome"],

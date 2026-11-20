@@ -166,6 +166,11 @@ impl ChatProvider for TypedOllama {
 }
 
 pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
+    if request.thinking.is_some() || request.compiled_thinking.is_some() {
+        return Err(ProviderError::InvalidRequest(
+            "Ollama does not support configurable thinking".into(),
+        ));
+    }
     request
         .native_input_for(sandhi_core::EndpointFamilyV1::OllamaChat)
         .map_err(ProviderError::InvalidRequest)?;
@@ -442,19 +447,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn w3d_fields_are_ignored_no_leak() {
-        // Consumer-decision row: Ollama honors neither field.
-        let request: ChatRequestV1 = serde_json::from_value(json!({
+    fn removed_w3d_field_fails_loudly() {
+        let error = serde_json::from_value::<ChatRequestV1>(json!({
             "model": "llama3",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "high",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("reasoning_effort"));
+    }
+
+    #[test]
+    fn semantic_thinking_is_refused_before_ollama_egress() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model": "llama3",
+            "messages": [{"role": "user", "content": "hi"}],
             "thinking": {"enabled": true}
         }))
         .unwrap();
-        let body = encode_ollama_request(&request).unwrap();
-        assert!(body.get("reasoning_effort").is_none());
-        assert!(body.get("thinking").is_none());
-        assert!(body["options"].get("thinking").is_none());
+        assert!(encode_ollama_request(&request).is_err());
     }
 
     #[test]

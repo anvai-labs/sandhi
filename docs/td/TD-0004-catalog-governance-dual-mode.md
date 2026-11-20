@@ -39,10 +39,10 @@ named here (transport, metering, keys, budgets, attribution) is already Sandhi's
 
 ## DeepSeek catalog refresh (2026-11-13)
 
-Refreshed against the provider documentation, without live credentials. The
-`reasoning_effort_values` extension describes thinking-enabled levels from the
-models schema. Chat also accepts `none` to disable thinking and compatibility
-spellings; this extension does not enumerate those mode switches or aliases.
+Refreshed against the provider documentation, without live credentials. Thinking controls are now represented by the mandatory typed
+`ModelDescriptorV1.thinking` capability. Values are exact and model-scoped; there
+are no compatibility aliases and effort `"none"` is not a control. Disabling and
+token budgets require explicit model capability.
 
 Victor G84 found that the released catalog omitted the canonical IDs returned by
 DeepSeek discovery. This additive refresh uses the existing descriptor owner and
@@ -68,9 +68,9 @@ schemas behind a beta endpoint. This change does not qualify that endpoint or
 parallel tool calls: `structured_output` and `parallel_tool_calls` stay false for
 these entries. Prompt-cache reporting uses the existing DeepSeek parser.
 
-The two legacy entries and their order are retained as compatibility snapshots;
-they are not renewed assertions about current aliases or endpoint capability.
-No alias mapping or endpoint change is introduced. Extend the existing Rust,
+The pre-reset legacy entries are retained only as historical snapshots; current
+descriptors expose typed thinking capabilities instead. No alias mapping or
+endpoint change is introduced. Extend the existing Rust,
 Python and Node catalog tests rather than create another catalog/test owner.
 
 | Follow-up gate | Owner / acceptance |

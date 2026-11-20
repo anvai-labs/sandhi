@@ -131,7 +131,10 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
         credential_generation: 1,
         endpoint_family: family,
         endpoint_profile: endpoint_profile.into(),
-        models: vec![serde_json::from_value(json!({"id":"gpt-4o-mini"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"gpt-4o-mini","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: None,
     })
 }

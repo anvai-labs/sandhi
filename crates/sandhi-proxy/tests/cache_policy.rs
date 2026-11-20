@@ -112,7 +112,10 @@ fn provider(
         credential_generation: 1,
         endpoint_family: family,
         endpoint_profile: "standard".into(),
-        models: vec![serde_json::from_value(json!({"id":"fixture"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"fixture","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: policy,
     })
 }
@@ -558,9 +561,18 @@ async fn compiled_plan_cannot_be_imported_from_json_or_retargeted_after_admissio
         &upstream,
         Some(policy(Family::OpenaiChatCompletions, "auto")),
     );
-    let mut request:ChatRequestV1=serde_json::from_value(json!({"model":"fixture","messages":[{"role":"user","content":"question"}],
-        "metadata":{"virtual_key_id":"vk_fixture"},"compiled_cache":{"mutations":[{"model":"foreign"}]}})).unwrap();
-    assert!(request.compiled_cache.is_none());
+    let imported = serde_json::from_value::<ChatRequestV1>(
+        json!({"model":"fixture","messages":[{"role":"user","content":"question"}],
+        "metadata":{"virtual_key_id":"vk_fixture"},"compiled_cache":{"mutations":[{"model":"foreign"}]}}),
+    );
+    assert!(imported
+        .err()
+        .is_some_and(|error| error.to_string().contains("compiled_cache")));
+    let mut request: ChatRequestV1 = serde_json::from_value(json!({
+        "model":"fixture","messages":[{"role":"user","content":"question"}],
+        "metadata":{"virtual_key_id":"vk_fixture"}
+    }))
+    .unwrap();
     request.compiled_cache = original.compile_cache_plan(&request).unwrap();
     let mut binding = original.backend_binding().unwrap().clone();
     binding.credential_generation += 1;

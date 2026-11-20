@@ -667,7 +667,9 @@ mod tests {
         let ledger = Mutex::new(ProxyLedger::durable(path, 1).unwrap());
         let Attempt::Unresolved {
             pending,
-            failure: Failure::Evidence(EvidenceError::UnresolvedObservation),
+            failure: Failure::Evidence(EvidenceError::UnresolvedObservation(
+                sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable,
+            )),
         } = pending.try_commit(&ledger)
         else {
             panic!("unknown remains unresolved");

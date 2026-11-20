@@ -317,7 +317,10 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
             "standard"
         }
         .into(),
-        models: vec![serde_json::from_value(json!({"id":"gpt-4o-mini"})).unwrap()],
+        models: vec![serde_json::from_value(
+            json!({"id":"gpt-4o-mini","thinking":{"supported":false}}),
+        )
+        .unwrap()],
         cache_policy: None,
     })
 }
@@ -419,6 +422,10 @@ async fn tracked_typed_streams_join_all_ingress_formats_to_source_usage_and_pair
                 let attempt: Value = serde_json::from_str(&attempt).unwrap();
                 let usage: Value = serde_json::from_str(&usage).unwrap();
                 assert_eq!(context["delivery"], "streaming");
+                assert_eq!(
+                    context["transport"]["policy"],
+                    json!({"streaming":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000}})
+                );
                 assert_eq!(
                     context["plane"],
                     if (flavor == "chat" && matches!(profile, "chat" | "terminal_chat"))

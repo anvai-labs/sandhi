@@ -23,7 +23,7 @@ fn definition() -> BackendDefinition {
     serde_json::from_value(json!({
         "id":"responses-primary","provider":"openai","credential_ref":"openai:production",
         "endpoint":{"endpoint_family":"openai_responses"},
-        "models":[{"id":"fixture","capabilities":{"tools":true}}]
+        "models":[{"id":"fixture","capabilities":{"tools":true},"thinking":{"supported":false}}]
     }))
     .unwrap()
 }

@@ -131,7 +131,7 @@ async fn call(
 fn definition(base: &str) -> Value {
     json!({"id":"primary","provider":"custom-openai","credential_ref":"openai:default",
         "endpoint":{"endpoint_family":"openai_responses"},"base_url":base,
-        "models":[{"id":"fixture","capabilities":{"tools":true}}]})
+        "models":[{"id":"fixture","capabilities":{"tools":true},"thinking":{"supported":false}}]})
 }
 
 fn inference(model: &str) -> Value {
@@ -220,7 +220,7 @@ async fn registry_binding_survives_rotation_restart_and_credential_revocation() 
     assert_eq!(body["choices"][0]["message"]["content"], "reply");
     let (status, models) = call(&state, "GET", "/v1/models", &token, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models["data"].as_array().unwrap().len(), 1);
+    assert_eq!(models["data"].as_array().unwrap().len(), 1, "{models}");
     assert_eq!(models["data"][0]["id"], "fixture");
     assert_eq!(
         call(

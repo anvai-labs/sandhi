@@ -61,6 +61,7 @@ def check_native_jobs(document):
     builds = [s for s in steps if s.get("uses", "").startswith("PyO3/maturin-action@")]
     assert len(builds) == 1
     assert builds[0]["with"] == {
+        "maturin-version": "1.16.0",
         "command": "build",
         "args": "--release --locked -m bindings/python/Cargo.toml --out dist",
         "target": "${{ matrix.target }}",

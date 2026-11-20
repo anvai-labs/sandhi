@@ -113,7 +113,7 @@ pub(super) fn checked_fence(
                 .transpose()
             {
                 Ok(value) => value,
-                Err(EvidenceError::UnresolvedObservation) => None,
+                Err(EvidenceError::UnresolvedObservation(_)) => None,
                 Err(error) => return Err(error),
             };
             checked_terminal_receipt(conn, scope, reservation_id, charge)?;

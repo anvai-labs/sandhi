@@ -107,20 +107,45 @@ mod tests {
     }
 }
 
-/// One setup deadline across nested transports/retries, plus a captured body idle limit.
-/// Body lifetime is enforced by the proxy owner, not by this transport scope.
+/// One setup deadline across nested transports/retries, plus captured idle/body limits.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamingDeadline {
     pub(crate) setup: BufferedDeadline,
     pub(crate) idle: Duration,
+    pub(crate) body: Option<Duration>,
 }
 impl StreamingDeadline {
     pub fn new(setup: Duration, idle: Duration) -> Self {
         Self {
             setup: BufferedDeadline::new(setup),
             idle,
+            body: None,
         }
     }
+    pub fn new_with_body(setup: Duration, idle: Duration, body: Duration) -> Self {
+        Self {
+            setup: BufferedDeadline::new(setup),
+            idle,
+            body: Some(body),
+        }
+    }
+    pub fn setup_timeout(&self) -> Duration {
+        self.setup.timeout
+    }
+
+    pub fn idle_timeout(&self) -> Duration {
+        self.idle
+    }
+
+    /// Absolute body bound begins when setup ends. The returned duration is the
+    /// advertised body budget, not setup+body.
+    pub(crate) fn body_deadline(&self) -> Option<BufferedDeadline> {
+        self.body.map(|body| BufferedDeadline {
+            at: self.setup.at + body,
+            timeout: body,
+        })
+    }
+
     pub async fn scope<F: Future>(self, future: F) -> F::Output {
         STREAMING_DEADLINE.scope(self, future).await
     }

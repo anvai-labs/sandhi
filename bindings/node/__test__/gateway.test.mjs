@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFileSync, rmSync } from "node:fs";
 
-import { Gateway, parseUsage, wireContractVersion } from "../index.js";
+import { Gateway, parseUsage, wireContractVersion, chatContractVersion } from "../index.js";
 import { ProviderRuntime } from "../sandhi.js";
 import "./cache-read-observation.test.mjs";
 
@@ -632,6 +632,7 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
   assert.ok(models.some((m) => m.id === "claude-fable-5"));
   const fable = models.find((m) => m.id === "claude-fable-5");
   assert.equal(fable.max_input_tokens, 1000000);
+  assert.equal(fable.thinking.encoding, undefined);
   // Facts only — the catalog carries no pricing (measure-vs-price line held).
   assert.equal(fable.price, undefined);
   // Seeded compat vendor lineups resolve through aliases too.
@@ -645,7 +646,12 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
     assert.equal(model.max_output_tokens, 393216);
     assert.equal(model.capabilities.vision, vision);
     assert.equal(model.capabilities.reasoning, true);
-    assert.deepEqual(model.extensions.reasoning_effort_values, ["low", "high", "max"]);
+    assert.deepEqual(
+      model.thinking.effort.values,
+      ["low", "high", "max"],
+    );
+    assert.equal(model.thinking.encoding, undefined);
+    assert.equal(model.extensions.reasoning_effort_values, undefined);
     assert.equal(model.default_temperature, undefined);
   }
   // Aggregators stay empty (dynamic hosting catalogs — live discovery).
@@ -657,6 +663,7 @@ test("catalog surface serves curated model data (TD-0004)", async () => {
 
 test("usage parsing and metering retain cache attribution", () => {
   assert.equal(wireContractVersion(), "1");
+  assert.equal(chatContractVersion(), "1");
   const usage = parseUsage(
     "openai",
     JSON.stringify({

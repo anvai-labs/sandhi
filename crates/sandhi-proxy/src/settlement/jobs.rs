@@ -1599,7 +1599,8 @@ mod tests {
     fn paired_admission() -> PreparedAdmission {
         let context=serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"transparent",
             "upstream_ref":"openai:default","upstream_budget_scope":"upstream:models","requested_model":"model","actual_model":"model","provider":"models",
-            "endpoint_family":"openai_chat_completions","transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
+            "endpoint_family":"openai_chat_completions","transport":{"upstream_host":"upstream.test","policy":{"buffered":{"duration_ms":30000}}},"transport_binding_sha256":"a".repeat(64),
+            "accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap();
         admission().with_context(context).unwrap()
     }
 

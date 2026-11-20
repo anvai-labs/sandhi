@@ -10,6 +10,7 @@
 
 use sandhi_core::{
     EndpointFamilyV1, ModelDescriptorV1, ProviderCapabilitiesV1, ProviderDescriptorV1,
+    ThinkingCapabilityV1, ThinkingEncodingV1,
 };
 use std::collections::BTreeMap;
 
@@ -346,6 +347,7 @@ pub fn anthropic_models() -> Vec<ModelDescriptorV1> {
             max_output_tokens: Some(max_output),
             default_temperature: Some(1.0),
             capabilities: caps.clone(),
+            thinking: ThinkingCapabilityV1::unsupported(),
             endpoint_url: None,
             extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
         },
@@ -381,6 +383,7 @@ pub fn gemini_models() -> Vec<ModelDescriptorV1> {
             max_output_tokens: Some(max_output),
             default_temperature: Some(1.0),
             capabilities: caps.clone(),
+            thinking: ThinkingCapabilityV1::unsupported(),
             endpoint_url: None,
             extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
         },
@@ -402,6 +405,11 @@ pub fn openai_models() -> Vec<ModelDescriptorV1> {
         structured_output: true,
         ..ProviderCapabilitiesV1::default()
     };
+    let effort = ThinkingCapabilityV1::effort(
+        ThinkingEncodingV1::OpenaiChat,
+        &["low", "medium", "high"],
+        None,
+    );
     [
         ("gpt-5", "GPT-5", 400_000u64, 128_000u64),
         ("gpt-5-chat-latest", "GPT-5 Chat", 128_000, 16_384),
@@ -415,6 +423,7 @@ pub fn openai_models() -> Vec<ModelDescriptorV1> {
             max_output_tokens: Some(max_output),
             default_temperature: Some(1.0),
             capabilities: caps.clone(),
+            thinking: effort.clone(),
             endpoint_url: None,
             extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
         },
@@ -449,6 +458,7 @@ fn compat_entry(
         max_output_tokens: max_output,
         default_temperature: Some(1.0),
         capabilities,
+        thinking: ThinkingCapabilityV1::unsupported(),
         endpoint_url: None,
         extensions: BTreeMap::from([("display_name".into(), serde_json::json!(display_name))]),
     }
@@ -493,11 +503,13 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
                 reasoning: true,
                 ..ProviderCapabilitiesV1::default()
             },
+            thinking: ThinkingCapabilityV1::effort(
+                ThinkingEncodingV1::OpenaiChat,
+                &["low", "high", "max"],
+                None,
+            ),
             endpoint_url: Some("https://api.moonshot.ai/v1".into()),
-            extensions: BTreeMap::from([(
-                "reasoning_effort_values".into(),
-                serde_json::json!(["low", "high", "max"]),
-            )]),
+            extensions: BTreeMap::new(),
         }],
         "openai" => openai_models(),
         "xai" => vec![
@@ -572,9 +584,10 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
                 // Thinking is on by default and ignores temperature. Do not
                 // advertise the generic compat helper's temperature as a fact.
                 model.default_temperature = None;
-                model.extensions.insert(
-                    "reasoning_effort_values".into(),
-                    serde_json::json!(["low", "high", "max"]),
+                model.thinking = ThinkingCapabilityV1::effort(
+                    ThinkingEncodingV1::OpenaiChat,
+                    &["low", "high", "max"],
+                    None,
                 );
                 models.push(model);
             }
@@ -752,8 +765,14 @@ mod tests {
         let descriptor = openai_compat_descriptor("kimi").unwrap();
         assert_eq!(descriptor.models[0].default_temperature, Some(1.0));
         assert_eq!(
-            descriptor.models[0].extensions["reasoning_effort_values"],
-            serde_json::json!(["low", "high", "max"])
+            descriptor.models[0]
+                .thinking
+                .effort
+                .as_ref()
+                .expect("effort capability")
+                .values
+                .clone(),
+            ["low", "high", "max"]
         );
     }
 
@@ -964,6 +983,10 @@ mod tests {
         let gpt5 = openai.models.iter().find(|m| m.id == "gpt-5").unwrap();
         assert_eq!(gpt5.max_input_tokens, Some(400_000));
         assert_eq!(gpt5.max_output_tokens, Some(128_000));
+        assert_eq!(
+            gpt5.thinking.effort.as_ref().expect("GPT-5 effort").values,
+            ["low", "medium", "high"]
+        );
 
         // Aggregators stay deliberately empty (dynamic hosting catalogs — live discovery).
         assert!(provider_descriptor("openrouter").unwrap().models.is_empty());
@@ -1027,8 +1050,14 @@ mod tests {
             assert!(!model.capabilities.parallel_tool_calls);
             assert!(model.aliases.is_empty());
             assert_eq!(
-                model.extensions["reasoning_effort_values"],
-                serde_json::json!(["low", "high", "max"])
+                model
+                    .thinking
+                    .effort
+                    .as_ref()
+                    .expect("effort capability")
+                    .values
+                    .clone(),
+                ["low", "high", "max"]
             );
         }
         // Retained legacy snapshot: this increment does not requalify or retarget it.

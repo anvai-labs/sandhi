@@ -8,8 +8,8 @@ use crate::{
 use async_trait::async_trait;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ChatStreamEventV1,
-    ContentPart, FinishReasonV1, MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
-    UsageCompleteness, UsageV2,
+    ContentPart, FinishReasonV1, MessageContent, ThinkingEncodingV1, ToolCallV1, ToolChoiceMode,
+    ToolChoiceV1, UsageCompleteness, UsageV2,
 };
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
@@ -226,7 +226,7 @@ fn encode_responses_request(request: &ChatRequestV1) -> Result<Value, ProviderEr
     encode_responses_request_for_profile(request, OpenAiResponsesProfile::Standard)
 }
 
-fn encode_responses_request_for_profile(
+pub(crate) fn encode_responses_request_for_profile(
     request: &ChatRequestV1,
     profile: OpenAiResponsesProfile,
 ) -> Result<Value, ProviderError> {
@@ -325,20 +325,43 @@ pub(crate) fn encode_responses_request_base(
             json!({"format": responses_text_format(format)}),
         );
     }
-    // W3d/G7: Responses expresses effort as `reasoning.effort` (not the Chat
-    // top-level `reasoning_effort`). Merge into any existing reasoning object
-    // (e.g. an extensions-carried `encrypted_content` include) rather than
-    // clobbering it. Typed field wins over an extensions duplicate.
-    if let Some(effort) = &request.reasoning_effort {
+    // Responses expresses only semantic effort as `reasoning.effort`. Remove a
+    // native duplicate while preserving unrelated reasoning options such as
+    // encrypted-content includes.
+    body.remove("reasoning_effort");
+    if let Some(reasoning) = body.get_mut("reasoning").and_then(Value::as_object_mut) {
+        reasoning.remove("effort");
+    }
+    if let Some(thinking) = &request.thinking {
+        if request.compiled_thinking != Some(ThinkingEncodingV1::OpenaiResponses) {
+            return Err(ProviderError::InvalidRequest(
+                "thinking control was not admitted for OpenAI responses".into(),
+            ));
+        }
+        if !thinking.enabled || thinking.budget_tokens.is_some() {
+            return Err(ProviderError::InvalidRequest(
+                "OpenAI responses thinking supports enabled effort only".into(),
+            ));
+        }
+        let Some(effort) = &thinking.effort else {
+            return Err(ProviderError::InvalidRequest(
+                "OpenAI responses thinking requires an effort value".into(),
+            ));
+        };
         let reasoning = body
             .entry("reasoning")
             .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(obj) = reasoning.as_object_mut() {
-            obj.insert("effort".into(), Value::String(effort.clone()));
-        }
+        let Some(obj) = reasoning.as_object_mut() else {
+            return Err(ProviderError::InvalidRequest(
+                "Responses reasoning must be a JSON object".into(),
+            ));
+        };
+        obj.insert("effort".into(), Value::String(effort.clone()));
+    } else if request.compiled_thinking.is_some() {
+        return Err(ProviderError::InvalidRequest(
+            "compiled thinking has no semantic request".into(),
+        ));
     }
-    // `thinking` is not a Responses concept — reasoning is the effort field
-    // above. Explicitly ignored (consumer-decision row, W3d/G7).
     if profile == OpenAiResponsesProfile::ChatGptCodex {
         if request.native_input.as_ref().is_some_and(|context| {
             context
@@ -1174,9 +1197,10 @@ mod tests {
             Ok(E::ReasoningDelta {
                 delta: "out of order".into(),
             }),
-            Err(crate::ProviderError::Timeout(
+            Err(crate::ProviderError::Timeout(crate::TimeoutError::new(
+                crate::TimeoutPhase::Idle,
                 std::time::Duration::from_millis(1),
-            )),
+            ))),
         ]);
         let result = super::aggregate_stream_for_delivery(Box::pin(stream), true).await;
         assert!(matches!(
@@ -1509,16 +1533,25 @@ mod tests {
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn w3d_reasoning_effort_maps_to_reasoning_effort_object() {
+    fn admitted_effort_request(effort: &str) -> ChatRequestV1 {
         let request: ChatRequestV1 = serde_json::from_value(json!({
             "model": "gpt-5",
-            "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "high"
+            "messages": [
+                {"role": "developer", "content": "Classify the input."},
+                {"role": "user", "content": "hi"}
+            ],
+            "thinking": {"enabled": true, "effort": effort}
         }))
         .unwrap();
-        let body = encode_responses_request(&request).unwrap();
-        // Responses uses reasoning.effort, not the Chat top-level field.
+        ChatRequestV1 {
+            compiled_thinking: Some(ThinkingEncodingV1::OpenaiResponses),
+            ..request
+        }
+    }
+
+    #[test]
+    fn semantic_effort_maps_to_reasoning_effort_object() {
+        let body = encode_responses_request(&admitted_effort_request("high")).unwrap();
         assert_eq!(body["reasoning"]["effort"], "high");
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -1526,17 +1559,17 @@ mod tests {
     #[test]
     fn model_effort_pair_survives_standard_and_subscription_responses() {
         for model in ["gpt-6-sol", "gpt-6-luna"] {
-            for effort in ["none", "low", "medium", "high", "xhigh", "max"] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
                 for profile in [
                     OpenAiResponsesProfile::Standard,
                     OpenAiResponsesProfile::ChatGptCodex,
                 ] {
-                    let request: ChatRequestV1 = serde_json::from_value(json!({
-                        "model": model,
-                        "messages": [{"role": "system", "content": "Classify the input."}, {"role": "user", "content": "hello"}],
-                        "reasoning_effort": effort,
-                        "extensions": {"openai_responses": {"reasoning": {"effort": "low", "summary": "auto"}}}
-                    })).unwrap();
+                    let mut request = admitted_effort_request(effort);
+                    request.model = model.into();
+                    request.extensions.insert(
+                        "openai_responses".into(),
+                        json!({"reasoning": {"effort": "low", "summary": "auto"}}),
+                    );
                     let body = encode_responses_request_for_profile(&request, profile).unwrap();
                     assert_eq!(body["model"], model);
                     assert_eq!(body["reasoning"]["effort"], effort);
@@ -1548,14 +1581,12 @@ mod tests {
     }
 
     #[test]
-    fn w3d_reasoning_effort_merges_into_existing_reasoning_object() {
-        let request: ChatRequestV1 = serde_json::from_value(json!({
-            "model": "gpt-5",
-            "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "high",
-            "extensions": {"openai_responses": {"reasoning": {"summary": "auto"}}}
-        }))
-        .unwrap();
+    fn semantic_effort_merges_without_discarding_reasoning_options() {
+        let mut request = admitted_effort_request("high");
+        request.extensions.insert(
+            "openai_responses".into(),
+            json!({"reasoning": {"summary": "auto"}}),
+        );
         let body = encode_responses_request(&request).unwrap();
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["reasoning"]["summary"], "auto");

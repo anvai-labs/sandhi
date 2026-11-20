@@ -2440,14 +2440,20 @@ impl ChatProvider for AlwaysTimeout {
         _req: sandhi_core::ChatRequestV1,
         _call_headers: axum::http::HeaderMap,
     ) -> Result<sandhi_core::ChatResponseV1, ProviderError> {
-        Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
+        Err(ProviderError::Timeout(sandhi_providers::TimeoutError::new(
+            sandhi_providers::TimeoutPhase::Setup,
+            std::time::Duration::from_millis(50),
+        )))
     }
     async fn stream(
         &self,
         _req: sandhi_core::ChatRequestV1,
         _call_headers: axum::http::HeaderMap,
     ) -> Result<ChatEventStream, ProviderError> {
-        Err(ProviderError::Timeout(std::time::Duration::from_millis(50)))
+        Err(ProviderError::Timeout(sandhi_providers::TimeoutError::new(
+            sandhi_providers::TimeoutPhase::Setup,
+            std::time::Duration::from_millis(50),
+        )))
     }
 }
 
@@ -4253,7 +4259,9 @@ async fn owned_buffered_rejects_unqualified_usage_without_zero_settlement() {
     assert_eq!(page.entries.len(), 1);
     assert!(matches!(
         page.entries[0].state,
-        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation(
+            sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable
+        )
     ));
     assert_eq!(
         ledger
@@ -5183,7 +5191,12 @@ async fn owned_stream_terminal_evidence_controls_settlement_and_http_completion(
             );
             assert_eq!(usage.completeness, UsageCompleteness::Final);
         } else {
-            assert!(matches!(entry.state, RecoveryState::UnresolvedObservation));
+            assert!(matches!(
+                entry.state,
+                RecoveryState::UnresolvedObservation(
+                    sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable
+                )
+            ));
             assert_eq!(
                 usage.completeness,
                 if case == "missing" {
@@ -5456,7 +5469,9 @@ async fn exact_model_stream_override_passes_old_body_limit_without_inventing_usa
     assert_eq!(page.entries.len(), 1);
     assert!(matches!(
         page.entries[0].state,
-        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation(
+            sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable
+        )
     ));
     let execution_id = page.entries[0].execution_id.clone();
     let terminal = ledger
@@ -5586,8 +5601,25 @@ async fn owned_stream_setup_deadline_is_scoped_inside_admission_task() {
     assert_eq!(page.entries.len(), 1);
     assert!(matches!(
         page.entries[0].state,
-        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation
+        sandhi_store::ledger::evidence::RecoveryState::UnresolvedObservation(
+            sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable
+        )
     ));
+    let attempt = ledger
+        .physical_attempt_durable("group:platform", &page.entries[0].execution_id)
+        .unwrap()
+        .unwrap();
+    let terminal = attempt.evidence.unwrap().terminal.unwrap();
+    assert_eq!(terminal.progress.response_headers_received, Some(false));
+    assert_eq!(terminal.progress.stream_event_received, Some(false));
+    assert_eq!(
+        terminal.progress.timeout_phase,
+        Some(sandhi_store::ledger::evidence::TransportTimeoutPhase::Setup)
+    );
+    assert_eq!(
+        terminal.progress.error_subtype,
+        Some(sandhi_store::ledger::evidence::TransportErrorSubtype::Setup)
+    );
     assert_eq!(
         sink.events()[0].usage_completeness,
         sandhi_core::UsageCompleteness::Unavailable

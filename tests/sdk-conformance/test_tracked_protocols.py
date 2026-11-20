@@ -659,22 +659,17 @@ def test_live_report_verifier_checks_actual_sql_join_and_detects_corrupted_evide
             "usage_events": events, "executions": executions, "accounting_inventory": inventory}
         assert harness.verify_report(report)["errors"] == []
         assert harness.verify_report(report)["tracked_evidence_matches"] == 1
-        assert executions[0]["attempt"]["version"] == 2
-        # Existing v1 records remain valid; bounded v2 labels do not set charge authority.
-        legacy = copy.deepcopy(report)
-        legacy["executions"][0]["attempt"]["version"] = 1
-        legacy["executions"][0]["attempt"].pop("observed_provider", None)
-        assert harness.verify_report(legacy)["errors"] == []
+        assert executions[0]["attempt"]["version"] == 1
         diagnostic = copy.deepcopy(report)
         diagnostic["executions"][0]["attempt"]["observed_provider"] = {"provider": "another-label", "model": "diagnostic-model"}
         assert harness.verify_report(diagnostic)["errors"] == []
-        for attempt in (None, [], 1, "v2"):
+        for attempt in (None, [], 1, "v1"):
             broken = copy.deepcopy(report)
             broken["executions"][0]["attempt"] = attempt
             assert harness.verify_report(broken)["errors"], attempt
-        for version, observed in [(3, None), (True, None), ("2", None),
-                                  (1, {"provider": "label"}), (2, {"provider": "bad\nlabel"}),
-                                  (2, {"provider": "x" * 129}), (2, {"model": "missing-provider"})]:
+        for version, observed in [(2, None), (3, None), (True, None), ("1", None),
+                                  (1, None), (1, {"provider": "bad\nlabel"}),
+                                  (1, {"provider": "x" * 129}), (1, {"model": "missing-provider"})]:
             broken = copy.deepcopy(report)
             broken["executions"][0]["attempt"].update(version=version, observed_provider=observed)
             assert harness.verify_report(broken)["errors"], (version, observed)
@@ -978,6 +973,34 @@ def test_explicit_thinking_disable_reaches_messages_from_each_real_sdk(
     spec.loader.exec_module(harness)
     origin, calls, _ = qualified_origin
     with tracked_gateway(tmp_path, backend_binaries, origin, FAMILIES[1], streaming=True) as (instance, token):
+        disable_capable = {
+            "id": "primary",
+            "provider": "models",
+            "credential_ref": "openai:default",
+            "endpoint": {
+                "endpoint_family": FAMILIES[1],
+                "endpoint_profile": "standard",
+            },
+            "cache_policy": {
+                "default_intent": {"mode": "auto"},
+                "allow_request_override": True,
+                "models": {"fixture": {"profile": "implicit_only"}},
+            },
+            "models": [{
+                "id": "fixture",
+                "thinking": {
+                    "supported": True,
+                    "encoding": "anthropic_messages",
+                    "can_disable": True,
+                    "budget_tokens": {"min": 1024, "max": 4096},
+                },
+            }],
+        }
+        updated = instance.admin(
+            "POST", "/admin/backends",
+            json={"definition": disable_capable, "expected_revision": 1},
+        )
+        assert updated.status_code in (200, 201), updated.text
         result = harness.infer(ingress, instance.base, token, "agent", "hello", True, "thinking-intent", "disabled")
         assert result["text"] == "reply"
         assert len(calls) == 1

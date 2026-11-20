@@ -65,6 +65,7 @@ def check_preflight(ci, release):
         if step.get("uses", "").startswith("dtolnay/rust-toolchain@")
     ]
     assert len(toolchain) == 1
+    assert toolchain[0]["with"]["toolchain"] == "1.100.0"
     assert toolchain[0]["with"]["targets"] == "${{ matrix.target }}"
 
     runs = [step["run"] for step in gate["steps"] if "run" in step]

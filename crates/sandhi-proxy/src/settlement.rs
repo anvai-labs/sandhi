@@ -70,7 +70,12 @@ impl Failure {
             Self::NoReservation => "no_reservation",
             Self::NonDurableLedger => "non_durable_ledger",
             Self::UnknownUsage => "unknown_usage",
-            Self::Evidence(EvidenceError::UnresolvedObservation) => "unresolved_observation",
+            Self::Evidence(EvidenceError::UnresolvedObservation(
+                sandhi_store::ledger::evidence::UnresolvedObservationReason::TransportEvidenceIncomplete,
+            )) => "transport_evidence_incomplete",
+            Self::Evidence(EvidenceError::UnresolvedObservation(
+                sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable,
+            )) => "provider_usage_unavailable",
             Self::Evidence(EvidenceError::Storage(_)) => "storage",
             Self::Evidence(_) => "evidence",
         }
@@ -479,5 +484,31 @@ impl AuthorizedExecution {
     /// Authorization alone is not evidence that a provider completed a request.
     pub fn into_settlement(self, usage: UsageV2) -> PendingSettlement {
         PendingSettlement::tracked(self.request_id, self.intent, usage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_evidence_preserves_its_public_diagnostic_reason() {
+        let cases = [
+            (
+                EvidenceError::UnresolvedObservation(
+                    sandhi_store::ledger::evidence::UnresolvedObservationReason::TransportEvidenceIncomplete,
+                ),
+                "transport_evidence_incomplete",
+            ),
+            (
+                EvidenceError::UnresolvedObservation(
+                    sandhi_store::ledger::evidence::UnresolvedObservationReason::ProviderUsageUnavailable,
+                ),
+                "provider_usage_unavailable",
+            ),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(Failure::Evidence(failure).diagnostic_code(), expected);
+        }
     }
 }
