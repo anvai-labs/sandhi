@@ -1273,10 +1273,10 @@ def canonical_backend_definition(value: Any) -> dict[str, Any]:
         if not isinstance(extensions, dict) or extensions:
             raise RebuildError("backend model extensions are not supported")
         model["extensions"] = extensions
-        if "thinking" not in model:
-            model["thinking"] = {"supported": False}
+        # Pre-GA runtimes ignored unknown nested model fields. A historical
+        # `thinking` value therefore carries no qualified 0.22 authority.
         model["thinking"] = canonical_thinking_capability(
-            model["thinking"], endpoint_family
+            {"supported": False}, endpoint_family
         )
         model = ordered(model, tuple(BACKEND_MODEL_FIELDS))
         canonical_models.append(model)

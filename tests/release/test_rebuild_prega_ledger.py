@@ -330,12 +330,12 @@ def test_rebuild_accepts_ipv6_transport_host(tmp_path):
 @pytest.mark.parametrize(
     "thinking",
     [
-        {"supported": True},
-        {"supported": False, "encoding": "openai_chat"},
         {"supported": True, "encoding": "gemini_generate_content", "effort": {"values": ["low"]}},
+        {"supported": False, "encoding": "openai_chat"},
+        "historically-ignored",
     ],
 )
-def test_rebuild_rejects_backend_thinking_that_cannot_boot(thinking, tmp_path):
+def test_rebuild_conservatively_disables_all_legacy_backend_thinking(thinking, tmp_path):
     source = tmp_path / "source.db"
     output = tmp_path / "rebuilt.db"
     manifest = tmp_path / "manifest.json"
@@ -351,10 +351,12 @@ def test_rebuild_rejects_backend_thinking_that_cannot_boot(thinking, tmp_path):
     )
     connection.commit()
     connection.close()
-    with pytest.raises(MODULE.RebuildError, match="backend (model )?thinking"):
-        MODULE.rebuild(source, output, manifest)
-    assert not output.exists()
-    assert not manifest.exists()
+    MODULE.rebuild(source, output, manifest)
+    connection = sqlite3.connect(output)
+    backend = json.loads(connection.execute("SELECT definition_json FROM backends").fetchone()[0])
+    connection.close()
+    assert backend["models"][0]["thinking"] == {"supported": False}
+    assert json.loads(manifest.read_text())["legacy_backends_migrated_to_unsupported_thinking"] == 1
 
 
 def test_rebuild_rejects_backend_references_runtime_would_corrupt(tmp_path):
@@ -437,17 +439,6 @@ def test_rebuild_rejects_backend_cache_policy_runtime_would_corrupt(tmp_path):
         (
             lambda definition: definition["models"][0].update(max_input_tokens=2**64),
             "max_input_tokens",
-        ),
-        (
-            lambda definition: definition["models"][0].update(
-                thinking={
-                    "supported": True,
-                    "encoding": "zai_openai_chat",
-                    "can_disable": "yes",
-                    "budget_tokens": {"min": 1, "max": 10},
-                }
-            ),
-            "can_disable",
         ),
         (lambda definition: definition["models"][0].update(aliases=None), "aliases"),
     ],
