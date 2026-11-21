@@ -98,18 +98,22 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
                     }
                 }
             }
-            if body.get("container").is_some() {
+            if body.get("container").is_some_and(|value| !value.is_null()) {
                 mark(Feature::ResourceReference);
             }
-            if [
-                "top_k",
-                "top_p",
-                "context_management",
-                "output_config",
-                "service_tier",
-            ]
-            .iter()
-            .any(|key| body.get(*key).is_some())
+            if ["top_k", "top_p", "context_management", "service_tier"]
+                .iter()
+                .any(|key| body.get(*key).is_some())
+                || body
+                    .get("output_config")
+                    .and_then(Value::as_object)
+                    .is_some_and(|config| config.keys().any(|key| key != "effort"))
+                || body
+                    .pointer("/thinking/display")
+                    .is_some_and(|value| !value.is_null())
+                || body
+                    .as_object()
+                    .is_some_and(sandhi_providers::thinking::anthropic_effort_only)
             {
                 mark(Feature::NativeControl);
             }
@@ -122,7 +126,10 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
             }
         }
         EndpointFamilyV1::GeminiGenerateContent => {
-            if body.get("cachedContent").is_some() {
+            if ["cachedContent", "cached_content"]
+                .iter()
+                .any(|key| body.get(*key).is_some_and(|value| !value.is_null()))
+            {
                 mark(Feature::ResourceReference);
             }
             if body.get("safetySettings").is_some() {
@@ -164,26 +171,21 @@ pub(super) fn capture(request: &mut ChatRequestV1, family: EndpointFamilyV1) -> 
             }) {
                 mark(Feature::NativeControl);
             }
-            if body
-                .get("generationConfig")
-                .and_then(Value::as_object)
-                .is_some_and(|config| config.keys().any(|key| key != "thinkingConfig"))
-            {
-                // Only unprojected generation controls remain in this bucket.
-                mark(Feature::NativeControl);
-            }
-            if let Some(thinking) = body.pointer("/generationConfig/thinkingConfig") {
-                if (!thinking.is_null()
-                    && thinking.as_object().is_none_or(|config| {
-                        config.keys().any(|key| {
-                            !matches!(key.as_str(), "thinkingBudget" | "thinking_budget")
-                        })
-                    }))
-                    || (thinking
-                        .get("thinkingBudget")
-                        .or_else(|| thinking.get("thinking_budget"))
-                        .is_some()
-                        && request.thinking.is_none())
+            let generation = sandhi_providers::thinking::gemini_generation_config(
+                body.as_object()
+                    .ok_or("Gemini native body must be an object")?,
+            )?;
+            if let Some(config) = generation {
+                if config
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "thinkingConfig" | "thinking_config"))
+                    || sandhi_providers::thinking::gemini_thinking_config(config)?.is_some_and(
+                        |thinking| {
+                            thinking.keys().any(|key| {
+                                !sandhi_providers::thinking::is_gemini_thinking_field(key)
+                            })
+                        },
+                    )
                 {
                     mark(Feature::NativeControl);
                 }

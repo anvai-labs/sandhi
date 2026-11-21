@@ -20,12 +20,13 @@ import tomllib
 
 
 MAX_MANIFEST_BYTES = 1024 * 1024
-CRATES = ("sandhi-core", "sandhi-providers", "sandhi-store", "sandhi-proxy")
+CRATES = ("sandhi-core", "sandhi-providers", "sandhi-dialect", "sandhi-store", "sandhi-proxy")
 EDGES = {
     "sandhi-core": (),
     "sandhi-providers": ("sandhi-core",),
+    "sandhi-dialect": ("sandhi-core", "sandhi-providers"),
     "sandhi-store": ("sandhi-core",),
-    "sandhi-proxy": ("sandhi-core", "sandhi-providers", "sandhi-store"),
+    "sandhi-proxy": ("sandhi-core", "sandhi-providers", "sandhi-dialect", "sandhi-store"),
 }
 MANIFESTS = ("Cargo.toml", *(f"crates/{name}/Cargo.toml" for name in CRATES))
 

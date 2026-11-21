@@ -11,13 +11,23 @@ prompt-cache split, GPU-seconds) and never dollars. See
 [ADR-0001](docs/adr/0001-sandhi-architecture-and-wire-contract.md) for the
 architecture and the measure-vs-price boundary this changelog respects.
 
-One tag `vX.Y.Z` drives the required binary, PyPI, four-crate and three-package npm release.
+One tag `vX.Y.Z` drives the required binary, PyPI, Rust crate and three-package npm release.
 Versions are committed and reviewed together before tagging; release tags must match
 the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
 ## [Unreleased]
+
+- Add SDK-shaped buffered and streaming calls to Python provider handles. HTTP and Python share
+  the OpenAI Chat, OpenAI Responses, Anthropic Messages, and Gemini GenerateContent codecs.
+- Accept OpenAI's native `none` reasoning effort as an explicit disable request and apply exact
+  model admission. Keep the neutral chat contract at v1.
+- Qualify adaptive thinking for Claude Sonnet 4.6 and thinking levels for
+  Gemini 3 Flash Preview. HTTP and Python apply the same model-scoped admission.
+- Preserve portable consumer behavior with neutral OpenAI o-series sampling and
+  output limits, exact Ollama thinking toggles, and an optional tool-cache prefix
+  hint for direct Anthropic calls. These additions retain chat schema v1.
 
 ## [0.22.1] — Source candidate, 2026-11-20
 

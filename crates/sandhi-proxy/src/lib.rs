@@ -85,7 +85,10 @@ use sandhi_providers::{
 };
 use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
 
-use codec::{encode_response_with_emission, IngressDialect, StreamEventEncoder};
+use codec::{
+    encode_response_with_emission, DialectCredentials, HttpIngressError, IngressDialect,
+    TranslatedStream,
+};
 pub use operator::BudgetSpec;
 
 /// Default output maximum for a Block-budgeted scope when the client omits `max_output_tokens`.
@@ -2970,14 +2973,7 @@ fn dialect_label(dialect: IngressDialect) -> &'static str {
 
 /// Ingress dialect → the upstream family it maps to, for plane selection (TD-0006 Step 2).
 fn ingress_family(dialect: IngressDialect) -> ProviderFamily {
-    match dialect {
-        IngressDialect::OpenAi | IngressDialect::Embeddings | IngressDialect::Completions => {
-            ProviderFamily::OpenAiCompat
-        }
-        IngressDialect::Anthropic => ProviderFamily::Anthropic,
-        IngressDialect::Responses => ProviderFamily::OpenAiResponses,
-        IngressDialect::Gemini => ProviderFamily::Gemini,
-    }
+    dialect.family()
 }
 
 /// The upstream path suffix for a same-family transparent forward — mirrors each typed adapter's
@@ -3667,41 +3663,16 @@ async fn stream_response(
     let response_provider = provider.clone();
     let body = streaming::body(accounting, permit, tail, move |accounting| {
         Box::pin(async_stream::try_stream! {
-            let mut last_usage: Option<UsageV2> = None;
-            // Stateful per-stream egress encoder: Anthropic's content-block
-            // lifecycle and Gemini's whole-part tool calls need cross-event state.
-            let mut stream_encoder = StreamEventEncoder::new(dialect);
+            let mut stream_encoder = TranslatedStream::new(dialect, tracked_translation);
             let mut cache_read_observation = None;
             // A non-final `Usage` event is accounting-only and must not reach the client (TD-0013 D7):
             // the ingress wire shape is a TD-0010 parity guarantee, and a metering improvement that
             // adds frames to a caller's stream has broken something more important than it fixed.
             let mut accounting_only;
             let mut native_error_sent = false;
-            let mut pending_finish = None;
-            let mut projection_bytes = 0usize;
             while let Some(item) = upstream.next().await {
                 match item {
                     Ok(event) => {
-                        if tracked_translation {
-                            // Responses retains text/tool output for its final
-                            // frame; Gemini retains incomplete tool arguments.
-                            // Bound that projection independently of wire queue
-                            // backpressure and heuristic token reservations.
-                            let payload = match &event {
-                                sandhi_core::ChatStreamEventV1::TextDelta{delta}
-                                | sandhi_core::ChatStreamEventV1::ReasoningDelta{delta}
-                                | sandhi_core::ChatStreamEventV1::RefusalDelta{delta}
-                                | sandhi_core::ChatStreamEventV1::ToolCallArgumentsDelta{delta,..} => delta.len(),
-                                sandhi_core::ChatStreamEventV1::ToolCallStart{id,name,..} => id.len().saturating_add(name.len()),
-                                sandhi_core::ChatStreamEventV1::ResponseStart{id,model} => id.as_ref().map_or(0,String::len).saturating_add(model.len()),
-                                _ => 0,
-                            };
-                            projection_bytes=projection_bytes.saturating_add(payload).saturating_add(128);
-                            if projection_bytes > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES {
-                                accounting.set_outcome("error");
-                                Err(std::io::Error::other("translated stream projection limit exceeded"))?;
-                            }
-                        }
                         accounting_only = false;
                         match &event {
                             sandhi_core::ChatStreamEventV1::Usage { usage }
@@ -3716,7 +3687,6 @@ async fn stream_response(
                                 sandhi_core::merge_cache_read_observation(&mut cache_read_observation, usage.cache_read_observation);
                                 // Terminal, authoritative usage — replaces earlier source progress.
                                 accounting.observe(usage);
-                                last_usage = Some(usage.clone());
                             }
                             sandhi_core::ChatStreamEventV1::Error { .. } => {
                                 accounting.set_outcome("error");
@@ -3733,23 +3703,6 @@ async fn stream_response(
                         if accounting_only {
                             continue;
                         }
-                        if !native_stream && dialect == IngressDialect::OpenAi
-                            && matches!(event,sandhi_core::ChatStreamEventV1::Usage{..})
-                        {
-                            // Chat's empty-choices total must remain the final
-                            // chunk before DONE, after the deferred finish reason.
-                            continue;
-                        }
-                        // Chat's finish reason can precede its final usage chunk.
-                        // Defer translated terminal frames until source EOF so
-                        // SDKs receive final counts before completion, and late
-                        // source qualification errors cannot look clean.
-                        if !native_stream {
-                            if let sandhi_core::ChatStreamEventV1::Finish { reason } = &event {
-                                pending_finish = Some(*reason);
-                                continue;
-                            }
-                        }
                         if let sandhi_core::ChatStreamEventV1::NativeFrame { frame } = &event {
                             if !native_stream || frame.endpoint_family != ingress_family(dialect).endpoint_family()
                                 || frame.sse.len() > sandhi_core::MAX_NATIVE_STREAM_FRAME_BYTES
@@ -3757,8 +3710,7 @@ async fn stream_response(
                                 accounting.set_outcome("error");
                                 Err(std::io::Error::other("incompatible or oversized native SSE attachment"))?;
                             }
-                            native_error_sent |= frame.json_data().is_some_and(|value|
-                                value.get("error").is_some_and(|error| !error.is_null()) || value.get("type").and_then(serde_json::Value::as_str) == Some("error"));
+                            native_error_sent |= frame.json_data().as_ref().is_some_and(sandhi_dialect::is_native_stream_error);
                             yield Bytes::from(frame.sse.clone());
                             continue;
                         }
@@ -3766,7 +3718,7 @@ async fn stream_response(
                             continue;
                         }
                         for (event_name, value) in
-                            stream_encoder.encode(&event, last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
+                            stream_encoder.push(&event).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
                         {
                             yield Bytes::from(sse_frame(event_name, &value));
                         }
@@ -3778,7 +3730,7 @@ async fn stream_response(
                             error: error.as_typed(Some(provider.slug())),
                         };
                         for (event_name, value) in
-                            stream_encoder.encode(&typed, last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
+                            stream_encoder.push(&typed).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })?
                         {
                             yield Bytes::from(sse_frame(event_name, &value));
                         }
@@ -3788,16 +3740,12 @@ async fn stream_response(
             }
             if accounting.outcome != "error" {
                 accounting.set_outcome("success");
-                if let Some(reason) = pending_finish {
-                    for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Finish{reason},last_usage.as_ref()).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })? {
-                        yield Bytes::from(sse_frame(event_name,&value));
-                    }
-                }
-                if !native_stream && dialect == IngressDialect::OpenAi {
-                    if let Some(usage) = &last_usage {
-                        for (event_name,value) in stream_encoder.encode(&sandhi_core::ChatStreamEventV1::Usage{usage:usage.clone()},Some(usage)).map_err(|message| { accounting.set_outcome("error"); std::io::Error::other(message) })? {
-                            yield Bytes::from(sse_frame(event_name,&value));
-                        }
+                if !native_stream {
+                    for (event_name, value) in stream_encoder.finish().map_err(|message| {
+                        accounting.set_outcome("error");
+                        std::io::Error::other(message)
+                    })? {
+                        yield Bytes::from(sse_frame(event_name, &value));
                     }
                 }
             } else {

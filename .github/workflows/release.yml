@@ -419,7 +419,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           test -n "$CARGO_REGISTRY_TOKEN" || { echo "::error::Required crates.io publishing token missing"; exit 1; }
-          for crate in sandhi-core sandhi-providers sandhi-store sandhi-proxy; do
+          for crate in sandhi-core sandhi-providers sandhi-dialect sandhi-store sandhi-proxy; do
             status=$(curl --silent --show-error --max-time 20 -o crate-response.json -w '%{http_code}' -A sandhi-release "https://crates.io/api/v1/crates/$crate/$RELEASE_VERSION")
             case "$status" in
               200) echo "$crate version exists; final verification still required" ;;

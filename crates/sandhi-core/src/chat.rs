@@ -9,7 +9,7 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
 /// Version 1 is the clean pre-GA/GA baseline: one semantic thinking request and
 /// explicit model-scoped capability descriptors. Pre-GA deployments swap atomically.
-pub const CHAT_CONTRACT_MINOR: u32 = 1;
+pub const CHAT_CONTRACT_MINOR: u32 = 2;
 pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
@@ -196,6 +196,10 @@ pub struct ChatRequestV1 {
     pub native_input: Option<crate::NativeInputV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_intent: Option<crate::CacheIntentV1>,
+    /// Advisory prefix length for a transport's default tool-cache placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stable_tool_prefix_count: Option<usize>,
     /// Handle-compiled execution data; never accepted from request JSON.
     #[serde(skip)]
     pub compiled_cache: Option<crate::CompiledCachePlanV1>,
@@ -261,6 +265,7 @@ pub enum ThinkingEncodingV1 {
     GeminiGenerateContent,
     QwenOpenaiChat,
     ZaiOpenaiChat,
+    OllamaChat,
 }
 
 impl ThinkingEncodingV1 {
@@ -273,6 +278,20 @@ impl ThinkingEncodingV1 {
             Self::OpenaiResponses => EndpointFamilyV1::OpenaiResponses,
             Self::AnthropicMessages => EndpointFamilyV1::AnthropicMessages,
             Self::GeminiGenerateContent => EndpointFamilyV1::GeminiGenerateContent,
+            Self::OllamaChat => EndpointFamilyV1::OllamaChat,
+        }
+    }
+
+    #[must_use]
+    pub fn permits_effort_spelling(self, effort: &str) -> bool {
+        match self {
+            Self::AnthropicMessages => {
+                matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+            }
+            Self::GeminiGenerateContent => {
+                matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh")
+            }
+            _ => true,
         }
     }
 }
@@ -320,6 +339,10 @@ impl ThinkingCapabilityV1 {
         ThinkingEncodingV1::GeminiGenerateContent;
     const ENCODING_QWEN_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::QwenOpenaiChat;
     const ENCODING_ZAI_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::ZaiOpenaiChat;
+
+    fn supports_toggle(&self) -> bool {
+        self.encoding == Some(ThinkingEncodingV1::OllamaChat) && self.can_disable
+    }
 
     #[must_use]
     pub fn unsupported() -> Self {
@@ -389,7 +412,7 @@ impl ThinkingCapabilityV1 {
         if self.encoding.is_none() {
             return Err("supported thinking capability requires encoding".into());
         }
-        if self.effort.is_none() && self.budget_tokens.is_none() {
+        if self.effort.is_none() && self.budget_tokens.is_none() && !self.supports_toggle() {
             return Err("supported thinking capability requires a control".into());
         }
         if let Some(effort) = &self.effort {
@@ -429,9 +452,13 @@ impl ThinkingCapabilityV1 {
             .expect("validated supported capability carries an encoding");
         let supports_effort = matches!(
             encoding,
-            Self::ENCODING_OPENAI_CHAT | Self::ENCODING_OPENAI_RESPONSES | Self::ENCODING_QWEN_CHAT
+            Self::ENCODING_OPENAI_CHAT
+                | Self::ENCODING_OPENAI_RESPONSES
+                | Self::ENCODING_QWEN_CHAT
+                | Self::ENCODING_ANTHROPIC_MESSAGES
+                | Self::ENCODING_GEMINI_GENERATE_CONTENT
         );
-        let supports_budget_and_disable = matches!(
+        let supports_budget = matches!(
             encoding,
             Self::ENCODING_QWEN_CHAT
                 | Self::ENCODING_ZAI_CHAT
@@ -441,8 +468,24 @@ impl ThinkingCapabilityV1 {
         if self.effort.is_some() && !supports_effort {
             return Err("thinking encoding cannot express semantic effort".into());
         }
-        if (self.budget_tokens.is_some() || self.can_disable) && !supports_budget_and_disable {
-            return Err("thinking encoding cannot express token budgets or disable".into());
+        if self.effort.as_ref().is_some_and(|effort| {
+            effort
+                .values
+                .iter()
+                .any(|value| !encoding.permits_effort_spelling(value))
+        }) {
+            return Err("thinking encoding does not support an advertised effort spelling".into());
+        }
+        if self.budget_tokens.is_some() && !supports_budget {
+            return Err("thinking encoding cannot express token budgets".into());
+        }
+        if self.allow_effort_and_budget
+            && matches!(
+                encoding,
+                Self::ENCODING_ANTHROPIC_MESSAGES | Self::ENCODING_GEMINI_GENERATE_CONTENT
+            )
+        {
+            return Err("thinking encoding requires a choice between effort and budget".into());
         }
         Ok(())
     }
@@ -452,7 +495,13 @@ impl ThinkingCapabilityV1 {
         if !self.supported {
             return Err("model does not support configurable thinking".into());
         }
-        if request.enabled && request.effort.is_none() && request.budget_tokens.is_none() {
+        if request.enabled
+            && request.effort.is_none()
+            && request.budget_tokens.is_none()
+            && !(self.supports_toggle()
+                || self.encoding == Some(Self::ENCODING_ANTHROPIC_MESSAGES)
+                    && self.effort.is_some())
+        {
             return Err("explicit thinking enable requires an advertised control".into());
         }
         if !request.enabled {
@@ -524,6 +573,12 @@ impl ChatRequestV1 {
         }
         if self.model.trim().is_empty() {
             return Err("model must not be empty".into());
+        }
+        if self
+            .stable_tool_prefix_count
+            .is_some_and(|count| count == 0 || count > self.tools.len())
+        {
+            return Err("stable tool prefix must be within the supplied tools".into());
         }
         if let Some(native) = &self.native_input {
             self.native_input_for(native.endpoint_family)?;
@@ -1126,7 +1181,7 @@ mod tests {
     fn capability_encoding_must_be_able_to_express_every_advertised_control() {
         use ThinkingEncodingV1 as Encoding;
 
-        let mut effort = ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None);
+        let effort = ThinkingCapabilityV1::effort(Encoding::OpenaiChat, &["low"], None);
         let mut budget = ThinkingCapabilityV1::budget(Encoding::AnthropicMessages, 1024, 4096);
         let mut disable = ThinkingCapabilityV1::budget(Encoding::GeminiGenerateContent, 1024, 4096);
         disable.can_disable = true;
@@ -1159,16 +1214,24 @@ mod tests {
         assert!(disable.validate().is_ok());
         assert!(both.validate().is_ok());
 
-        for encoding in [
-            Encoding::AnthropicMessages,
-            Encoding::GeminiGenerateContent,
-            Encoding::ZaiOpenaiChat,
-        ] {
-            let capability = ThinkingCapabilityV1::effort(encoding, &["low"], None);
-            capability
-                .validate()
-                .expect_err("effort encoding is invalid");
+        for encoding in [Encoding::AnthropicMessages, Encoding::GeminiGenerateContent] {
+            let mut capability = ThinkingCapabilityV1::effort(encoding, &["low"], None);
+            assert!(capability
+                .admits(&ThinkingRequestV1::enabled().with_effort("low"))
+                .is_ok());
+            assert_eq!(
+                capability.admits(&ThinkingRequestV1::enabled()).is_ok(),
+                encoding == Encoding::AnthropicMessages
+            );
+            capability.budget_tokens = budget.budget_tokens;
+            capability.allow_effort_and_budget = true;
+            assert!(capability.validate().is_err());
         }
+        assert!(
+            ThinkingCapabilityV1::effort(Encoding::ZaiOpenaiChat, &["low"], None)
+                .validate()
+                .is_err()
+        );
         for encoding in [Encoding::OpenaiChat, Encoding::OpenaiResponses] {
             let capability = ThinkingCapabilityV1::budget(encoding, 1024, 4096);
             capability
@@ -1186,9 +1249,7 @@ mod tests {
                 .expect_err("disable encoding is invalid");
         }
         budget.encoding = Some(Encoding::OpenaiChat);
-        effort.encoding = Some(Encoding::AnthropicMessages);
         assert!(budget.validate().is_err());
-        assert!(effort.validate().is_err());
     }
 
     #[test]
@@ -1340,7 +1401,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (1, 0x9855e8c635de35fd_u64),
+            (2, 0xa8de95d97760120d_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

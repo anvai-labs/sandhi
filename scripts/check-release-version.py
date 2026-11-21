@@ -12,7 +12,7 @@ import re
 import sys
 import tomllib
 
-CRATES = {"sandhi-core", "sandhi-providers", "sandhi-store", "sandhi-proxy"}
+CRATES = {"sandhi-core", "sandhi-providers", "sandhi-dialect", "sandhi-store", "sandhi-proxy"}
 BINDINGS = {"bindings/python": "sandhi-gateway-py", "bindings/node": "sandhi-node"}
 
 
@@ -73,6 +73,8 @@ def check(root, expected=None, sync=False):
             if count != 1: raise ValueError("unsupported first-party lock entry")
             raw = updated
         required = CRATES if relative == "Cargo.lock" else {"sandhi-core", "sandhi-providers", BINDINGS[relative.rsplit("/", 1)[0]]}
+        if relative == "bindings/python/Cargo.lock":
+            required.add("sandhi-dialect")
         if not required <= seen: raise ValueError("missing first-party lock entry")
         if path.read_text() != raw: proposals[path] = raw
     if proposals and not sync:

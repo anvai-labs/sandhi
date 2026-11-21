@@ -33,7 +33,8 @@ impl TypedOpenAiResponses {
     }
 
     fn qualified_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
-        let body = if self.raw.peer_role() == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+        let role = self.raw.peer_role();
+        let mut body = if role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
             crate::cache_policy::encode_for_peer(
                 request,
                 sandhi_core::EndpointFamilyV1::OpenaiResponses,
@@ -43,6 +44,13 @@ impl TypedOpenAiResponses {
         } else {
             encode_responses_request_for_profile(request, self.profile)?
         };
+        if role == sandhi_core::PeerRoleV1::Provider
+            && crate::typed::openai_neutral_o_series(&self.slug, request)
+        {
+            body.as_object_mut()
+                .expect("Responses request is an object")
+                .remove("temperature");
+        }
         if body
             .get("background")
             .is_some_and(|v| v != &Value::Bool(false))
@@ -338,12 +346,17 @@ pub(crate) fn encode_responses_request_base(
                 "thinking control was not admitted for OpenAI responses".into(),
             ));
         }
-        if !thinking.enabled || thinking.budget_tokens.is_some() {
+        if thinking.budget_tokens.is_some() {
             return Err(ProviderError::InvalidRequest(
-                "OpenAI responses thinking supports enabled effort only".into(),
+                "OpenAI responses thinking does not support a token budget".into(),
             ));
         }
-        let Some(effort) = &thinking.effort else {
+        let effort = if thinking.enabled {
+            thinking.effort.as_deref()
+        } else {
+            Some("none")
+        };
+        let Some(effort) = effort else {
             return Err(ProviderError::InvalidRequest(
                 "OpenAI responses thinking requires an effort value".into(),
             ));
@@ -356,7 +369,7 @@ pub(crate) fn encode_responses_request_base(
                 "Responses reasoning must be a JSON object".into(),
             ));
         };
-        obj.insert("effort".into(), Value::String(effort.clone()));
+        obj.insert("effort".into(), Value::String(effort.into()));
     } else if request.compiled_thinking.is_some() {
         return Err(ProviderError::InvalidRequest(
             "compiled thinking has no semantic request".into(),

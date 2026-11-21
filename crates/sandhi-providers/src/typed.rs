@@ -549,6 +549,11 @@ impl ProviderHandle {
         self.family
     }
 
+    #[must_use]
+    pub fn peer_role(&self) -> sandhi_core::PeerRoleV1 {
+        self.peer_role
+    }
+
     pub fn supports_native_stream(&self) -> bool {
         self.inner.supports_native_stream()
     }
@@ -1634,7 +1639,17 @@ impl ChatProvider for TypedOpenAiCompat {
     }
 
     fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
-        encode_openai_request_for_peer(request, self.raw.peer_role())
+        let role = self.raw.peer_role();
+        let mut body = encode_openai_request_for_peer(request, role)?;
+        if role == sandhi_core::PeerRoleV1::Provider && openai_neutral_o_series(&self.slug, request)
+        {
+            let object = body.as_object_mut().expect("OpenAI request is an object");
+            object.remove("temperature");
+            if let Some(limit) = object.remove("max_tokens") {
+                object.insert("max_completion_tokens".into(), limit);
+            }
+        }
+        Ok(body)
     }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         self.execution_request(request).map(|_| ())
@@ -1705,6 +1720,34 @@ impl ChatProvider for TypedOpenAiCompat {
         self.stream_inner(request, call_headers, Some(attempt_context))
             .await
     }
+}
+
+/// Exact OpenAI model IDs with origin-owned sampling defaults. A decoded SDK
+/// request retains its native controls for the HTTP/SDK contract.
+pub(crate) fn openai_neutral_o_series(slug: &str, request: &ChatRequestV1) -> bool {
+    slug == "openai"
+        && request.native_input.is_none()
+        && !["openai", "openai_responses", "anthropic", "gemini"]
+            .iter()
+            .any(|key| request.extensions.contains_key(*key))
+        && matches!(
+            request.model.to_ascii_lowercase().as_str(),
+            "o1" | "o1-2024-12-17"
+                | "o1-mini"
+                | "o1-mini-2024-09-12"
+                | "o1-preview"
+                | "o1-preview-2024-09-12"
+                | "o1-pro"
+                | "o1-pro-2025-03-19"
+                | "o3"
+                | "o3-2025-04-16"
+                | "o3-mini"
+                | "o3-mini-2025-01-31"
+                | "o3-pro"
+                | "o3-pro-2025-06-10"
+                | "o4-mini"
+                | "o4-mini-2025-04-16"
+        )
 }
 
 impl TypedOpenAiCompat {
@@ -1881,7 +1924,19 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
         body.insert("tool_choice".into(), encode_tool_choice(choice));
     }
     insert_optional(&mut body, "temperature", request.temperature);
-    insert_optional(&mut body, "max_tokens", request.max_output_tokens);
+    // A native Chat SDK request may use the modern field (required by some
+    // OpenAI models). Keep its spelling while applying the admitted limit.
+    let output_limit_field = if body
+        .get("max_completion_tokens")
+        .is_some_and(|v| !v.is_null())
+    {
+        body.remove("max_tokens");
+        "max_completion_tokens"
+    } else {
+        body.remove("max_completion_tokens");
+        "max_tokens"
+    };
+    insert_optional(&mut body, output_limit_field, request.max_output_tokens);
     insert_optional(&mut body, "seed", request.seed);
     if let Some(stop) = &request.stop {
         body.insert("stop".into(), json!(stop));
@@ -1906,17 +1961,22 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
             .expect("admitted thinking carries an encoding")
         {
             ThinkingEncodingV1::OpenaiChat => {
-                let Some(effort) = &thinking.effort else {
+                let effort = if thinking.enabled {
+                    thinking.effort.as_deref()
+                } else {
+                    Some("none")
+                };
+                let Some(effort) = effort else {
                     return Err(ProviderError::InvalidRequest(
                         "OpenAI chat thinking supports effort only".into(),
                     ));
                 };
-                if !thinking.enabled || thinking.budget_tokens.is_some() {
+                if thinking.budget_tokens.is_some() {
                     return Err(ProviderError::InvalidRequest(
-                        "OpenAI chat thinking supports enabled effort only".into(),
+                        "OpenAI chat thinking does not support a token budget".into(),
                     ));
                 }
-                body.insert("reasoning_effort".into(), Value::String(effort.clone()));
+                body.insert("reasoning_effort".into(), Value::String(effort.into()));
             }
             ThinkingEncodingV1::QwenOpenaiChat => {
                 if !thinking.enabled {

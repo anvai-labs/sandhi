@@ -9,6 +9,8 @@ GenAI 3.2.0, selected from stable PyPI releases on 2026-11-12:
 
 ```sh
 python -m pip install -r tests/sdk-conformance/requirements.txt
+python -m maturin build --locked -m bindings/python/Cargo.toml --out target/sdk-conformance-wheel
+python -m pip install --force-reinstall --no-deps target/sdk-conformance-wheel/*.whl
 python -m playwright install chromium
 python -m pytest tests/sdk-conformance/ -q
 ```
@@ -25,6 +27,10 @@ python -m pytest tests/sdk-conformance/ -q --basetemp "$(mktemp -d /tmp/sandhi-s
 Pytest clears its base directory, so never point `--basetemp` at retained evidence
 or an existing service directory. These fixtures build source binaries; their
 results are not installed-release or live-provider acceptance.
+
+`test_sdk_ffi.py` sends stock SDK calls through both the proxy and a test transport
+backed by the local Python wheel. It compares decoded responses, stream order,
+usage, upstream requests, and admission refusals against a shared synthetic origin.
 
 Google GenAI 3.x defaults to Gemini `/v1` paths. Sandhi also retains `/v1beta` for
 older clients. Generation, streaming and countTokens use the same admission and

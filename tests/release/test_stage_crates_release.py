@@ -52,7 +52,7 @@ def reject_without_mutation(workspace, version="0.6.0"):
 def test_real_manifests_stage_exact_versions_and_preserve_other_bytes(workspace):
     before = snapshot(workspace)
     old = tomllib.loads(before[Path("Cargo.toml")].decode())["workspace"]["package"]["version"]
-    assert stager.stage(workspace, "0.6.0") == 4
+    assert stager.stage(workspace, "0.6.0") == 5
     after = snapshot(workspace)
     assert set(before) == set(after)
     for relative, original in before.items():
@@ -128,7 +128,7 @@ def test_git_dependency_comments_and_crlf_preserved(workspace):
         path = workspace / relative
         path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
     before = (workspace / "crates/sandhi-core/Cargo.toml").read_bytes()
-    assert stager.stage(workspace, "0.6.0") == 4
+    assert stager.stage(workspace, "0.6.0") == 5
     assert (workspace / "crates/sandhi-core/Cargo.toml").read_bytes() == before
     assert b'\r\nversion = "0.6.0"\r\n' in (workspace / "Cargo.toml").read_bytes()
 
@@ -175,7 +175,7 @@ def test_cli_offline(workspace):
     result = subprocess.run([sys.executable, str(ROOT / "scripts/stage-crates-release.py"),
                              "--workspace", str(workspace), "--version", "0.6.0"],
                             capture_output=True, text=True, timeout=15, check=True)
-    assert "changed 4 manifests; Cargo.lock unchanged" in result.stdout
+    assert "changed 5 manifests; Cargo.lock unchanged" in result.stdout
 
 
 def test_no_subprocess_or_network_used(workspace, monkeypatch):
@@ -184,7 +184,7 @@ def test_no_subprocess_or_network_used(workspace, monkeypatch):
         pytest.fail("staging attempted subprocess or network IO")
     monkeypatch.setattr(subprocess, "Popen", denied)
     monkeypatch.setattr(socket, "socket", denied)
-    assert stager.stage(workspace, "0.6.0") == 4
+    assert stager.stage(workspace, "0.6.0") == 5
 
 # Version consistency is the same packaging concern as staging, so keep its drift
 # regressions in this existing owner rather than cloning release workflow tests.

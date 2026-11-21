@@ -1,7 +1,7 @@
 //! Sandhi Python binding (PyO3), published as `sandhi-gateway`.
 //!
-//! `ProviderRuntime` exposes persistent typed chat-contract handles; provider-native request and
-//! response JSON never crosses the binding. The same module exposes metering and budget APIs.
+//! `ProviderRuntime` exposes persistent handles for typed chat contracts and SDK dialects.
+//! The same module exposes metering and budget APIs.
 
 // pyo3's #[pyfunction]/#[pymethods] macros emit `.into()` on the PyErr return path; on this
 // pyo3 + clippy combo that trips `useless_conversion` inside generated code (not our code).
@@ -25,6 +25,8 @@ use sandhi_providers::{
     resolve_openai_compat_provider, ProviderError, ProviderHandle, ProviderOptions,
     ProviderRuntime as RustProviderRuntime,
 };
+
+mod sdk;
 
 pyo3::create_exception!(
     sandhi_gateway,
@@ -171,6 +173,49 @@ impl TypedProvider {
     #[getter]
     fn provider(&self) -> &str {
         &self.provider
+    }
+
+    #[pyo3(signature = (dialect, request_json, *, model=None, metadata_json=None, wire_headers_json=None))]
+    fn complete_sdk_json<'py>(
+        &self,
+        py: Python<'py>,
+        dialect: &str,
+        request_json: &str,
+        model: Option<&str>,
+        metadata_json: Option<&str>,
+        wire_headers_json: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let call = sdk::Call::new(
+            self,
+            dialect,
+            request_json,
+            model,
+            metadata_json,
+            wire_headers_json,
+            false,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, call.complete())
+    }
+
+    #[pyo3(signature = (dialect, request_json, *, model=None, metadata_json=None, wire_headers_json=None))]
+    fn stream_sdk_json(
+        &self,
+        dialect: &str,
+        request_json: &str,
+        model: Option<&str>,
+        metadata_json: Option<&str>,
+        wire_headers_json: Option<String>,
+    ) -> PyResult<sdk::SdkEventStream> {
+        sdk::Call::new(
+            self,
+            dialect,
+            request_json,
+            model,
+            metadata_json,
+            wire_headers_json,
+            true,
+        )
+        .map(sdk::Call::stream)
     }
 
     /// `wire_headers_json` (optional, TD-0022 D1): per-call wire headers — a string map sent
@@ -862,6 +907,8 @@ fn sandhi_gateway(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(provider_models_json, m)?)?;
     m.add_function(wrap_pyfunction!(chat_contract_schema_json, m)?)?;
     m.add_class::<PyProviderRuntime>()?;
+    m.add_class::<sdk::SdkEventStream>()?;
+    m.add("SandhiSdkError", m.py().get_type::<sdk::SandhiSdkError>())?;
     m.add_class::<TypedProvider>()?;
     m.add_class::<TypedEventStreamIter>()?;
     m.add_class::<Gateway>()?;

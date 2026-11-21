@@ -5,9 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const ENCRYPTED_REASONING: u8 = 3;
-pub const THINKING_SIGNATURE: u8 = 6;
-pub const REDACTED_THINKING: u8 = 7;
+pub use sandhi_core::native_references::{
+    Reference, ENCRYPTED as ENCRYPTED_REASONING, MAX_BATCH, REDACTED as REDACTED_THINKING,
+    SIGNATURE as THINKING_SIGNATURE,
+};
+
 fn self_contained(kind: u8) -> bool {
     matches!(
         kind,
@@ -15,16 +17,10 @@ fn self_contained(kind: u8) -> bool {
     )
 }
 
-pub const MAX_BATCH: usize = 128;
 pub const MAX_ROWS: i64 = 100_000;
 pub const MAX_OWNER_ROWS: i64 = 4096;
 pub const MAX_TTL_SECS: i64 = 86_400;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Reference {
-    pub kind: u8,
-    pub digest: String,
-}
 #[derive(Debug)]
 pub struct Error;
 

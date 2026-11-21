@@ -4,6 +4,7 @@ use super::{object_tool_arguments, responses_status, responses_usage, unix_now};
 use sandhi_core::{ChatStreamEventV1 as Event, UsageV2, MAX_NATIVE_STREAM_FRAME_BYTES};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type Frames = Vec<(Option<&'static str>, Value)>;
 const LIMIT: &str = "Responses stream output exceeds its retained presentation budget";
@@ -43,7 +44,13 @@ pub(super) struct Encoder {
 }
 impl Encoder {
     pub(super) fn new() -> Self {
-        let namespace = crate::next_request_id();
+        static NEXT_STREAM: AtomicU64 = AtomicU64::new(0);
+        let ordinal = NEXT_STREAM.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let namespace = format!("req_{now}_{ordinal}");
         Self {
             response_id: format!("resp_{namespace}"),
             namespace,

@@ -121,7 +121,7 @@ def check_crates_token(document):
     assert "CARGO_REGISTRY_TOKEN" not in job["env"]
     assert all("CARGO_REGISTRY_TOKEN" not in step.get("env", {}) for step in steps if step != uploads[0])
     assert 'test -n "$CARGO_REGISTRY_TOKEN"' in uploads[0]["run"]
-    assert "for crate in sandhi-core sandhi-providers sandhi-store sandhi-proxy; do" in uploads[0]["run"]
+    assert "for crate in sandhi-core sandhi-providers sandhi-dialect sandhi-store sandhi-proxy; do" in uploads[0]["run"]
     assert "--verify-proof .release-proof/proof.json" in uploads[0]["run"]
 
 
