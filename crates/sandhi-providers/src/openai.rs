@@ -35,10 +35,19 @@ impl OpenAiCompat {
         base_url: impl Into<String>,
         api_key: impl Into<String>,
     ) -> Self {
+        Self::new_with_client(slug, base_url, api_key, crate::default_client())
+    }
+
+    pub(crate) fn new_with_client(
+        slug: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         let slug = slug.into();
         let spec = crate::resolve_openai_compat_provider(&slug);
         Self {
-            client: crate::default_client(),
+            client,
             peer_role: Default::default(),
             slug,
             base_url: base_url.into(),

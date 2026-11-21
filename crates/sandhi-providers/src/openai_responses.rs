@@ -36,8 +36,17 @@ impl OpenAiResponses {
         base_url: impl Into<String>,
         bearer_token: impl Into<String>,
     ) -> Self {
+        Self::new_with_client(slug, base_url, bearer_token, crate::default_client())
+    }
+
+    pub(crate) fn new_with_client(
+        slug: impl Into<String>,
+        base_url: impl Into<String>,
+        bearer_token: impl Into<String>,
+        client: reqwest::Client,
+    ) -> Self {
         Self {
-            client: crate::default_client(),
+            client,
             peer_role: Default::default(),
             slug: slug.into(),
             base_url: base_url.into(),

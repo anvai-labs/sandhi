@@ -120,6 +120,169 @@ pub(crate) fn client_with_connect_timeout(per_endpoint_secs: Option<f64>) -> req
         .expect("provider HTTP client with redirects disabled must be constructible")
 }
 
+/// A CA file snapshot loaded and parsed once by a provider runtime.
+///
+/// The parsed certificates are retained so later handle construction cannot race a file
+/// rotation and silently switch trust anchors after validation.
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedCaFile {
+    certificates: std::sync::Arc<Vec<reqwest::tls::Certificate>>,
+}
+
+fn is_exact_der_sequence(bytes: &[u8]) -> bool {
+    if bytes.first() != Some(&0x30) {
+        return false;
+    }
+    let Some(&encoded_length) = bytes.get(1) else {
+        return false;
+    };
+    let (length_bytes, declared_length) = if encoded_length < 0x80 {
+        (0, encoded_length as usize)
+    } else {
+        let length_bytes = (encoded_length & 0x7f) as usize;
+        if length_bytes == 0 || length_bytes > 8 || bytes.len() < 2 + length_bytes {
+            return false;
+        }
+        let mut declared_length: u64 = 0;
+        for byte in &bytes[2..2 + length_bytes] {
+            let Some(next) = declared_length
+                .checked_mul(256)
+                .and_then(|value| value.checked_add(u64::from(*byte)))
+            else {
+                return false;
+            };
+            declared_length = next;
+        }
+        let Ok(declared_length) = usize::try_from(declared_length) else {
+            return false;
+        };
+        (length_bytes, declared_length)
+    };
+    let header_len = 2 + length_bytes;
+    bytes
+        .len()
+        .checked_sub(header_len)
+        .is_some_and(|actual_length| actual_length == declared_length)
+}
+
+#[cfg(test)]
+mod validated_ca_file_tests {
+    use super::is_exact_der_sequence;
+
+    #[test]
+    fn exact_der_sequence_matches_declared_content_length() {
+        assert!(is_exact_der_sequence(&[0x30, 0x03, 0x01, 0x02, 0x03]));
+    }
+
+    #[test]
+    fn malformed_der_length_that_overflows_header_addition_fails_closed() {
+        let malformed = [
+            0x30, 0x88, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf7, 0xaa,
+        ];
+        assert!(!is_exact_der_sequence(&malformed));
+    }
+}
+
+fn contains_pem_certificate_block(bytes: &[u8]) -> bool {
+    const BLOCK_PREFIX: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    bytes
+        .windows(BLOCK_PREFIX.len())
+        .any(|window| window == BLOCK_PREFIX)
+}
+
+impl ValidatedCaFile {
+    fn load(path: &std::path::Path) -> Result<Self, String> {
+        use std::io::Read;
+
+        const MAX_CA_FILE_BYTES: u64 = 4 * 1024 * 1024;
+        // Open first and inspect the resulting descriptor. Rechecking the path after opening
+        // would admit a symlink/content swap between stat and read. Nonblocking mode prevents a
+        // FIFO from blocking constructor validation before its descriptor can be rejected.
+        #[cfg(unix)]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+                .map_err(|error| format!("ca_file is unavailable: {error}"))?
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("ca_file is unavailable: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("ca_file is unavailable: {error}"))?;
+        if !metadata.is_file() {
+            return Err("ca_file must reference a regular file".into());
+        }
+        if metadata.len() > MAX_CA_FILE_BYTES {
+            return Err("ca_file exceeds the 4 MiB bound".into());
+        }
+
+        let expected_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+        let mut bytes = Vec::with_capacity(expected_len.min(MAX_CA_FILE_BYTES as usize + 1));
+        file.take(MAX_CA_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("ca_file is unavailable: {error}"))?;
+        if bytes.is_empty() {
+            return Err("ca_file is empty".into());
+        }
+        if bytes.len() > MAX_CA_FILE_BYTES as usize {
+            return Err("ca_file exceeds the 4 MiB bound".into());
+        }
+
+        // DER is recognized structurally before text scanning: a certificate subject or
+        // extension can legally contain a PEM-looking ASCII string. Exact certificate
+        // blocks select PEM so preambules remain valid without misclassifying DER.
+        let certificates = if is_exact_der_sequence(&bytes) {
+            vec![reqwest::tls::Certificate::from_der(&bytes)
+                .map_err(|error| format!("ca_file is not a valid DER certificate: {error}"))?]
+        } else if contains_pem_certificate_block(&bytes) {
+            reqwest::tls::Certificate::from_pem_bundle(&bytes).map_err(|error| {
+                format!("ca_file is not a valid PEM certificate bundle: {error}")
+            })?
+        } else {
+            return Err("ca_file is not a PEM or DER certificate".into());
+        };
+        if certificates.is_empty() {
+            return Err("ca_file contains no certificates".into());
+        }
+        Ok(Self {
+            certificates: std::sync::Arc::new(certificates),
+        })
+    }
+}
+
+/// Build a client whose TLS roots are exactly the validated CA file snapshot. Ambient
+/// process roots are deliberately disabled so explicit trust is replacement trust.
+pub(crate) fn client_with_validated_ca_file(
+    per_endpoint_secs: Option<f64>,
+    ca_file: &ValidatedCaFile,
+) -> Result<reqwest::Client, String> {
+    let secs = per_endpoint_secs
+        .or_else(|| {
+            std::env::var("SANDHI_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+        })
+        .unwrap_or(10.0);
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs_f64(secs.clamp(0.001, 600.0)))
+        .user_agent(concat!("sandhi/", env!("CARGO_PKG_VERSION")))
+        // Explicit trust is a replacement, not an addition to the process trust
+        // store. This is what makes two handles with different bundles isolated.
+        .tls_built_in_root_certs(false);
+    for certificate in ca_file.certificates.iter().cloned() {
+        builder = builder.add_root_certificate(certificate);
+    }
+    builder.build().map_err(|error| {
+        format!("provider HTTP client with scoped CA could not be constructed: {error}")
+    })
+}
+
 /// AWS Bedrock — the usage parser is [`sandhi_core::usage::parse_bedrock_usage`]. Native
 /// transport needs AWS **SigV4** request signing (a dedicated follow-up); until then, front
 /// Bedrock with an OpenAI-compatible gateway and use [`OpenAiCompat`].
