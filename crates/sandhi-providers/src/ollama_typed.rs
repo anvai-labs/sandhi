@@ -5,7 +5,7 @@ use crate::{ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
 use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ContentPart, FinishReasonV1,
-    MessageContent, ToolCallV1,
+    MessageContent, ThinkingEncodingV1, ToolCallV1,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -166,11 +166,6 @@ impl ChatProvider for TypedOllama {
 }
 
 pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderError> {
-    if request.thinking.is_some() || request.compiled_thinking.is_some() {
-        return Err(ProviderError::InvalidRequest(
-            "Ollama does not support configurable thinking".into(),
-        ));
-    }
     request
         .native_input_for(sandhi_core::EndpointFamilyV1::OllamaChat)
         .map_err(ProviderError::InvalidRequest)?;
@@ -182,6 +177,28 @@ pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderE
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    match (&request.thinking, request.compiled_thinking) {
+        (None, None) if body.get("think").is_none_or(Value::is_null) => {}
+        (Some(thinking), Some(ThinkingEncodingV1::OllamaChat))
+            if thinking.effort.is_none() && thinking.budget_tokens.is_none() =>
+        {
+            let value = Value::Bool(thinking.enabled);
+            if body
+                .get("think")
+                .is_some_and(|native| !native.is_null() && native != &value)
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "native Ollama think conflicts with admitted thinking".into(),
+                ));
+            }
+            body.insert("think".into(), value);
+        }
+        _ => {
+            return Err(ProviderError::InvalidRequest(
+                "Ollama thinking was not admitted".into(),
+            ))
+        }
+    }
     body.insert("model".into(), Value::String(request.model.clone()));
     let mut messages = Vec::new();
     let mut outstanding = BTreeMap::new();

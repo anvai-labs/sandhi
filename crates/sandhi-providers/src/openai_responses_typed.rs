@@ -33,7 +33,8 @@ impl TypedOpenAiResponses {
     }
 
     fn qualified_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
-        let body = if self.raw.peer_role() == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
+        let role = self.raw.peer_role();
+        let mut body = if role == sandhi_core::PeerRoleV1::SandhiGatewayV1 {
             crate::cache_policy::encode_for_peer(
                 request,
                 sandhi_core::EndpointFamilyV1::OpenaiResponses,
@@ -43,6 +44,13 @@ impl TypedOpenAiResponses {
         } else {
             encode_responses_request_for_profile(request, self.profile)?
         };
+        if role == sandhi_core::PeerRoleV1::Provider
+            && crate::typed::openai_neutral_o_series(&self.slug, request)
+        {
+            body.as_object_mut()
+                .expect("Responses request is an object")
+                .remove("temperature");
+        }
         if body
             .get("background")
             .is_some_and(|v| v != &Value::Bool(false))

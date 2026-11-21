@@ -195,7 +195,7 @@ pub fn cache_digest(value: &impl Serialize) -> Result<String, String> {
 }
 impl ChatRequestV1 {
     pub fn cache_input_sha256(&self) -> Result<String, String> {
-        cache_digest(&(
+        let input = (
             &self.model,
             &self.messages,
             &self.tools,
@@ -204,6 +204,10 @@ impl ChatRequestV1 {
             &self.cache_intent,
             &self.native_input,
             &self.extensions,
-        ))
+        );
+        match self.stable_tool_prefix_count {
+            Some(count) => cache_digest(&(input, count)),
+            None => cache_digest(&input),
+        }
     }
 }

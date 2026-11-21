@@ -198,6 +198,7 @@ class ChatRequestV1(TypedDict):
     # Automatic modes require declared backend/model capabilities. No implicit downgrade.
     # Preserve/suppress cannot select a lifetime; suppression does not disable provider caching.
     cache_intent: NotRequired[CacheIntentV1]
+    stable_tool_prefix_count: NotRequired[int]
     extensions: NotRequired[dict[str, JsonValue]]
 class UsageV2(TypedDict):
     tokens_in: int
@@ -272,7 +273,7 @@ class ThinkingCapabilityV1(TypedDict):
     supported: bool
     encoding: NotRequired[Literal[
         "openai_chat", "openai_responses", "anthropic_messages",
-        "gemini_generate_content", "qwen_openai_chat", "zai_openai_chat"
+        "gemini_generate_content", "qwen_openai_chat", "zai_openai_chat", "ollama_chat"
     ]]
     can_disable: NotRequired[bool]
     effort: NotRequired[ThinkingEffortCapabilityV1]
@@ -426,6 +427,7 @@ export interface ChatRequestV1 {{
   /** Automatic modes require declared backend/model capabilities. No downgrade.
    * Preserve/suppress reject lifetimes; suppression does not disable provider caching. */
   cache_intent?: CacheIntentV1
+  stable_tool_prefix_count?: number
   extensions?: Record<string, JsonValue>
 }}
 export interface UsageV2 {{
@@ -474,7 +476,7 @@ export type ChatStreamEventV1 =
   | {{ event: "error"; error: ProviderErrorV1 }}
 export type ThinkingEncodingV1 =
   | "openai_chat" | "openai_responses" | "anthropic_messages"
-  | "gemini_generate_content" | "qwen_openai_chat" | "zai_openai_chat"
+  | "gemini_generate_content" | "qwen_openai_chat" | "zai_openai_chat" | "ollama_chat"
 export interface ThinkingEffortCapabilityV1 {{ values: string[]; default?: string }}
 export interface ThinkingBudgetCapabilityV1 {{ min: number; max: number }}
 export interface ProviderCapabilitiesV1 {{
