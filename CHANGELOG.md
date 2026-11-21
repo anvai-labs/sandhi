@@ -25,6 +25,10 @@ A partly published release remains incomplete even when some artifacts are avail
   model admission. Keep the neutral chat contract at v1.
 - Qualify adaptive thinking for Claude Sonnet 4.6 and thinking levels for
   Gemini 3 Flash Preview. HTTP and Python apply the same model-scoped admission.
+- Add exact thinking and capability profiles for Qwen3.7 Plus and GLM-5.3. Qwen exposes bounded
+  token budgets with an explicit disable operation and multimodal/structured capabilities, while
+  GLM exposes `low`, `high`, and `max` efforts with a `max` default; both report cache-accounting
+  usage. Admission and transport encoding use those exact facts.
 - Preserve portable consumer behavior with neutral OpenAI o-series sampling and
   output limits, exact Ollama thinking toggles, and an optional tool-cache prefix
   hint for direct Anthropic calls. These additions retain chat schema v1.

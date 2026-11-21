@@ -1990,12 +1990,10 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
                 }
             }
             ThinkingEncodingV1::ZaiOpenaiChat => {
-                if thinking.effort.is_some() {
-                    return Err(ProviderError::InvalidRequest(
-                        "ZAI thinking does not support semantic effort".into(),
-                    ));
-                }
                 body.insert("thinking".into(), encode_openai_thinking(thinking));
+                if let Some(effort) = &thinking.effort {
+                    body.insert("reasoning_effort".into(), Value::String(effort.clone()));
+                }
             }
             encoding => {
                 return Err(ProviderError::InvalidRequest(format!(
@@ -2881,6 +2879,20 @@ mod tests {
         .unwrap();
         assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn zai_encodes_admitted_reasoning_efforts() {
+        for effort in ["low", "high", "max"] {
+            let body = encode_openai_request(&admitted_thinking_request(
+                json!({"enabled": true, "effort": effort}),
+                ThinkingEncodingV1::ZaiOpenaiChat,
+            ))
+            .unwrap();
+            assert_eq!(body["thinking"], json!({"type": "enabled"}), "{effort}");
+            assert_eq!(body["reasoning_effort"], effort);
+            assert!(body["thinking"].get("budget_tokens").is_none());
+        }
     }
 
     #[test]
