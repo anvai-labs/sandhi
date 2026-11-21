@@ -306,7 +306,21 @@ pub trait ChatProvider: Send + Sync {
 /// Build the same-family raw byte-forwarder for a handle, from the **same** transport config used
 /// to build its typed provider (TD-0006). Auth and headers mirror the typed path exactly, so a
 /// transparent forward is credential- and header-identical to a translated one.
-fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwarder {
+fn transport_client(
+    ca_file: Option<&crate::ValidatedCaFile>,
+    config: &ProviderTransportConfig,
+) -> reqwest::Client {
+    let Some(ca_file) = ca_file else {
+        return crate::client_with_connect_timeout(config.connect_timeout_secs);
+    };
+    crate::client_with_validated_ca_file(config.connect_timeout_secs, ca_file)
+        .expect("provider transport CA was validated before construction")
+}
+
+fn build_raw_forwarder_with_client(
+    config: &ProviderTransportConfig,
+    client: reqwest::Client,
+) -> crate::raw::RawForwarder {
     let mut timeouts = TimeoutConfig::default();
     if let Some(secs) = config.timeout_secs {
         timeouts.complete = std::time::Duration::from_secs_f64(secs.max(0.001));
@@ -339,14 +353,12 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
             }
         }
     }
-    crate::raw::RawForwarder::new(
+    crate::raw::RawForwarder::new_with_client(
         config.family,
         config.base_url.clone(),
         config.api_key.clone(),
+        client,
     )
-    .with_client(crate::client_with_connect_timeout(
-        config.connect_timeout_secs,
-    ))
     .with_headers(static_headers)
     .with_anthropic_auth(config.anthropic_auth_scheme)
     .with_anthropic_usage_profile(config.anthropic_usage_profile)
@@ -357,6 +369,13 @@ fn build_raw_forwarder(config: &ProviderTransportConfig) -> crate::raw::RawForwa
     )
     .with_client_request_id_header(crate::client_request_id_header(&config.slug))
     .with_provider_request_id_header(response_request_id_header)
+}
+
+fn build_raw_forwarder(
+    ca_file: Option<&crate::ValidatedCaFile>,
+    config: &ProviderTransportConfig,
+) -> crate::raw::RawForwarder {
+    build_raw_forwarder_with_client(config, transport_client(ca_file, config))
 }
 
 /// Immutable non-secret metadata for one configured backend revision. Model
@@ -968,8 +987,10 @@ fn stamp_stream_latency(inner: ChatEventStream, started: std::time::Instant) -> 
 
 /// Factory for persistent typed provider handles. A handle owns one adapter and therefore one
 /// HTTP connection pool, circuit breaker, and retry policy across all of its calls.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ProviderRuntime;
+#[derive(Debug, Default, Clone)]
+pub struct ProviderRuntime {
+    pub(crate) ca_file: Option<crate::ValidatedCaFile>,
+}
 
 fn private_credential_identity(config: &ProviderTransportConfig) -> String {
     let headers: std::collections::BTreeMap<_, _> = config
@@ -1044,39 +1065,60 @@ pub use crate::anthropic_typed::encode_anthropic_request;
 
 impl ProviderRuntime {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Return a runtime whose constructed transports trust only `path`.
+    ///
+    /// Validation and client construction happen here, before credentials are accepted into a
+    /// handle. Existing handles are unaffected because this produces a new runtime.
+    pub fn with_ca_file(
+        mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, ProviderError> {
+        let path = path.into();
+        let ca_file = crate::ValidatedCaFile::load(&path)
+            .and_then(|ca_file| {
+                crate::client_with_validated_ca_file(None, &ca_file).map(|_| ca_file)
+            })
+            .map_err(ProviderError::InvalidRequest)?;
+        self.ca_file = Some(ca_file);
+        Ok(self)
     }
 
     pub(crate) fn gateway_peer(&self, config: ProviderTransportConfig) -> ProviderHandle {
         use sandhi_core::PeerRoleV1;
         let role = PeerRoleV1::SandhiGatewayV1;
+        let client = transport_client(self.ca_file.as_ref(), &config);
         let bare: Arc<dyn Provider> = match config.family {
             ProviderFamily::OpenAiCompat => Arc::new(
-                OpenAiCompat::new(
+                OpenAiCompat::new_with_client(
                     config.slug.clone(),
                     config.base_url.clone(),
                     config.api_key.clone(),
+                    client,
                 )
                 .with_headers(config.headers.clone())
                 .with_peer_role(role),
             ),
             ProviderFamily::Anthropic => Arc::new(
-                Anthropic::new(config.base_url.clone(), config.api_key.clone())
+                Anthropic::new_with_client(config.base_url.clone(), config.api_key.clone(), client)
                     .with_auth_scheme(AnthropicAuthScheme::Bearer)
                     .with_headers(config.headers.clone())
                     .with_peer_role(role),
             ),
             ProviderFamily::OpenAiResponses => Arc::new(
-                OpenAiResponses::new(
+                OpenAiResponses::new_with_client(
                     config.slug.clone(),
                     config.base_url.clone(),
                     config.api_key.clone(),
+                    client,
                 )
                 .with_headers(config.headers.clone())
                 .with_peer_role(role),
             ),
             ProviderFamily::Gemini => Arc::new(
-                Gemini::new(config.base_url.clone(), config.api_key.clone())
+                Gemini::new_with_client(config.base_url.clone(), config.api_key.clone(), client)
                     .with_auth_scheme(GeminiAuthScheme::Bearer)
                     .with_headers(config.headers.clone())
                     .with_peer_role(role),
@@ -1121,43 +1163,46 @@ impl ProviderRuntime {
         config: ProviderTransportConfig,
         profile: sandhi_core::usage::OpenAiStreamUsageProfile,
     ) -> Arc<dyn Provider> {
+        let client = transport_client(self.ca_file.as_ref(), &config);
         let bare: Arc<dyn Provider> = match config.family {
             ProviderFamily::OpenAiCompat => Arc::new(
-                OpenAiCompat::new(
+                OpenAiCompat::new_with_client(
                     config.slug.clone(),
                     config.base_url.clone(),
                     config.api_key.clone(),
+                    client,
                 )
                 .with_headers(config.headers.clone())
                 .with_stream_usage_profile(profile),
             ),
             ProviderFamily::OpenAiResponses => Arc::new(
-                OpenAiResponses::new(
+                OpenAiResponses::new_with_client(
                     config.slug.clone(),
                     config.base_url.clone(),
                     config.api_key.clone(),
+                    client,
                 )
                 .with_headers(config.headers.clone())
                 .with_profile(config.openai_responses_profile),
             ),
             ProviderFamily::Anthropic => Arc::new(
-                Anthropic::new(config.base_url.clone(), config.api_key.clone())
+                Anthropic::new_with_client(config.base_url.clone(), config.api_key.clone(), client)
                     .with_auth_scheme(config.anthropic_auth_scheme)
                     .with_usage_profile(config.anthropic_usage_profile)
                     .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Cohere => Arc::new(
-                Cohere::new(config.base_url.clone(), config.api_key.clone())
+                Cohere::new_with_client(config.base_url.clone(), config.api_key.clone(), client)
                     .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Gemini => Arc::new(
-                Gemini::new(config.base_url.clone(), config.api_key.clone())
+                Gemini::new_with_client(config.base_url.clone(), config.api_key.clone(), client)
                     .with_auth_scheme(config.gemini_auth_scheme)
                     .with_headers(config.headers.clone()),
             ),
             ProviderFamily::Ollama => {
-                let provider =
-                    Ollama::new(config.base_url.clone()).with_headers(config.headers.clone());
+                let provider = Ollama::new_with_client(config.base_url.clone(), client)
+                    .with_headers(config.headers.clone());
                 if config.api_key.is_empty() {
                     Arc::new(provider)
                 } else {
@@ -1245,8 +1290,10 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder =
-            Some(build_raw_forwarder(&config).with_openai_stream_usage_profile(profile));
+        let raw_forwarder = Some(
+            build_raw_forwarder(self.ca_file.as_ref(), &config)
+                .with_openai_stream_usage_profile(profile),
+        );
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -1297,7 +1344,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder = Some(build_raw_forwarder(self.ca_file.as_ref(), &config));
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -1430,7 +1477,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder = Some(build_raw_forwarder(self.ca_file.as_ref(), &config));
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -1476,7 +1523,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder = Some(build_raw_forwarder(self.ca_file.as_ref(), &config));
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -1521,7 +1568,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder = Some(build_raw_forwarder(self.ca_file.as_ref(), &config));
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -1564,7 +1611,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
-        let raw_forwarder = Some(build_raw_forwarder(&config));
+        let raw_forwarder = Some(build_raw_forwarder(self.ca_file.as_ref(), &config));
         let credential_identity = Some(private_credential_identity(&config));
         let diagnostic_upstream_host = configured_upstream_host(&config.base_url);
         let credential_account_fenced = account_fenced_config(&config);
@@ -3256,7 +3303,7 @@ mod tests {
         );
         config.user_agent = Some("claude-cli/1.0.0".into());
         config.max_retries = Some(0);
-        let forwarder = build_raw_forwarder(&config);
+        let forwarder = build_raw_forwarder(None, &config);
         forwarder
             .forward(
                 "/chat/completions",

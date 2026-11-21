@@ -117,7 +117,7 @@ impl PyProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None, endpoint_profile=None, peer_role=None))]
+    #[pyo3(signature = (provider, model, api_key, base_url=None, timeout_secs=None, stream_idle_timeout_secs=None, max_retries=None, headers_json=None, auth_scheme=None, protocol=None, stream_setup_timeout_secs=None, endpoint_profile=None, peer_role=None, ca_file=None))]
     fn provider(
         &self,
         provider: String,
@@ -135,9 +135,17 @@ impl PyProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         endpoint_profile: Option<String>,
         peer_role: Option<String>,
+        ca_file: Option<std::path::PathBuf>,
     ) -> PyResult<TypedProvider> {
-        let handle = self
-            .inner
+        let inner = if let Some(ca_file) = &ca_file {
+            self.inner
+                .clone()
+                .with_ca_file(ca_file.clone())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?
+        } else {
+            self.inner.clone()
+        };
+        let handle = inner
             .configured_provider(ProviderOptions {
                 provider: provider.clone(),
                 model,
