@@ -660,6 +660,26 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
             compat_entry("codestral-latest", "Codestral", 262_144, None, base.clone()),
         ],
         "zai" => vec![
+            {
+                let mut model = compat_entry(
+                    "glm-5.3",
+                    "GLM-5.3",
+                    1_000_000,
+                    Some(131_072),
+                    ProviderCapabilitiesV1 {
+                        structured_output: true,
+                        prompt_cache_usage: true,
+                        ..reasoning.clone()
+                    },
+                );
+                model.default_temperature = None;
+                model.thinking = ThinkingCapabilityV1::effort(
+                    ThinkingEncodingV1::ZaiOpenaiChat,
+                    &["low", "high", "max"],
+                    Some("max"),
+                );
+                model
+            },
             compat_entry(
                 "glm-4.6",
                 "GLM-4.6",
@@ -670,6 +690,27 @@ fn compat_models(slug: &str) -> Vec<ModelDescriptorV1> {
             compat_entry("glm-4.5-air", "GLM-4.5 Air", 131_072, None, reasoning),
         ],
         "qwen" => vec![
+            {
+                let mut model = compat_entry(
+                    "qwen3.7-plus",
+                    "Qwen3.7 Plus",
+                    983_616,
+                    Some(131_072),
+                    ProviderCapabilitiesV1 {
+                        vision: true,
+                        structured_output: true,
+                        reasoning: true,
+                        prompt_cache_usage: true,
+                        ..base.clone()
+                    },
+                );
+                model.default_temperature = None;
+                let mut thinking =
+                    ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1, 262_144);
+                thinking.can_disable = true;
+                model.thinking = thinking;
+                model
+            },
             compat_entry(
                 "qwen3-max",
                 "Qwen3 Max",
@@ -1071,6 +1112,75 @@ mod tests {
                 );
                 assert!(model.max_input_tokens.is_some());
             }
+
+            let qwen = provider_descriptor("qwen").unwrap();
+            let qwen = qwen
+                .models
+                .iter()
+                .find(|model| model.id == "qwen3.7-plus")
+                .unwrap();
+            assert_eq!(qwen.max_input_tokens, Some(983_616));
+            assert_eq!(qwen.max_output_tokens, Some(131_072));
+            assert_eq!(qwen.default_temperature, None);
+            assert!(qwen.capabilities.streaming);
+            assert!(qwen.capabilities.tools);
+            assert!(qwen.capabilities.parallel_tool_calls);
+            assert!(qwen.capabilities.vision);
+            assert!(!qwen.capabilities.audio_input);
+            assert!(!qwen.capabilities.file_input);
+            assert!(qwen.capabilities.structured_output);
+            assert!(qwen.capabilities.reasoning);
+            assert!(qwen.capabilities.prompt_cache_usage);
+            assert_eq!(
+                qwen.thinking.encoding,
+                Some(ThinkingEncodingV1::QwenOpenaiChat)
+            );
+            assert!(qwen.thinking.can_disable);
+            assert!(qwen.thinking.effort.is_none());
+            assert_eq!(
+                qwen.thinking.budget_tokens,
+                Some(sandhi_core::ThinkingBudgetCapabilityV1 {
+                    min: 1,
+                    max: 262_144
+                })
+            );
+            assert_eq!(qwen.thinking.sanitized().encoding, None);
+
+            let zai = provider_descriptor("zai").unwrap();
+            let zai = zai
+                .models
+                .iter()
+                .find(|model| model.id == "glm-5.3")
+                .unwrap();
+            assert_eq!(zai.max_input_tokens, Some(1_000_000));
+            assert_eq!(zai.max_output_tokens, Some(131_072));
+            assert_eq!(zai.default_temperature, None);
+            assert!(zai.capabilities.streaming);
+            assert!(zai.capabilities.tools);
+            assert!(zai.capabilities.parallel_tool_calls);
+            assert!(!zai.capabilities.vision);
+            assert!(!zai.capabilities.audio_input);
+            assert!(!zai.capabilities.file_input);
+            assert!(zai.capabilities.structured_output);
+            assert!(zai.capabilities.reasoning);
+            assert!(zai.capabilities.prompt_cache_usage);
+            assert_eq!(
+                zai.thinking.encoding,
+                Some(ThinkingEncodingV1::ZaiOpenaiChat)
+            );
+            assert!(!zai.thinking.can_disable);
+            assert_eq!(
+                zai.thinking
+                    .effort
+                    .as_ref()
+                    .map(|effort| (effort.values.clone(), effort.default.clone())),
+                Some((
+                    vec!["low".to_owned(), "high".to_owned(), "max".to_owned()],
+                    Some("max".to_owned())
+                ))
+            );
+            assert!(zai.thinking.budget_tokens.is_none());
+            assert_eq!(zai.thinking.sanitized().encoding, None);
         }
         // Alias resolution reaches the same lineup.
         let grok = provider_descriptor("grok").unwrap();

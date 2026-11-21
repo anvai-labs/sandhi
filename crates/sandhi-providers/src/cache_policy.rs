@@ -69,6 +69,9 @@ fn openai_native_thinking_matches(body: &Map<String, Value>, request: &ChatReque
     .collect();
     match controls.as_slice() {
         ["reasoning_effort"] | ["enable_thinking"] | ["thinking_budget"] | ["thinking"] => true,
+        ["reasoning_effort", "thinking"] => {
+            thinking.effort.is_some() && thinking.enabled && thinking.budget_tokens.is_none()
+        }
         ["reasoning_effort", "thinking_budget"] => true,
         ["enable_thinking", "thinking_budget"] => {
             body.get("enable_thinking").and_then(Value::as_bool) == Some(true)
@@ -142,7 +145,12 @@ fn openai_native_encoding_matches(
                 | ["reasoning_effort", "thinking_budget"]
                 | ["enable_thinking", "thinking_budget"]
         ),
-        ThinkingEncodingV1::ZaiOpenaiChat => matches!(controls.as_slice(), ["thinking"]),
+        ThinkingEncodingV1::ZaiOpenaiChat => {
+            matches!(
+                controls.as_slice(),
+                ["thinking"] | ["reasoning_effort", "thinking"]
+            )
+        }
         _ => false,
     }
 }
@@ -1342,6 +1350,76 @@ mod thinking_admission_tests {
         request.extensions.insert(
             "openai".into(),
             serde_json::json!({"thinking":{"type":"enabled","budget_tokens":16_384}}),
+        );
+        assert!(provider.prepare_cache_request(request).is_ok());
+    }
+
+    #[test]
+    fn exact_qwen_and_zai_thinking_contracts_are_enforced_before_upstream() {
+        let mut qwen = ThinkingCapabilityV1::budget(ThinkingEncodingV1::QwenOpenaiChat, 1, 262_144);
+        qwen.can_disable = true;
+        let qwen = bound_qwen(qwen);
+
+        let mut omitted = request(ThinkingRequestV1::disabled());
+        omitted.thinking = None;
+        assert!(qwen.prepare_cache_request(omitted.clone()).is_ok());
+        assert!(qwen
+            .encode_execution_request(&omitted)
+            .unwrap()
+            .get("enable_thinking")
+            .is_none());
+
+        let disabled = request(ThinkingRequestV1::disabled());
+        assert!(qwen.prepare_cache_request(disabled.clone()).is_ok());
+        assert_eq!(
+            qwen.encode_execution_request(&disabled).unwrap()["enable_thinking"],
+            false
+        );
+
+        assert!(qwen
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_budget(262_144)))
+            .is_ok());
+        assert!(qwen
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_budget(0)))
+            .is_err());
+        assert!(qwen
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_budget(262_145)))
+            .is_err());
+        assert!(qwen
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_effort("medium")))
+            .is_err());
+
+        let zai = ThinkingCapabilityV1::effort(
+            ThinkingEncodingV1::ZaiOpenaiChat,
+            &["low", "high", "max"],
+            Some("max"),
+        );
+        let zai = bound_qwen(zai);
+        for effort in ["low", "high", "max"] {
+            assert!(zai
+                .prepare_cache_request(request(ThinkingRequestV1::enabled().with_effort(effort)))
+                .is_ok());
+        }
+        assert!(zai
+            .prepare_cache_request(request(ThinkingRequestV1::disabled()))
+            .is_err());
+        assert!(zai
+            .prepare_cache_request(request(ThinkingRequestV1::enabled().with_budget(16_384)))
+            .is_err());
+    }
+
+    #[test]
+    fn admitted_zai_effort_with_native_shape_survives_backend_preflight() {
+        let capability = ThinkingCapabilityV1::effort(
+            ThinkingEncodingV1::ZaiOpenaiChat,
+            &["low", "high", "max"],
+            Some("max"),
+        );
+        let provider = bound_qwen(capability);
+        let mut request = request(ThinkingRequestV1::enabled().with_effort("low"));
+        request.extensions.insert(
+            "openai".into(),
+            serde_json::json!({"thinking":{"type":"enabled"},"reasoning_effort":"low"}),
         );
         assert!(provider.prepare_cache_request(request).is_ok());
     }
