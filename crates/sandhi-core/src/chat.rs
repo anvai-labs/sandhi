@@ -9,7 +9,7 @@ pub const CHAT_SCHEMA_VERSION_V1: &str = "1";
 
 /// Version 1 is the clean pre-GA/GA baseline: one semantic thinking request and
 /// explicit model-scoped capability descriptors. Pre-GA deployments swap atomically.
-pub const CHAT_CONTRACT_MINOR: u32 = 1;
+pub const CHAT_CONTRACT_MINOR: u32 = 2;
 pub const MAX_NATIVE_STREAM_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 fn schema_v1() -> String {
@@ -196,6 +196,10 @@ pub struct ChatRequestV1 {
     pub native_input: Option<crate::NativeInputV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_intent: Option<crate::CacheIntentV1>,
+    /// Advisory prefix length for a transport's default tool-cache placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub stable_tool_prefix_count: Option<usize>,
     /// Handle-compiled execution data; never accepted from request JSON.
     #[serde(skip)]
     pub compiled_cache: Option<crate::CompiledCachePlanV1>,
@@ -261,6 +265,7 @@ pub enum ThinkingEncodingV1 {
     GeminiGenerateContent,
     QwenOpenaiChat,
     ZaiOpenaiChat,
+    OllamaChat,
 }
 
 impl ThinkingEncodingV1 {
@@ -273,6 +278,7 @@ impl ThinkingEncodingV1 {
             Self::OpenaiResponses => EndpointFamilyV1::OpenaiResponses,
             Self::AnthropicMessages => EndpointFamilyV1::AnthropicMessages,
             Self::GeminiGenerateContent => EndpointFamilyV1::GeminiGenerateContent,
+            Self::OllamaChat => EndpointFamilyV1::OllamaChat,
         }
     }
 
@@ -333,6 +339,10 @@ impl ThinkingCapabilityV1 {
         ThinkingEncodingV1::GeminiGenerateContent;
     const ENCODING_QWEN_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::QwenOpenaiChat;
     const ENCODING_ZAI_CHAT: ThinkingEncodingV1 = ThinkingEncodingV1::ZaiOpenaiChat;
+
+    fn supports_toggle(&self) -> bool {
+        self.encoding == Some(ThinkingEncodingV1::OllamaChat) && self.can_disable
+    }
 
     #[must_use]
     pub fn unsupported() -> Self {
@@ -402,7 +412,7 @@ impl ThinkingCapabilityV1 {
         if self.encoding.is_none() {
             return Err("supported thinking capability requires encoding".into());
         }
-        if self.effort.is_none() && self.budget_tokens.is_none() {
+        if self.effort.is_none() && self.budget_tokens.is_none() && !self.supports_toggle() {
             return Err("supported thinking capability requires a control".into());
         }
         if let Some(effort) = &self.effort {
@@ -488,7 +498,9 @@ impl ThinkingCapabilityV1 {
         if request.enabled
             && request.effort.is_none()
             && request.budget_tokens.is_none()
-            && !(self.encoding == Some(Self::ENCODING_ANTHROPIC_MESSAGES) && self.effort.is_some())
+            && !(self.supports_toggle()
+                || self.encoding == Some(Self::ENCODING_ANTHROPIC_MESSAGES)
+                    && self.effort.is_some())
         {
             return Err("explicit thinking enable requires an advertised control".into());
         }
@@ -561,6 +573,12 @@ impl ChatRequestV1 {
         }
         if self.model.trim().is_empty() {
             return Err("model must not be empty".into());
+        }
+        if self
+            .stable_tool_prefix_count
+            .is_some_and(|count| count == 0 || count > self.tools.len())
+        {
+            return Err("stable tool prefix must be within the supplied tools".into());
         }
         if let Some(native) = &self.native_input {
             self.native_input_for(native.endpoint_family)?;
@@ -1383,7 +1401,7 @@ mod tests {
         let digest = fnv1a(concatenated.as_bytes());
         assert_eq!(
             (CHAT_CONTRACT_MINOR, digest),
-            (1, 0x9855e8c635de35fd_u64),
+            (2, 0xa8de95d97760120d_u64),
             "contract schemas changed: bump CHAT_CONTRACT_MINOR and update this digest \
              (new digest = {digest:#x})"
         );

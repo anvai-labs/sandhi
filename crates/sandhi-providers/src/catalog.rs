@@ -462,6 +462,35 @@ pub fn native_models(slug: &str) -> Vec<ModelDescriptorV1> {
     match slug {
         "anthropic" => anthropic_models(),
         "gemini" => gemini_models(),
+        "ollama" => [
+            ("qwen3:8b", false),
+            ("qwen3.5:2b", true),
+            ("qwen3.5:27b-q4_K_M", true),
+        ]
+        .into_iter()
+        .map(|(id, vision)| ModelDescriptorV1 {
+            id: id.into(),
+            aliases: Vec::new(),
+            max_input_tokens: None,
+            max_output_tokens: None,
+            default_temperature: None,
+            capabilities: ProviderCapabilitiesV1 {
+                streaming: true,
+                tools: true,
+                vision,
+                reasoning: true,
+                ..ProviderCapabilitiesV1::default()
+            },
+            thinking: ThinkingCapabilityV1 {
+                supported: true,
+                encoding: Some(ThinkingEncodingV1::OllamaChat),
+                can_disable: true,
+                ..ThinkingCapabilityV1::unsupported()
+            },
+            endpoint_url: None,
+            extensions: BTreeMap::new(),
+        })
+        .collect(),
         _ => Vec::new(),
     }
 }

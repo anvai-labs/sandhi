@@ -555,6 +555,26 @@ impl ProviderHandle {
             request.compiled_thinking = encoding;
             return Ok(request);
         }
+        if self.family() == ProviderFamily::Ollama {
+            if let Some(native) = request
+                .extensions
+                .get("ollama")
+                .and_then(|body| body.get("think"))
+                .filter(|value| !value.is_null())
+            {
+                let enabled = native
+                    .as_bool()
+                    .ok_or_else(|| invalid("Ollama native think must be a Boolean"))?;
+                if request.thinking.is_none() {
+                    use sandhi_core::chat::ThinkingRequestV1;
+                    request.thinking = Some(if enabled {
+                        ThinkingRequestV1::enabled()
+                    } else {
+                        ThinkingRequestV1::disabled()
+                    });
+                }
+            }
+        }
         request.compiled_thinking = self.compile_thinking_request(&request)?;
         request.compiled_cache = self.compile_cache_plan(&request)?;
         Ok(request)

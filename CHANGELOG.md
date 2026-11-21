@@ -25,6 +25,9 @@ A partly published release remains incomplete even when some artifacts are avail
   model admission. Keep the neutral chat contract at v1.
 - Qualify adaptive thinking for Claude Sonnet 4.6 and thinking levels for
   Gemini 3 Flash Preview. HTTP and Python apply the same model-scoped admission.
+- Preserve portable consumer behavior with neutral OpenAI o-series sampling and
+  output limits, exact Ollama thinking toggles, and an optional tool-cache prefix
+  hint for direct Anthropic calls. These additions retain chat schema v1.
 
 ## [0.22.1] — Source candidate, 2026-11-20
 

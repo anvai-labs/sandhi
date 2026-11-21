@@ -1639,7 +1639,17 @@ impl ChatProvider for TypedOpenAiCompat {
     }
 
     fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
-        encode_openai_request_for_peer(request, self.raw.peer_role())
+        let role = self.raw.peer_role();
+        let mut body = encode_openai_request_for_peer(request, role)?;
+        if role == sandhi_core::PeerRoleV1::Provider && openai_neutral_o_series(&self.slug, request)
+        {
+            let object = body.as_object_mut().expect("OpenAI request is an object");
+            object.remove("temperature");
+            if let Some(limit) = object.remove("max_tokens") {
+                object.insert("max_completion_tokens".into(), limit);
+            }
+        }
+        Ok(body)
     }
     fn preflight_request(&self, request: &ChatRequestV1) -> Result<(), ProviderError> {
         self.execution_request(request).map(|_| ())
@@ -1710,6 +1720,34 @@ impl ChatProvider for TypedOpenAiCompat {
         self.stream_inner(request, call_headers, Some(attempt_context))
             .await
     }
+}
+
+/// Exact OpenAI model IDs with origin-owned sampling defaults. A decoded SDK
+/// request retains its native controls for the HTTP/SDK contract.
+pub(crate) fn openai_neutral_o_series(slug: &str, request: &ChatRequestV1) -> bool {
+    slug == "openai"
+        && request.native_input.is_none()
+        && !["openai", "openai_responses", "anthropic", "gemini"]
+            .iter()
+            .any(|key| request.extensions.contains_key(*key))
+        && matches!(
+            request.model.to_ascii_lowercase().as_str(),
+            "o1" | "o1-2024-12-17"
+                | "o1-mini"
+                | "o1-mini-2024-09-12"
+                | "o1-preview"
+                | "o1-preview-2024-09-12"
+                | "o1-pro"
+                | "o1-pro-2025-03-19"
+                | "o3"
+                | "o3-2025-04-16"
+                | "o3-mini"
+                | "o3-mini-2025-01-31"
+                | "o3-pro"
+                | "o3-pro-2025-06-10"
+                | "o4-mini"
+                | "o4-mini-2025-04-16"
+        )
 }
 
 impl TypedOpenAiCompat {

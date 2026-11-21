@@ -77,6 +77,15 @@
       ],
       "format": "int64"
     },
+    "stable_tool_prefix_count": {
+      "description": "Advisory prefix length for a transport's default tool-cache placement.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 1.0
+    },
     "stop": {
       "type": [
         "array",

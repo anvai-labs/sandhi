@@ -291,7 +291,8 @@
         "anthropic_messages",
         "gemini_generate_content",
         "qwen_openai_chat",
-        "zai_openai_chat"
+        "zai_openai_chat",
+        "ollama_chat"
       ]
     }
   }

@@ -632,6 +632,7 @@ fn decode_gemini_request(
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
+        stable_tool_prefix_count: None,
         compiled_cache: None,
         compiled_thinking: None,
         // D4b: the populated map — unmodelled Gemini keys survive here rather than being dropped.
@@ -1038,6 +1039,7 @@ fn decode_openai_request(
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
+        stable_tool_prefix_count: None,
         compiled_cache: None,
         compiled_thinking: None,
         extensions: {
@@ -1294,6 +1296,7 @@ fn decode_anthropic_request(
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
+        stable_tool_prefix_count: None,
         compiled_cache: None,
         compiled_thinking: None,
         extensions: BTreeMap::from([("anthropic".into(), body.clone())]),
@@ -1606,6 +1609,7 @@ fn decode_responses_request(
         include_native_stream: false,
         native_input: None,
         cache_intent: None,
+        stable_tool_prefix_count: None,
         compiled_cache: None,
         compiled_thinking: None,
         extensions: BTreeMap::from([("openai_responses".into(), body.clone())]),

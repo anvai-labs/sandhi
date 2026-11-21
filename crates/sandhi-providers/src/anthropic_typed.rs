@@ -221,7 +221,8 @@ pub(crate) fn encode_anthropic_request_base(
     // such field — so a cross-family route to Anthropic would lose prompt
     // caching entirely at the decode boundary. When the request carries no
     // client-supplied native bucket, mark the cache boundary here: the last
-    // system block and the last tool, mirroring Anthropic's stable-prefix
+    // system block and the end of the caller's stable tool prefix (or the last
+    // tool by default), mirroring Anthropic's stable-prefix
     // guidance (tools → system cached as a prefix; the conversation tail stays
     // uncached). A client-supplied bucket — including the empty object —
     // suppresses this and keeps marker placement client-owned (empty = the
@@ -348,9 +349,8 @@ pub(crate) fn encode_anthropic_request_base(
             }
         }
         if auto_cache_control {
-            if let Some(tool) = tools.last_mut() {
-                tool["cache_control"] = json!({"type": "ephemeral"});
-            }
+            let last_stable = request.stable_tool_prefix_count.unwrap_or(tools.len()) - 1;
+            tools[last_stable]["cache_control"] = json!({"type": "ephemeral"});
         }
         body.insert("tools".into(), Value::Array(tools));
     }
