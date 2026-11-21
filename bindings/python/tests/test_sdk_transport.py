@@ -18,7 +18,7 @@ USAGE = {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
 
 @pytest.fixture
 def origin():
-    state = SimpleNamespace(requests=[], status=200, interrupt=False)
+    state = SimpleNamespace(requests=[], status=200, interrupt=False, response=None)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -32,6 +32,8 @@ def origin():
             streaming = body.get("stream", False)
             if state.status != 200:
                 payload = json.dumps({"error": {"message": "fixture unavailable"}})
+            elif state.response is not None:
+                payload = json.dumps(state.response)
             elif streaming:
                 chunks = [
                     {
@@ -107,6 +109,96 @@ def origin():
         finally:
             server.shutdown()
             worker.join()
+
+
+@pytest.mark.asyncio
+async def test_neutral_openai_o_series_uses_model_defaults_and_sdk_keeps_native_options(origin):
+    request = {**REQUEST, "model": "o3", "temperature": 0.7, "max_output_tokens": 64}
+    await origin.handle.complete_json(json.dumps(request))
+    events = [json.loads(event) async for event in origin.handle.stream_json(json.dumps(request))]
+    assert any(event["event"] == "finish" for event in events)
+    assert len(origin.requests) == 2
+    for body, _ in origin.requests:
+        assert "temperature" not in body
+        assert "max_tokens" not in body
+        assert body["max_completion_tokens"] == 64
+
+    await origin.handle.complete_sdk_json(
+        "openai_chat",
+        json.dumps({**REQUEST, "model": "o3", "temperature": 1.0, "max_completion_tokens": 64}),
+    )
+    assert origin.requests[-1][0]["temperature"] == 1.0
+    await origin.handle.complete_json(json.dumps({**request, "model": "o3-like-fixture"}))
+    assert origin.requests[-1][0]["temperature"] == 0.7
+    assert origin.requests[-1][0]["max_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_neutral_ollama_thinking_toggle_reaches_only_qualified_models(origin):
+    origin.response = {
+        "message": {"role": "assistant", "content": "pong"},
+        "done": True,
+        "done_reason": "stop",
+        "prompt_eval_count": 5,
+        "eval_count": 2,
+    }
+    runtime = sg.ProviderRuntime()
+    handle = runtime.provider("ollama", "qwen3:8b", "synthetic", base_url=origin.url)
+    for enabled in (False, True):
+        request = {**REQUEST, "model": "qwen3:8b", "thinking": {"enabled": enabled}}
+        reply = json.loads(await handle.complete_json(json.dumps(request)))
+        assert reply["output"]["content"] == "pong"
+        assert origin.requests[-1][0]["think"] is enabled
+    with pytest.raises(sg.SandhiProviderError, match="does not support configurable thinking"):
+        await handle.complete_json(json.dumps({**request, "model": "qwen3:unqualified"}))
+    with pytest.raises(sg.SandhiProviderError, match="does not support thinking effort"):
+        await handle.complete_json(json.dumps({**request, "thinking": {"enabled": True, "effort": "low"}}))
+    native = {**REQUEST, "model": "qwen3:8b", "extensions": {"ollama": {"think": False}}}
+    await handle.complete_json(json.dumps(native))
+    assert origin.requests[-1][0]["think"] is False
+    with pytest.raises(sg.SandhiProviderError, match="does not support configurable thinking"):
+        await handle.complete_json(json.dumps({**native, "model": "qwen3:unqualified"}))
+    with pytest.raises(sg.SandhiProviderError, match="conflicts with admitted thinking"):
+        await handle.complete_json(json.dumps({**native, "thinking": {"enabled": True}}))
+    assert len(origin.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_neutral_anthropic_stable_tool_prefix_survives_stub_changes(origin):
+    origin.response = {
+        "id": "fixture",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [{"type": "text", "text": "pong"}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 5,
+            "output_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
+    }
+    handle = sg.ProviderRuntime().provider(
+        "anthropic", "claude-sonnet-4-6", "synthetic", base_url=origin.url
+    )
+    for stub in ("stub_a", "stub_b"):
+        request = {
+            **REQUEST,
+            "model": "claude-sonnet-4-6",
+            "max_output_tokens": 64,
+            "stable_tool_prefix_count": 1,
+            "tools": [{"name": name, "parameters": {"type": "object"}} for name in ("stable", stub)],
+        }
+        await handle.complete_json(json.dumps(request))
+        cached, tail = origin.requests[-1][0]["tools"]
+        assert cached["name"] == "stable"
+        assert cached["cache_control"] == {"type": "ephemeral"}
+        assert tail["name"] == stub
+        assert "cache_control" not in tail
+    with pytest.raises(ValueError, match="stable tool prefix must be within"):
+        await handle.complete_json(json.dumps({**request, "stable_tool_prefix_count": 3}))
+    assert len(origin.requests) == 2
 
 
 @pytest.mark.asyncio
