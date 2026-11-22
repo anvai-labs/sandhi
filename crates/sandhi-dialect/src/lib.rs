@@ -102,8 +102,8 @@ fn lift_openai_thinking(object: &Map<String, Value>) -> Result<Option<ThinkingRe
         .map(lift_native_thinking)
         .transpose()?
         .flatten();
-    if effort.is_some() && native.is_some() {
-        return Err("reasoning_effort and thinking duplicate thinking controls".into());
+    if effort.is_some() && native.as_ref().is_some_and(|native| !native.enabled) {
+        return Err("reasoning_effort conflicts with disabled thinking".into());
     }
     if enable.is_some() && native.is_some() {
         return Err("enable_thinking and thinking duplicate thinking controls".into());
@@ -2563,6 +2563,38 @@ mod tests {
         let thinking = request.thinking.expect("effort lifted");
         assert!(thinking.enabled);
         assert_eq!(thinking.effort.as_deref(), Some("high"));
+
+        let request = decode_openai_request(
+            json!({
+                "model": "glm-5.3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "low"
+            }),
+            RequestMetadataV1::default(),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingRequestV1::enabled().with_effort("low"))
+        );
+        assert_eq!(
+            request.extensions["openai"]["thinking"],
+            json!({"type": "enabled"})
+        );
+        assert_eq!(request.extensions["openai"]["reasoning_effort"], "low");
+
+        let conflicting = decode_openai_request(
+            json!({
+                "model": "glm-5.3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "disabled"},
+                "reasoning_effort": "low"
+            }),
+            RequestMetadataV1::default(),
+        );
+        assert!(conflicting.is_err());
 
         let request = decode_openai_request(
             json!({

@@ -20,8 +20,12 @@ pub struct Ollama {
 
 impl Ollama {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::new_with_client(base_url, crate::default_client())
+    }
+
+    pub(crate) fn new_with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
         Self {
-            client: crate::default_client(),
+            client,
             base_url: base_url.into(),
             api_key: None,
             headers: http::HeaderMap::new(),

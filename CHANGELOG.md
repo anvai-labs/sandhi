@@ -17,7 +17,18 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
-## [Unreleased]
+## [0.24.0] — Source candidate, 2026-11-21
+
+- Add exact thinking and capability profiles for Qwen3.7 Plus and GLM-5.3. Qwen exposes bounded
+  token budgets with an explicit disable operation and multimodal/structured capabilities, while
+  GLM exposes `low`, `high`, and `max` efforts with a `max` default; both report cache-accounting
+  usage. Admission and transport encoding use those exact facts.
+- Add provider-scoped private CA trust for embedded provider FFI. The optional Python `ca_file`
+  loads one validated, bounded certificate snapshot, applies replacement-only roots, preserves
+  hostname/certificate verification and the TLS 1.2 minimum, and never mutates process-global
+  environment trust.
+
+## [0.23.0] — Published 2026-11-21
 
 - Add SDK-shaped buffered and streaming calls to Python provider handles. HTTP and Python share
   the OpenAI Chat, OpenAI Responses, Anthropic Messages, and Gemini GenerateContent codecs.

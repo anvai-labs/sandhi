@@ -455,6 +455,7 @@ impl ThinkingCapabilityV1 {
             Self::ENCODING_OPENAI_CHAT
                 | Self::ENCODING_OPENAI_RESPONSES
                 | Self::ENCODING_QWEN_CHAT
+                | Self::ENCODING_ZAI_CHAT
                 | Self::ENCODING_ANTHROPIC_MESSAGES
                 | Self::ENCODING_GEMINI_GENERATE_CONTENT
         );
@@ -1230,7 +1231,7 @@ mod tests {
         assert!(
             ThinkingCapabilityV1::effort(Encoding::ZaiOpenaiChat, &["low"], None)
                 .validate()
-                .is_err()
+                .is_ok()
         );
         for encoding in [Encoding::OpenaiChat, Encoding::OpenaiResponses] {
             let capability = ThinkingCapabilityV1::budget(encoding, 1024, 4096);
