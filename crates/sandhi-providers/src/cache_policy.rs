@@ -148,7 +148,7 @@ fn openai_native_encoding_matches(
         ThinkingEncodingV1::ZaiOpenaiChat => {
             matches!(
                 controls.as_slice(),
-                ["thinking"] | ["reasoning_effort", "thinking"]
+                ["reasoning_effort"] | ["thinking"] | ["reasoning_effort", "thinking"]
             )
         }
         _ => false,
