@@ -17,6 +17,17 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
+## [0.24.1] — Source candidate, 2026-11-23
+
+- Accept an OpenAI-compatible `reasoning_effort` alone as thinking provenance for ZAI OpenAI-compatible
+  backends and route `low`, `high`, and `max` per request over the same logical route, virtual key,
+  profile, model, backend, and ledger.
+- Force typed translation whenever a semantic thinking control is present. This prevents same-family
+  transparent forwarding from bypassing vendor-specific thinking encoding; native Gemini HTTP and
+  typed FFI both emit canonical REST `thinkingLevel` after admission.
+- Remediate the `url` security advisory consistently in the root, Python-binding, and Node-binding
+  lockfiles (`url` 2.5.9 with `form_urlencoded` 1.2.3).
+
 ## [0.24.0] — Source candidate, 2026-11-21
 
 - Add exact thinking and capability profiles for Qwen3.7 Plus and GLM-5.3. Qwen exposes bounded
