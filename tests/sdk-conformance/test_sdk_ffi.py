@@ -533,11 +533,10 @@ async def test_sdk_native_thinking_uses_exact_model_admission(
             assert sent["thinking"] == {"type": "adaptive"}
             assert sent["output_config"]["effort"] == "medium"
         else:
-            # The native HTTP plane preserves SDK bytes. Typed FFI emits the
-            # REST spelling from the same admitted semantic control.
-            level_field = "thinkingLevel" if use_ffi else "thinking_level"
+            # A lifted semantic thinking control takes typed translation on both
+            # paths, so HTTP and FFI emit the same REST spelling.
             assert sent["generationConfig"]["thinkingConfig"] == {
-                level_field: "MINIMAL"
+                "thinkingLevel": "MINIMAL"
             }
         before = len(upstream.requests)
         with pytest.raises(error_type):
