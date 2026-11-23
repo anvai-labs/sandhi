@@ -457,7 +457,12 @@ pub(super) async fn prepare(
     //
     // Decided here, before enforcement, so the plane is a metric dimension for every outcome —
     // including the calls that get refused below and never reach a provider.
+    // A lifted thinking control is semantic, not a byte-exact native payload. The
+    // selected backend may use a different vendor spelling for that same family
+    // (for example OpenAI SDK `reasoning_effort` to Z.ai's paired thinking
+    // controls), so admission must go through the typed translator.
     let transparent_eligible = !defaulted_output
+        && request.thinking.is_none()
         && ingress_family(dialect) == provider.family()
         && provider.raw_forwarder().is_some();
     // Final prepared plane also labels a throttled call that never reaches a provider.

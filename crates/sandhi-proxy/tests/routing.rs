@@ -111,6 +111,96 @@ async fn tracked_logical_dispatch_persists_selection_and_cache_policy_with_its_i
 }
 
 #[tokio::test]
+async fn logical_route_switches_sdk_reasoning_effort_on_the_same_zai_profile() {
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(reply(Family::OpenaiChatCompletions, false))
+        .expect(3)
+        .mount(&origin)
+        .await;
+    let handle = build_provider_handle_for_endpoint(
+        &ProviderRuntime::new(),
+        "zai",
+        Some(&origin.uri()),
+        "origin-secret",
+        CredentialScheme::Bearer,
+        None,
+        BackendEndpoint {
+            endpoint_family: Family::OpenaiChatCompletions,
+            endpoint_profile: sandhi_store::backends::BackendProfile::ZaiFinalChoiceUsage,
+        },
+    )
+    .unwrap();
+    let handle = handle.with_backend_binding(BackendBinding {
+        id: "glm".into(),
+        revision: 2,
+        provider: "zai".into(),
+        credential_ref: "zai:default".into(),
+        credential_generation: 2,
+        endpoint_family: Family::OpenaiChatCompletions,
+        endpoint_profile: "zai_final_choice_usage".into(),
+        models: vec![serde_json::from_value(json!({
+            "id": "physical",
+            "thinking": {
+                "supported": true,
+                "encoding": "zai_openai_chat",
+                "effort": {"values": ["low", "high", "max"], "default": "max"}
+            }
+        }))
+        .unwrap()],
+        cache_policy: None,
+    });
+    let (mut state, _) = state(vec![("glm", handle)], definition(&["glm"]));
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger =
+        ProxyLedger::durable(dir.path().join("ledger.db").to_str().unwrap(), 1).unwrap();
+    ledger
+        .set_budget("vk:vk_one", Some(100_000), Window::Total, Policy::Block)
+        .unwrap();
+    Arc::get_mut(&mut state).unwrap().ledger = std::sync::Mutex::new(ledger);
+    sandhi_proxy::settlement::buffered::enable(
+        &state,
+        sandhi_proxy::settlement::buffered::Config::new(
+            4,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    for effort in ["low", "high", "max"] {
+        let response = build_app(state.clone())
+            .oneshot(
+                Request::post("/v1/chat/completions")
+                    .header("authorization", "Bearer vk_one")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "agent",
+                            "max_tokens": 64,
+                            "reasoning_effort": effort,
+                            "messages": [{"role": "user", "content": "hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{effort}");
+    }
+
+    let requests = origin.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    for (sent, effort) in requests.iter().zip(["low", "high", "max"]) {
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert_eq!(body["reasoning_effort"], effort);
+    }
+}
+
+#[tokio::test]
 async fn discovery_reports_sanitized_exact_model_stream_limits() {
     let origin = MockServer::start().await;
     let (mut state, _) = state(
