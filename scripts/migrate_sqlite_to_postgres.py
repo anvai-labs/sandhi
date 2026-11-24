@@ -70,8 +70,28 @@ def table_columns(sqlite_conn: sqlite3.Connection, table: str) -> list[str]:
     return [row[1] for row in rows]
 
 
+def pg_columns(pg, table: str) -> set[str]:
+    with pg.cursor() as pgcur:
+        pgcur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+        return {row[0] for row in pgcur.fetchall()}
+
+
 def copy_table(sqlite_conn: sqlite3.Connection, pg, table: str, batch: int) -> int:
     columns = table_columns(sqlite_conn, table)
+    # Only copy columns that exist on both sides: the PostgreSQL DDL owns the
+    # schema, and emit never writes the legacy ALTER-only columns.
+    pg_cols = pg_columns(pg, table)
+    if not pg_cols:
+        print(f"{table}: skipped (no PostgreSQL table)")
+        return 0
+    dropped = [c for c in columns if c not in pg_cols]
+    for column in dropped:
+        print(f"{table}: column {column!r} absent in PostgreSQL — not copied")
+    columns = [c for c in columns if c in pg_cols]
     collist = ", ".join(quote_ident(c) for c in columns)
     placeholders = ", ".join(["%s"] * len(columns))
     total = 0
@@ -88,21 +108,37 @@ def copy_table(sqlite_conn: sqlite3.Connection, pg, table: str, batch: int) -> i
                     f"VALUES ({placeholders}) ON CONFLICT DO NOTHING",
                     chunk,
                 )
-            total += len(rows[0]) and len(rows)
+            total += len(rows)
     return total
 
 
 def reset_sequences(pg) -> None:
     with pg.cursor() as pgcur:
         for table in SEQUENCE_TABLES:
+            # Only tables that exist in PostgreSQL AND carry an id sequence;
+            # anything else is skipped so partial migrations stay complete.
+            # pg_get_serial_sequence RAISES on an absent relation, so the
+            # existence probe must be its own statement.
+            pgcur.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
+            (exists,) = pgcur.fetchone()
+            if not exists:
+                print(f"{table}: sequence reset skipped (table absent)")
+                continue
+            pgcur.execute("SELECT pg_get_serial_sequence(%s, 'id')", (table,))
+            (sequence,) = pgcur.fetchone()
+            if sequence is None:
+                print(f"{table}: sequence reset skipped (no serial id)")
+                continue
             pgcur.execute(
                 "SELECT COALESCE(MAX(id), 0) FROM " + quote_ident(table)
             )
             (max_id,) = pgcur.fetchone()
-            pgcur.execute(
-                "SELECT setval(pg_get_serial_sequence(%s, 'id'), %s, %s)",
-                (table, max_id, max_id > 0),
-            )
+            if max_id == 0:
+                # Empty table: the sequence is already fresh; setval(seq, 0)
+                # would be out of bounds.
+                print(f"{table}: sequence untouched (no rows)")
+                continue
+            pgcur.execute("SELECT setval(%s, %s, %s)", (sequence, max_id, max_id > 0))
 
 
 def main() -> int:
@@ -137,9 +173,14 @@ def main() -> int:
                         continue
                     if args.truncate:
                         with pg.cursor() as pgcur:
-                            pgcur.execute(
-                                f"TRUNCATE {quote_ident(table)} CASCADE"
-                            )
+                            pgcur.execute("SELECT to_regclass(%s) IS NOT NULL", (table,))
+                            (exists,) = pgcur.fetchone()
+                            if exists:
+                                pgcur.execute(
+                                    f"TRUNCATE {quote_ident(table)} CASCADE"
+                                )
+                            else:
+                                print(f"{table}: truncate skipped (table absent)")
                     copied = copy_table(conn, pg, table, args.batch)
                     print(f"{path}: {table}: {copied} rows")
                     grand_total += copied
