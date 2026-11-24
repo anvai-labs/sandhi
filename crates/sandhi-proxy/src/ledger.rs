@@ -274,6 +274,30 @@ impl ProxyLedger {
         }
         reclaimed
     }
+
+    /// ADR-0048: release aged unresolved durable liabilities (evidence retained,
+    /// hold freed, nothing fabricated). In-memory ledgers have no durable
+    /// execution intents, so they release nothing. A non-zero count is logged —
+    /// like reclaims, releases are exceptional and operator-visible.
+    pub fn release_aged_unresolved_liabilities(
+        &mut self,
+        now: OffsetDateTime,
+        cutoff: OffsetDateTime,
+    ) -> usize {
+        let released = match self {
+            Self::Memory(_) => 0,
+            Self::Durable(l) => l
+                .release_aged_unresolved_liabilities_durable(now, cutoff)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "aged liability release sweep failed");
+                    0
+                }),
+        };
+        if released > 0 {
+            tracing::warn!(released, "released aged unresolved liabilities");
+        }
+        released
+    }
 }
 
 /// Reclaim every lease expired at or before `now`, returning the count — the ADR-0005 D2 crash
@@ -285,6 +309,22 @@ pub fn reclaim_sweep_at(ledger: &Mutex<ProxyLedger>, now: OffsetDateTime) -> usi
     ledger
         .lock()
         .map(|mut l| l.reclaim_expired(now))
+        .unwrap_or(0)
+}
+
+/// ADR-0048 maintenance sweep: release the held budget liability of every durable
+/// execution intent admitted at or before `cutoff` that still lacks final source
+/// evidence. Evidence is retained in place; `spent` is never touched; only the
+/// uncharged hold is freed so readiness can converge. Driven by the same 60 s
+/// sweep task as [`reclaim_sweep_at`].
+pub fn liability_release_sweep_at(
+    ledger: &Mutex<ProxyLedger>,
+    now: OffsetDateTime,
+    cutoff: OffsetDateTime,
+) -> usize {
+    ledger
+        .lock()
+        .map(|mut l| l.release_aged_unresolved_liabilities(now, cutoff))
         .unwrap_or(0)
 }
 

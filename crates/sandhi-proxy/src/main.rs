@@ -18,8 +18,9 @@ use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
 use sandhi_proxy::{
-    dual_scheme_plaintext_warning, plaintext_bind_warning, reclaim_sweep_at, rehydrate_alerts,
-    rehydrate_budgets, serve_with_http_and_tls_shutdown_timeout, serve_with_shutdown_timeout,
+    dual_scheme_plaintext_warning, liability_release_sweep_at, plaintext_bind_warning,
+    reclaim_sweep_at, rehydrate_alerts, rehydrate_budgets,
+    serve_with_http_and_tls_shutdown_timeout, serve_with_shutdown_timeout,
     serve_with_tls_shutdown_timeout, BufferedAlertStore, ProxyLedger, ProxyState, TlsConfig,
     DEFAULT_HEADER_READ_TIMEOUT_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS_PER_IP,
     DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
@@ -742,6 +743,14 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // opportunistically per scope; this covers scopes that go quiet). Best-effort by design.
     let reclaim_task = {
         let sweep_state = Arc::clone(&state);
+        // ADR-0048: retention window for aged unresolved durable liabilities.
+        // Admission age past this cutoff releases the held budget capacity
+        // (evidence retained, nothing fabricated). Zero disables the sweep.
+        let liability_retention_secs: i64 = std::env::var("SANDHI_LIABILITY_RELEASE_AFTER_SECS")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .filter(|secs| *secs >= 0)
+            .unwrap_or(86_400);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await; // discard the immediate first tick
@@ -749,7 +758,12 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
                 tick.tick().await;
                 let sweep = Arc::clone(&sweep_state);
                 let _ = tokio::task::spawn_blocking(move || {
-                    reclaim_sweep_at(&sweep.ledger, time::OffsetDateTime::now_utc())
+                    let now = time::OffsetDateTime::now_utc();
+                    if liability_retention_secs > 0 {
+                        let cutoff = now - time::Duration::seconds(liability_retention_secs);
+                        liability_release_sweep_at(&sweep.ledger, now, cutoff);
+                    }
+                    reclaim_sweep_at(&sweep.ledger, now)
                 })
                 .await;
             }

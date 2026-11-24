@@ -55,6 +55,11 @@ pub enum RecoveryState {
     UnresolvedObservation(UnresolvedObservationReason),
     ReadyToSettle,
     Settled(SettlementReceipt),
+    /// Terminal by policy (ADR-0048): the retention window elapsed without final
+    /// source evidence, so the held budget liability was released uncharged and
+    /// the row stops counting against readiness. The stored evidence is intact;
+    /// no zero-usage receipt exists and none may be inferred from this state.
+    ReleasedAfterRetention,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +231,20 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
              ON budget_settlement_outbox(settled_at, receipt_id)
              WHERE acknowledged_at IS NULL;",
     )?;
+    // ADR-0048: policy release timestamp for aged unresolved liabilities. NULL
+    // means the liability is still held; a timestamp means the retention window
+    // elapsed uncharged (evidence columns untouched, no receipt written).
+    let released: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('budget_execution_intent') WHERE name='liability_released_at')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !released {
+        conn.execute(
+            "ALTER TABLE budget_execution_intent ADD COLUMN liability_released_at INTEGER",
+            [],
+        )?;
+    }
     context::init(conn)?;
     paired::init(conn)?;
     attempts::init(conn)
@@ -698,7 +717,7 @@ impl SqliteLedger {
         let mut rows = {
             let mut statement = tx.prepare(
                 "SELECT CASE WHEN length(CAST(i.execution_id AS BLOB)) = 64 THEN i.execution_id END,
-                 i.reservation_id FROM budget_execution_intent i
+                 i.reservation_id, i.liability_released_at FROM budget_execution_intent i
                  JOIN budget_reservation r ON r.id = i.reservation_id
                  WHERE r.scope = ?1 AND i.reservation_id > ?2 AND i.reservation_id <= ?3
                  ORDER BY i.reservation_id LIMIT ?4",
@@ -710,16 +729,34 @@ impl SqliteLedger {
                     through_id as i64,
                     (limit + 1) as i64
                 ],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as u64)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, i64>(1)? as u64,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
             )?;
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         let has_more = rows.len() > limit;
         rows.truncate(limit);
         let mut entries = Vec::with_capacity(rows.len());
-        for (execution_id, reservation_id) in rows {
+        for (execution_id, reservation_id, released_at) in rows {
             let execution_id = execution_id.ok_or(EvidenceError::CorruptObservation)?;
             validate_execution_id(&execution_id).map_err(|_| EvidenceError::CorruptObservation)?;
+            // ADR-0048: policy-released rows classify terminal BEFORE the receipt
+            // machinery — their reservation is settled with no receipt, which
+            // `checked_terminal_receipt` would otherwise reject. The stamping job
+            // never releases a row that had (or later gained) final evidence.
+            if released_at.is_some() {
+                entries.push(RecoveryEntry {
+                    execution_id,
+                    reservation_id,
+                    state: RecoveryState::ReleasedAfterRetention,
+                });
+                continue;
+            }
             let fence = dispatch::checked_fence(&tx, scope, &execution_id, reservation_id)?;
             let immediate_state = match &fence {
                 Some(dispatch::Fence::Prepared) => Some(RecoveryState::Prepared),
@@ -777,6 +814,112 @@ impl SqliteLedger {
         };
         tx.commit()?;
         Ok(RecoveryPage { entries, next })
+    }
+
+    /// ADR-0048: release the held budget liability of every execution intent whose
+    /// admission age exceeds `cutoff` and that has NO final source evidence
+    /// (Prepared / MayHaveDispatched / MissingObservation / UnresolvedObservation).
+    /// Released rows keep their full evidence, gain `liability_released_at`, and
+    /// their reservation closes as an explicit zero-charge policy release —
+    /// `spent` is never touched and no settlement receipt is written, so nothing
+    /// is fabricated. Rows that settled or carry a settleable charge are skipped
+    /// untouched (recovery settles those normally). Re-verification happens
+    /// inside the same transaction as the stamp, so a race with live settlement
+    /// resolves to the receipt, never to a release. Returns the released count.
+    pub fn release_aged_unresolved_liabilities_durable(
+        &mut self,
+        now: OffsetDateTime,
+        cutoff: OffsetDateTime,
+    ) -> Result<usize, EvidenceError> {
+        let released_at = now.unix_timestamp();
+        let cutoff_ts = cutoff.unix_timestamp();
+        let mut released = 0usize;
+        let mut after_id = 0i64;
+        loop {
+            let tx = self.conn.transaction()?;
+            let candidates: Vec<(String, i64, String)> = {
+                let mut statement = tx.prepare(
+                    "SELECT i.execution_id, i.reservation_id, r.scope
+                     FROM budget_execution_intent i
+                     JOIN budget_reservation r ON r.id = i.reservation_id
+                     WHERE i.liability_released_at IS NULL AND i.created_at <= ?1
+                       AND i.reservation_id > ?2
+                     ORDER BY i.reservation_id LIMIT 200",
+                )?;
+                let mapped = statement.query_map(params![cutoff_ts, after_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?;
+                mapped.collect::<Result<Vec<_>, _>>()?
+            };
+            if candidates.is_empty() {
+                tx.commit()?;
+                return Ok(released);
+            }
+            let candidate_count = candidates.len();
+            for (execution_id, reservation_id, scope) in candidates {
+                after_id = after_id.max(reservation_id);
+                validate_execution_id(&execution_id)
+                    .map_err(|_| EvidenceError::CorruptObservation)?;
+                validate_scope(&scope)?;
+                let reservation_id = reservation_id as u64;
+                // Same classification as `recovery_page_durable`, evaluated inside
+                // this transaction: the stamp and the release commit together or
+                // not at all, and anything terminal or settleable is skipped.
+                let fence = dispatch::checked_fence(&tx, &scope, &execution_id, reservation_id)?;
+                // Closed-before-dispatch is already terminal; a Prepared intent is
+                // stampable — at retention age nothing is mid-flight anymore.
+                if matches!(&fence, Some(dispatch::Fence::Closed(_))) {
+                    continue;
+                }
+                let observed = read_observation(&tx, &execution_id, reservation_id, &scope)?;
+                let unresolved_reason = observed
+                    .as_ref()
+                    .map(|o| terminal_unresolved_reason(&tx, o))
+                    .transpose()?
+                    .flatten();
+                let charge = if unresolved_reason.is_some() {
+                    None
+                } else {
+                    observed
+                        .as_ref()
+                        .map(|o| terminal_charge(&tx, o))
+                        .transpose()?
+                };
+                let receipt = checked_terminal_receipt(&tx, &scope, reservation_id, charge)?;
+                let stampable = match (receipt, observed, charge) {
+                    // Final usage exists: recovery settles it, never the release.
+                    (_, Some(_), Some(_)) | (Some(_), _, _) => false,
+                    // Dispatched or observed without final usage: the incident class.
+                    (None, _, _) => true,
+                };
+                if !stampable {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE budget_execution_intent SET liability_released_at = ?1
+                     WHERE execution_id = ?2 AND liability_released_at IS NULL",
+                    params![released_at, execution_id],
+                )?;
+                let changed = tx.execute(
+                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
+                     WHERE id = ?2 AND settled = 0",
+                    params![released_at, reservation_id as i64],
+                )?;
+                if changed != 1 {
+                    return Err(EvidenceError::CorruptObservation);
+                }
+                released += 1;
+            }
+            let full_page = candidate_count == 200;
+            tx.commit()?;
+            if !full_page {
+                return Ok(released);
+            }
+        }
     }
 
     /// Settle a tracked execution using its immutable stored charge. Only final

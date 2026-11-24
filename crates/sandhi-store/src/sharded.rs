@@ -328,6 +328,27 @@ impl ShardedLedger {
             .recovery_page_durable(scope, cursor, limit)
     }
 
+    pub fn release_aged_unresolved_liabilities_durable(
+        &self,
+        now: OffsetDateTime,
+        cutoff: OffsetDateTime,
+    ) -> Result<usize, EvidenceError> {
+        self.tracked_ledger()?
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+    }
+
+    pub fn reserve_with_intent_durable(
+        &self,
+        scope: &str,
+        ceiling: u64,
+        now: OffsetDateTime,
+        ttl: time::Duration,
+        retained_limit: usize,
+    ) -> Result<crate::ledger::evidence::IntentAdmission, EvidenceError> {
+        self.tracked_ledger()?
+            .reserve_with_intent_durable(scope, ceiling, now, ttl, retained_limit)
+    }
+
     fn tracked_ledger(&self) -> Result<std::sync::MutexGuard<'_, SqliteLedger>, EvidenceError> {
         if self.shards.len() != 1 {
             return Err(EvidenceError::UnsupportedTrackedLedger);

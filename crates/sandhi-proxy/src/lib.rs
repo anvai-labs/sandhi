@@ -43,7 +43,7 @@ pub mod otel;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
+pub use ledger::{liability_release_sweep_at, reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
     admin, build_provider_handle, build_provider_handle_for_endpoint, rehydrate_alerts,
     rehydrate_budgets, rehydrate_live_keys,
@@ -1545,6 +1545,57 @@ mod drain_contract_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn aged_unresolved_liability_release_restores_readiness() {
+        // ADR-0048: a durable intent admitted before the retention cutoff with no
+        // final evidence holds readiness down forever. The maintenance sweep
+        // releases it uncharged; the recovery cursor then converges green
+        // without touching the stored evidence.
+        let (state, _sink, _directory) = state();
+        let release_one = {
+            let mut guard = state.ledger.lock().unwrap();
+            match &mut *guard {
+                ProxyLedger::Durable(ledger) => {
+                    let sandhi_store::ledger::evidence::IntentAdmission::Admitted(intent) = ledger
+                        .reserve_with_intent_durable(
+                            "vk:vk_body",
+                            100,
+                            time::OffsetDateTime::now_utc() - time::Duration::hours(48),
+                            time::Duration::seconds(1),
+                            10,
+                        )
+                        .unwrap()
+                    else {
+                        panic!("tracked intent denied")
+                    };
+                    intent.execution_id
+                }
+                ProxyLedger::Memory(_) => panic!("durable ledger required"),
+            }
+        };
+        settlement::buffered::enable(&state, settlement::buffered::Config::default()).unwrap();
+        let app = build_app(state.clone());
+        let response = app
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let now = time::OffsetDateTime::now_utc();
+        assert_eq!(
+            liability_release_sweep_at(&state.ledger, now, now - time::Duration::hours(24)),
+            1
+        );
+        settlement::buffered::recover(state.clone()).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = release_one;
     }
 
     #[tokio::test]

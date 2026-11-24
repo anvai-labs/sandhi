@@ -268,6 +268,7 @@ an absent origin ID does not invalidate the gateway/intent/receipt join.
 | Process dies before terminal persistence | Keep liability unresolved; RAM cannot establish durable evidence |
 | Recovery sweep | Once per second; at most eight batches, 32 execution records and one retained terminal/Prepared-owner recovery per batch |
 | Sweep progress | Advance scope/execution cursors, including unbudgeted and removed-key scopes |
+| Aged liability release (ADR-0048) | Every 60 s, with the reclaim sweep: durable execution intents admitted at least `SANDHI_LIABILITY_RELEASE_AFTER_SECS` ago (default 86400, 0 = off) that still lack final source evidence are released uncharged in place — the held budget capacity is freed, full evidence is retained on the row, no receipt or usage is written, and the recovery cursor stops counting them, so `/readyz` converges after a body-capped/zero-usage backlog |
 | Shutdown | Drain workers, then check fresh bounded durable inventory plus retained owners |
 | Unknown rows, incomplete inventory or timeout | Incomplete shutdown, exit 124 |
 
