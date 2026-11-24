@@ -1561,7 +1561,7 @@ pub(crate) async fn usage(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured (set SANDHI_STORE)",
@@ -1597,8 +1597,19 @@ pub(crate) async fn usage(
     };
     match bounds {
         Bounds::LegacySince(lower) => {
-            let total = store.grand_total().ok();
-            let buckets = dimension_buckets_between(&store, by, Some(lower), None);
+            // Store reads run off the async executor — the Postgres backend blocks on its
+            // retained runtime handle and must never run inside a task (SQLite only got this
+            // for free by being fast).
+            let by_owned = by.to_string();
+            let lower_owned = lower.to_string();
+            let (total, buckets) = tokio::task::spawn_blocking(move || {
+                let total = store.grand_total().ok();
+                let buckets =
+                    dimension_buckets_between(&store, &by_owned, Some(&lower_owned), None);
+                (total, buckets)
+            })
+            .await
+            .unwrap_or((None, None));
             Json(json!({
                 "dimension": by,
                 "since": since,
@@ -1608,9 +1619,16 @@ pub(crate) async fn usage(
             .into_response()
         }
         Bounds::Window(window) => {
-            let total = store.grand_total_between(&window.from, &window.to).ok();
-            let buckets =
-                dimension_buckets_between(&store, by, Some(&window.from), Some(&window.to));
+            let from = window.from.clone();
+            let to = window.to.clone();
+            let by_owned = by.to_string();
+            let (total, buckets) = tokio::task::spawn_blocking(move || {
+                let total = store.grand_total_between(&from, &to).ok();
+                let buckets = dimension_buckets_between(&store, &by_owned, Some(&from), Some(&to));
+                (total, buckets)
+            })
+            .await
+            .unwrap_or((None, None));
             Json(json!({
                 "dimension": by,
                 "since": since,
@@ -1656,7 +1674,7 @@ pub(crate) async fn usage_diagnostics(
     {
         return response;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured",
@@ -1725,27 +1743,31 @@ pub(crate) async fn usage_run(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured (set SANDHI_STORE)",
         );
     };
-    match store.run_cost_tree(&run_id) {
-        Ok(Some(tree)) => Json(json!({ "run": tree })).into_response(),
-        Ok(None) => err(
+    // Off the async executor (the Postgres backend blocks on its own runtime handle).
+    let task_store = Arc::clone(&store);
+    let task_run = run_id.clone();
+    match tokio::task::spawn_blocking(move || task_store.run_cost_tree(&task_run)).await {
+        Ok(Ok(Some(tree))) => Json(json!({ "run": tree })).into_response(),
+        Ok(Ok(None)) => err(
             StatusCode::NOT_FOUND,
             "unknown run id (no usage event carries it)",
         ),
-        Err(e) => err(
+        Ok(Err(e)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("run query failed: {e}"),
         ),
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "run query failed"),
     }
 }
 
 fn dimension_buckets_between(
-    store: &Arc<sandhi_store::SqliteStore>,
+    store: &Arc<dyn sandhi_store::UsageStore>,
     by: &str,
     from: Option<&str>,
     to: Option<&str>,

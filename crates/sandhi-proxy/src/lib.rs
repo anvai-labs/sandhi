@@ -287,6 +287,12 @@ pub struct ProxyState {
     /// The durable store backing the dashboard. When set, `/dashboard` serves usage aggregates;
     /// typically the same object is also used as `sink` so events persist.
     pub store: Option<Arc<SqliteStore>>,
+    /// The usage history backend behind every usage read (`/dashboard/api/*`, `/admin/usage*`,
+    /// diagnostics) — [`SqliteStore`] by default (mirrors `store`, which is also the sink, so
+    /// tests wiring one store see identical behavior), or the optional Postgres backend when
+    /// `SANDHI_USAGE_DSN` is configured and the binary was built with the `postgres` feature.
+    /// Deliberately separate from `store`: the ledger/vault/vkeys stay SQLite-only.
+    pub usage_store: Option<Arc<dyn sandhi_store::UsageStore>>,
 
     // --- TD-0003 P1 operator surface ---
     /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
@@ -447,6 +453,12 @@ impl ProxyState {
             ledger: Mutex::new(ledger),
             sink,
             providers: Mutex::new(providers),
+            // Default the usage backend to the same SQLite store (the dashboard reads it and
+            // it is the sink, so one wiring serves all three); main overrides this when
+            // SANDHI_USAGE_DSN selects the Postgres backend.
+            usage_store: store
+                .as_ref()
+                .map(|sqlite| Arc::clone(sqlite) as Arc<dyn sandhi_store::UsageStore>),
             store,
             vault: None,
             backends: None,
@@ -1914,7 +1926,7 @@ async fn dashboard_api(
     if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
             "dashboard not configured (set SANDHI_STORE)",
