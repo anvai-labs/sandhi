@@ -531,20 +531,16 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     }
     state.client_credentials = client_credentials;
     state.buffered_deadlines = buffered_deadlines;
-    state.streaming_deadlines = Some(streaming_deadlines.unwrap_or_default());
+    state.set_streaming_deadlines(Some(streaming_deadlines.unwrap_or_default()));
     state.default_max_output_tokens = default_max_output_tokens;
     if let Some(policy) = &state.buffered_deadlines {
-        let providers = state.providers.lock().expect("providers poisoned");
-        if let Err(error) = policy.validate_endpoints(|reference| providers.contains_key(reference))
-        {
+        if let Err(error) = policy.validate_endpoints(state.registered_reference()) {
             eprintln!("sandhi-proxy: {error}");
             std::process::exit(1);
         }
     }
-    if let Some(policy) = &state.streaming_deadlines {
-        let providers = state.providers.lock().expect("providers poisoned");
-        if let Err(error) = policy.validate_endpoints(|reference| providers.contains_key(reference))
-        {
+    if let Some(policy) = state.streaming_policy() {
+        if let Err(error) = policy.validate_endpoints(state.registered_reference()) {
             eprintln!("sandhi-proxy: {error}");
             std::process::exit(1);
         }

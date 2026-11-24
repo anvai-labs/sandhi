@@ -155,16 +155,16 @@ async fn independent_clients_share_subscription_but_not_identity_or_authority() 
         });
     }
     let sink = Arc::new(InMemorySink::new());
-    let mut state = support::state(
+    let state = support::state(
         keys,
         support::Ledger::new(),
         sink.clone(),
         HashMap::from([("openai:subscription".into(), handle)]),
         None,
     );
-    state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(
-        r#"{"streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000}}}"#,
-    ).unwrap();
+    state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(
+        r#"{"streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000},"estimate":{"max_body_ms":1}}}"#,
+    ).unwrap());
     let app = build_app(Arc::new(state));
     for (client, streaming) in [("a", false), ("b", false), ("a", true), ("b", true)] {
         let req=Request::builder().method("POST").uri("/v1/chat/completions")
@@ -282,16 +282,16 @@ async fn subscription_stream_enforces_idle_and_body_limits_without_replay() {
             ..Default::default()
         });
         let sink = Arc::new(InMemorySink::new());
-        let mut state = support::state(
+        let state = support::state(
             keys,
             support::Ledger::new(),
             sink.clone(),
             HashMap::from([("openai:codex".into(), handle)]),
             None,
         );
-        state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(&json!({
-            "streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":idle_ms,"body_ms":body_ms}}
-        }).to_string()).unwrap();
+        state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(&json!({
+            "streaming_deadlines":{"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":idle_ms,"body_ms":body_ms},"estimate":{"max_body_ms":1}}
+        }).to_string()).unwrap());
         let state = Arc::new(state);
         let request = Request::builder().method("POST").uri("/v1/chat/completions")
             .header("authorization", "Bearer vk_fixture").header("content-type", "application/json")

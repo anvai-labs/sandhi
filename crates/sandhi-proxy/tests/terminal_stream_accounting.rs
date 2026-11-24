@@ -378,7 +378,7 @@ async fn streaming_fixture(
         None,
         None,
     );
-    let mut state = support::state(
+    let state = support::state(
         keys,
         support::Ledger::new(),
         capture.clone(),
@@ -386,9 +386,9 @@ async fn streaming_fixture(
         None,
     );
     // Exercise the same canonical configured deadline owner on both planes.
-    state.streaming_deadlines = sandhi_proxy::deadlines::streaming_from_json(&serde_json::json!({
-        "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"endpoints":{"openai:origin":{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
-    }).to_string()).unwrap();
+    state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(&serde_json::json!({
+        "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"estimate":{"max_body_ms":1},"endpoints":{"openai:origin":{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
+    }).to_string()).unwrap());
     if translated {
         state
             .ledger

@@ -54,7 +54,7 @@ async fn tracked_logical_dispatch_persists_selection_and_cache_policy_with_its_i
         unique.ledger = std::sync::Mutex::new(ledger);
         unique.cache_read_weight_bp = 1000;
         if stream {
-            unique.streaming_deadlines=Some(serde_json::from_value(json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000}})).unwrap());
+            unique.set_streaming_deadlines(Some(serde_json::from_value(json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000},"estimate":{"max_body_ms":1}})).unwrap()));
         }
         sandhi_proxy::settlement::buffered::enable(
             &state,
@@ -210,27 +210,28 @@ async fn discovery_reports_sanitized_exact_model_stream_limits() {
         )],
         definition(&["primary"]),
     );
-    Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
-        serde_json::from_value(json!({
-            "ceiling_ms": 840000,
-            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
-            "endpoints": {
-                "backend/primary": {
-                    "models": {
-                        "physical": {
-                            "setup_ms": 30000,
-                            "idle_ms": 180000,
-                            "body_ms": 600000
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .set_streaming_deadlines(Some(
+            serde_json::from_value(json!({
+                "ceiling_ms": 840000,
+                "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
+                "endpoints": {
+                    "backend/primary": {
+                        "models": {
+                            "physical": {
+                                "setup_ms": 30000,
+                                "idle_ms": 180000,
+                                "body_ms": 600000
+                            }
                         }
                     }
                 }
-            }
-        }))
-        .unwrap(),
-    );
+            }))
+            .unwrap(),
+        ));
     let (effective, _) = state
-        .streaming_deadlines
-        .as_ref()
+        .streaming_policy()
         .unwrap()
         .resolve("backend/primary", "physical");
     let transport = effective.transport();
@@ -276,24 +277,26 @@ async fn stream_body_budget_mismatch_fails_before_source_egress() {
         )],
         definition(&["primary"]),
     );
-    Arc::get_mut(&mut state).unwrap().streaming_deadlines = Some(
-        serde_json::from_value(json!({
-            "ceiling_ms": 240000,
-            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
-            "endpoints": {
-                "backend/primary": {
-                    "models": {
-                        "physical": {
-                            "setup_ms": 30000,
-                            "idle_ms": 180000,
-                            "body_ms": 200000
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .set_streaming_deadlines(Some(
+            serde_json::from_value(json!({
+                "ceiling_ms": 240000,
+                "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000},
+                "endpoints": {
+                    "backend/primary": {
+                        "models": {
+                            "physical": {
+                                "setup_ms": 30000,
+                                "idle_ms": 180000,
+                                "body_ms": 200000
+                            }
                         }
                     }
                 }
-            }
-        }))
-        .unwrap(),
-    );
+            }))
+            .unwrap(),
+        ));
     let response = build_app(state.clone())
         .oneshot(
             Request::post("/v1/chat/completions")
@@ -325,6 +328,60 @@ async fn stream_body_budget_mismatch_fails_before_source_egress() {
     let ledger = state.ledger.lock().unwrap();
     assert_eq!(ledger.reserved("vk:vk_one"), 0);
     assert_eq!(ledger.spent("vk:vk_one"), 0);
+}
+
+#[tokio::test]
+async fn stream_body_budget_preflight_accepts_token_scaled_estimates() {
+    // The GLM-critic incident shape (ADR-0047): a client legitimately preflighting
+    // a long reasoning completion carries a body budget above the raw global
+    // default but below the token-scaled estimate — admitted, not refused.
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(reply(Family::OpenaiChatCompletions, true))
+        .expect(1)
+        .mount(&origin)
+        .await;
+    let (state, sink) = state(
+        vec![(
+            "primary",
+            provider(&origin, "primary", Family::OpenaiChatCompletions, 1, 1),
+        )],
+        definition(&["primary"]),
+    );
+    // Global-only policy (no endpoint/model override): raw body 180000, and the
+    // estimate cap is ceiling - setup = 240000 - 30000 = 210000. A 32K-token
+    // request scales to the cap; the preflight at 200000 sits inside it.
+    state.set_streaming_deadlines(Some(
+        serde_json::from_value(json!({
+            "ceiling_ms": 240000,
+            "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 180000}
+        }))
+        .unwrap(),
+    ));
+    let response = build_app(state.clone())
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header("authorization", "Bearer vk_one")
+                .header("content-type", "application/json")
+                .header("x-sandhi-stream-body-budget-ms", "200000")
+                .body(Body::from(
+                    json!({
+                        "model":"agent",
+                        "max_tokens":32768,
+                        "stream":true,
+                        "messages":[{"role":"user","content":"hello"}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+    assert!(body.iter().any(|byte| *byte != 0), "stream delivered");
+    assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+    assert!(!sink.events().is_empty(), "usage settled");
 }
 
 #[tokio::test]

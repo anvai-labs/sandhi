@@ -27,7 +27,8 @@ pub(super) struct PreparationContext<'a> {
     state: &'a ProxyState,
     count_only: bool,
     buffered_deadlines: Option<&'a BufferedDeadlines>,
-    streaming_deadlines: Option<&'a StreamingDeadlines>,
+    /// Owned snapshot cloned out of the shared `RwLock`; safe across awaits.
+    streaming_deadlines: Option<std::sync::Arc<StreamingDeadlines>>,
     rate_limiter: &'a RateLimiter,
     metrics: &'a Metrics,
     policy: Option<&'a PolicyGate>,
@@ -39,7 +40,7 @@ impl<'a> From<&'a ProxyState> for PreparationContext<'a> {
             state,
             count_only: false,
             buffered_deadlines: state.buffered_deadlines.as_ref(),
-            streaming_deadlines: state.streaming_deadlines.as_ref(),
+            streaming_deadlines: state.streaming_policy(),
             rate_limiter: &state.rate_limiter,
             metrics: &state.metrics,
             policy: state.policy.as_deref(),
@@ -418,10 +419,17 @@ pub(super) async fn prepare(
     }
 
     let streaming_deadline = if wants_stream {
-        context
-            .streaming_deadlines
-            .as_ref()
-            .map(|policy| policy.resolve(&effective_upstream, &request.model).0)
+        // `max_output_tokens` is fully resolved (defaulted and per-model clamped)
+        // above, so the token-scaled body estimate sees the effective ceiling.
+        context.streaming_deadlines.as_ref().map(|policy| {
+            policy
+                .resolve_for_request(
+                    &effective_upstream,
+                    &request.model,
+                    request.max_output_tokens,
+                )
+                .0
+        })
     } else {
         None
     };

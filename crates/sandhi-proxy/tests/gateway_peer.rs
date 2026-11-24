@@ -206,19 +206,19 @@ async fn gateway(
         upstream_ref: "source".into(),
         ..Default::default()
     });
-    let mut state = ProxyState::new(
+    let state = ProxyState::new(
         keys,
         ProxyLedger::durable(path.to_str().unwrap(), 1).unwrap(),
         sink,
         HashMap::from([("source".into(), handle)]),
         None,
     );
-    state.streaming_deadlines = Some(
+    state.set_streaming_deadlines(Some(
         serde_json::from_value(
-            json!({"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000}}),
+            json!({"ceiling_ms":10000,"default":{"setup_ms":2000,"idle_ms":2000,"body_ms":5000},"estimate":{"max_body_ms":1}}),
         )
         .unwrap(),
-    );
+    ));
     let state = Arc::new(state);
     sandhi_proxy::settlement::buffered::enable(
         &state,

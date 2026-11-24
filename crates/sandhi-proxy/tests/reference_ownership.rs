@@ -179,12 +179,12 @@ fn uninitialized_state(path: &str, provider: ProviderHandle, logical: bool) -> A
         routes.put(&serde_json::from_value(json!({"id":"agents","models":[{"id":"agent","targets":[{"backend":"shared","model":"fixture"}]}]})).unwrap(),None).unwrap();
     }
     state.routes = Some(Arc::new(routes));
-    state.streaming_deadlines = Some(
+    state.set_streaming_deadlines(Some(
         serde_json::from_value(
-            json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":3000}}),
+            json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":3000},"estimate":{"max_body_ms":1}}),
         )
         .unwrap(),
-    );
+    ));
     Arc::new(state)
 }
 fn state(path: &str, provider: ProviderHandle, logical: bool) -> Arc<ProxyState> {
