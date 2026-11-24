@@ -26,7 +26,7 @@ use sandhi_proxy::{
     DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{
-    AlertStore, BackendStore, ProfileStore, SqliteStore, VaultStore, VirtualKeyStore,
+    AlertStore, BackendStore, ProfileStore, SqliteStore, UsageStore, VaultStore, VirtualKeyStore,
 };
 
 #[derive(clap::Parser)]
@@ -474,11 +474,27 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         ))
     });
 
+    // Usage sink + usage reads: PostgreSQL when SANDHI_USAGE_DSN is configured, the original
+    // SQLite usage store otherwise. The Postgres usage store REPLACES SQLite as the
+    // usage-event sink + dashboard/usage read path cleanly (the SQLite usage_events table
+    // simply stops receiving writes) — `SANDHI_STORE` stays mandatory and open because the
+    // enforcement ledger, vault, virtual keys and the other operator tables live there and
+    // never read usage_events (ADR-0043).
+    let (usage_store, usage_sink): (Option<Arc<dyn UsageStore>>, Arc<dyn Sink>) =
+        match configured_usage_dsn() {
+            // Diverges (exit 1) when the DSN is set without the `postgres` feature.
+            Some(dsn) => open_postgres_usage_store(&dsn).await,
+            None => {
+                let sqlite = store
+                    .as_ref()
+                    .expect("validated durable usage store")
+                    .clone();
+                let reader = Arc::clone(&sqlite) as Arc<dyn UsageStore>;
+                (Some(reader), sqlite)
+            }
+        };
     let buffered = Arc::new(BufferedSink::new(
-        store
-            .as_ref()
-            .expect("validated durable usage store")
-            .clone(),
+        usage_sink,
         positive_usize_env("SANDHI_USAGE_BUFFER_CAPACITY", 1024),
     ));
     let buffered_sink = Some(Arc::clone(&buffered));
@@ -520,6 +536,8 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         _ => None,
     };
     let mut state = ProxyState::new(keys, ledger, sink, providers, store);
+    // Selected above: the SQLite store (default) or the Postgres usage store (SANDHI_USAGE_DSN).
+    state.usage_store = usage_store;
     if oidc.is_some() && client_credentials.is_some() {
         // In OIDC mode every vk_ token is routed through delegation metadata
         // that a plain mint never writes — a client-credentials token would be
@@ -1159,6 +1177,55 @@ fn positive_u64_env(name: &str, default: u64) -> u64 {
         .unwrap_or_else(|| panic!("{name} must be a positive integer, got {raw:?}"))
 }
 
+/// The configured usage-store DSN, if any. A whitespace-only value counts as unset — some
+/// process managers can only set variables, not unset them.
+fn normalize_usage_dsn(raw: Option<String>) -> Option<String> {
+    raw.map(|dsn| dsn.trim().to_string())
+        .filter(|dsn| !dsn.is_empty())
+}
+
+fn configured_usage_dsn() -> Option<String> {
+    normalize_usage_dsn(std::env::var("SANDHI_USAGE_DSN").ok())
+}
+
+/// Open the Postgres usage store when `SANDHI_USAGE_DSN` is configured. House posture: a
+/// configured backend that cannot open is fatal (exit 1) — never a silent downgrade to
+/// SQLite. The DSN itself is never logged (it carries the credential).
+#[cfg(feature = "postgres")]
+async fn open_postgres_usage_store(dsn: &str) -> (Option<Arc<dyn UsageStore>>, Arc<dyn Sink>) {
+    match sandhi_store::PostgresStore::connect(dsn).await {
+        Ok(store) => {
+            eprintln!("sandhi-proxy: Postgres usage store active (SANDHI_USAGE_DSN)");
+            tracing::info!(
+                target: "sandhi.proxy.usage_store",
+                backend = "postgres",
+                "Postgres usage store active (SANDHI_USAGE_DSN); durable usage history is PostgreSQL, enforcement ledger stays on SQLite"
+            );
+            let store = Arc::new(store);
+            let sink = Arc::clone(&store) as Arc<dyn Sink>;
+            let reader = store as Arc<dyn UsageStore>;
+            (Some(reader), sink)
+        }
+        Err(error) => {
+            eprintln!("sandhi-proxy: startup failed: postgres usage store unavailable: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Compiled without the `postgres` feature but configured with a DSN: refuse to start rather
+/// than silently writing the usage history somewhere the operator did not ask for.
+#[cfg(not(feature = "postgres"))]
+async fn open_postgres_usage_store(dsn: &str) -> ! {
+    let _ = dsn;
+    eprintln!(
+        "sandhi-proxy: startup failed: SANDHI_USAGE_DSN is set but this binary was built \
+         without the `postgres` feature; rebuild with `--features postgres` (a configured \
+         usage store never downgrades to SQLite)"
+    );
+    std::process::exit(1);
+}
+
 fn validate_replica_topology() {
     let replicas = positive_usize_env("SANDHI_REPLICA_COUNT", 1);
     assert!(
@@ -1266,8 +1333,26 @@ fn control_origins(addr: SocketAddr, tls: bool, http_addr: Option<SocketAddr>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{listener_tls_entry_from_json, parse_http_bind};
+    use super::{listener_tls_entry_from_json, normalize_usage_dsn, parse_http_bind};
     use std::path::Path;
+
+    #[test]
+    fn usage_dsn_treats_missing_and_whitespace_only_as_unset() {
+        // The store-selection posture: unset and blank both mean "use the SQLite usage store";
+        // anything non-blank selects the Postgres backend verbatim (validated by connect()).
+        assert_eq!(normalize_usage_dsn(None), None);
+        assert_eq!(normalize_usage_dsn(Some(String::new())), None);
+        assert_eq!(normalize_usage_dsn(Some("   ".into())), None);
+        assert_eq!(normalize_usage_dsn(Some("\t\n ".into())), None);
+        let dsn = "postgres://user:secret@db:5432/sandhi";
+        assert_eq!(normalize_usage_dsn(Some(dsn.into())), Some(dsn.into()));
+        // Surrounding whitespace is trimmed, not rejected — but the credential-carrying body
+        // is preserved byte-exact.
+        assert_eq!(
+            normalize_usage_dsn(Some(format!("  {dsn}  "))),
+            Some(dsn.into())
+        );
+    }
 
     #[test]
     fn http_companion_bind_requires_tls_and_a_distinct_socket() {
