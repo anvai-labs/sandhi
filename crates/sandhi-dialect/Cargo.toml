@@ -10,7 +10,7 @@ rust-version.workspace = true
 [dependencies]
 base64 = "0.22"
 http = "1"
-sandhi-core = { path = "../sandhi-core", version = "0.24.1" }
-sandhi-providers = { path = "../sandhi-providers", version = "0.24.1" }
+sandhi-core = { path = "../sandhi-core", version = "0.25.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.25.0" }
 serde_json = "1"
 time = "0.3"

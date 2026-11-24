@@ -17,6 +17,27 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
+## [0.25.0] — Source candidate, 2026-11-24
+
+- Raise the streaming body deadline for long completions (ADR-0047). A token-scaled estimate
+  raises the *global-default* body limit to `max(resolved, min(max_output_tokens ×
+  ms_per_output_token × headroom_factor, max_body_ms))` — defaults 20 ms/token, headroom 2.0,
+  cap `ceiling_ms − setup_ms` (810 s under the default ceiling) — so a 32K-token completion no
+  longer dies at a fixed cap with zero usage. Explicit endpoint/exact-model overrides stay
+  authoritative; a `max_body_ms` at or below the default disables scaling. The base default
+  body rises 420 s → 540 s; estimate parameters live in the `streaming_deadlines` config
+  section.
+- Activate `streaming_deadlines` live: `POST /admin/config/apply` validates endpoint references
+  against the registry as of that apply and swaps the policy without a restart (refusal
+  accumulates a failure without rollback; buffered deadlines and listener TLS remain
+  startup-only). Preview reports `applies on apply` with an accurate active/desired diff.
+- Clamp the admitted reservation TTL to the documented 900 s window, restoring the ceiling
+  invariant for max-ceiling streams. Startup and config-apply share one registered-transport
+  endpoint gate.
+- Rust API: `ProxyState.streaming_deadlines` is now `RwLock<Option<Arc<StreamingDeadlines>>>`
+  with `streaming_policy()`/`set_streaming_deadlines()` accessors; new public
+  `StreamEstimate` and `StreamingDeadlines::resolve_for_request`.
+
 ## [0.24.1] — Source candidate, 2026-11-23
 
 - Accept an OpenAI-compatible `reasoning_effort` alone as thinking provenance for ZAI OpenAI-compatible
