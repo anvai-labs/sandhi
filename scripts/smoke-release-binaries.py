@@ -172,7 +172,11 @@ def wait_ready(process, port, timeout, *, clock=time.monotonic, sleep=time.sleep
             if process.poll() is not None:
                 raise SmokeFailure("proxy exited while probes completed")
             return
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, SmokeFailure):
+            # A non-200 (e.g. a 503 readiness blip) is exactly the startup
+            # transient this loop exists to ride out — retry until the
+            # deadline, like connection refusals. The deadline raise above
+            # still terminates the loop.
             sleep(min(.05, max(0, deadline - clock())))
     raise SmokeFailure("proxy startup exceeded its deadline")
 

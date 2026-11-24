@@ -1906,7 +1906,11 @@ async fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Re
 }
 
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
-async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+async fn dashboard_api(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
     if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
@@ -1916,13 +1920,37 @@ async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap)
             "dashboard not configured (set SANDHI_STORE)",
         );
     };
+    // Every dashboard aggregate is date-bounded: default last 30 days, hard
+    // maximum one year (the response then carries an advisory pointing at
+    // direct database queries). Buckets are calendar charge windows.
+    let bucket = params.get("bucket").map(String::as_str).unwrap_or("month");
+    if !matches!(bucket, "month" | "day") {
+        return error(StatusCode::BAD_REQUEST, "bucket must be month or day");
+    }
+    let window = match operator::parse_usage_window(
+        params.get("from").map(String::as_str),
+        params.get("to").map(String::as_str),
+        time::OffsetDateTime::now_utc(),
+    ) {
+        Ok(window) => window,
+        Err((status, message)) => return error(status, &message),
+    };
+    let from = window.from.clone();
+    let to = window.to.clone();
+    let bucket_owned = bucket.to_string();
     dashboard_read(move || {
+        let months = store
+            .totals_windowed(&bucket_owned, &from, &to)
+            .map_err(|e| e.to_string())?;
         Ok(json!({
-            "total": store.grand_total().map_err(|e| e.to_string())?,
-            "by_subject": store.totals_by_subject().map_err(|e| e.to_string())?,
-            "by_group": store.totals_by_group().map_err(|e| e.to_string())?,
-            "by_provider": store.totals_by_provider().map_err(|e| e.to_string())?,
-            "by_model": store.totals_by_model().map_err(|e| e.to_string())?,
+            "window": {"from": from, "to": to, "source": window.source, "bucket": bucket_owned},
+            "advisory": window.advisory,
+            "total": store.grand_total_between(&window.from, &window.to).map_err(|e| e.to_string())?,
+            "windows": months,
+            "by_subject": store.totals_grouped_between("subject_id", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_group": store.totals_grouped_between("group_id", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_provider": store.totals_grouped_between("provider", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_model": store.totals_grouped_between("model", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
         }))
     })
     .await

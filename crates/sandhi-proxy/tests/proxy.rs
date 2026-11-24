@@ -2481,10 +2481,18 @@ async fn dashboard_reports_aggregates_from_the_store() {
     use sandhi_store::SqliteStore;
 
     let store = Arc::new(SqliteStore::in_memory().unwrap());
+    // Timestamps are real RFC-3339: the dashboard aggregates are date-bounded,
+    // so unparseable sentinel values would silently fall outside every window.
     let ev = |subject: &str, tin: u64, tout: u64| {
-        UsageEvent::new("r", "t", "openai", "m", Backend::External)
-            .with_attribution(Some("vk".into()), Some(subject.into()), Some("team".into()))
-            .with_tokens(tin, tout)
+        UsageEvent::new(
+            "r",
+            "2026-07-19T00:00:00Z",
+            "openai",
+            "m",
+            Backend::External,
+        )
+        .with_attribution(Some("vk".into()), Some(subject.into()), Some("team".into()))
+        .with_tokens(tin, tout)
     };
     store.emit(&ev("alice", 100, 20));
     store.emit(&ev("bob", 50, 10));
@@ -2504,7 +2512,7 @@ async fn dashboard_reports_aggregates_from_the_store() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/dashboard/api/usage")
+                .uri("/dashboard/api/usage?from=2026-07-01&to=2026-08-01")
                 .body(Body::empty())
                 .unwrap(),
         )

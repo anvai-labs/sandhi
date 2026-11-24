@@ -1048,7 +1048,9 @@ Every CLI command maps 1:1 onto a call under `/admin/*` (all require the admin b
 | `POST /admin/keys/share` | Mint vkey `{upstream, subject?, group?, models?, budget_scope?, expires_at?, rate_limit_per_min?}`.
 | `GET /admin/keys/virtual` / `DELETE /admin/vkeys/{id}` | List / revoke virtual keys.
 | `POST /admin/budget` / `GET /admin/budget` / `GET /admin/budget/usage?scope=` | Budget CRUD + spend.
-| `GET /admin/usage?by=&since=` | Attribution query (`by=` also accepts `run`).
+| `GET /admin/usage?by=&since=` | Attribution query (`by=` also accepts `run`). Legacy `since` keeps its exact contract: a lower bound with no upper cap.
+| `GET /admin/usage?by=&from=&to=` | The same query inside a validated window: canonical UTC RFC-3339 bounds (`from` inclusive, `to` exclusive; date-only inputs are accepted), default last 30 days, hard maximum one year — wider ranges clamp with an advisory to use direct database queries.
+| `GET /dashboard/api/usage?from=&to=&bucket=` | The dashboard aggregate is always window-bounded: default last 30 days, maximum one year, `bucket` groups charge windows by `month` (default) or `day`; every response carries the effective window and carries an advisory when the requested range was clamped.
 | `GET /admin/usage/run/{run_id}` | The run's cost tree (`RunCostTreeV1`); 404 when no event carries the id.
 | `POST /admin/alerts` / `GET /admin/alerts` / `…/{id}/ack` / `DELETE …/{id}` | Alert rules.
 | `GET /admin/config` / `POST /admin/config/apply` | Preview / apply `SANDHI_CONFIG` desired state (additive-only).
