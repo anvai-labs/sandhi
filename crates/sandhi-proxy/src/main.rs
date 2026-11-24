@@ -747,14 +747,17 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         // Admission age past this cutoff releases the held budget capacity
         // (evidence retained, nothing fabricated). Zero disables the sweep.
         // Invalid supplied values refuse startup — never silently downgrade.
+        // Values beyond the ceiling would overflow the cutoff arithmetic
+        // (time subtraction panics out of range), so they refuse too.
+        const LIABILITY_RETENTION_MAX_SECS: i64 = 1_000_000_000;
         let liability_retention_secs: i64 = match std::env::var(
             "SANDHI_LIABILITY_RELEASE_AFTER_SECS",
         ) {
             Ok(raw) => match raw.parse::<i64>() {
-                Ok(secs) if secs >= 0 => secs,
+                Ok(secs) if (0..=LIABILITY_RETENTION_MAX_SECS).contains(&secs) => secs,
                 _ => {
                     eprintln!(
-                        "sandhi-proxy: SANDHI_LIABILITY_RELEASE_AFTER_SECS must be a non-negative integer of seconds, got {raw:?}"
+                        "sandhi-proxy: SANDHI_LIABILITY_RELEASE_AFTER_SECS must be an integer of seconds between 0 and {LIABILITY_RETENTION_MAX_SECS}, got {raw:?}"
                     );
                     std::process::exit(1);
                 }
