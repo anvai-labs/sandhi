@@ -75,9 +75,14 @@ function isoDayAgo(days) {
 }
 
 function usageWindowQuery() {
+  // Empty dateboxes fetch the parameter-less endpoint: the server default is
+  // the same window (last 30 days, one-year cap), and the parameter-less URL
+  // keeps response interception fixtures working.
+  if (!usageWindowFrom && !usageWindowTo) return "/dashboard/api/usage";
   const from = usageWindowFrom || isoDayAgo(30);
   const to = usageWindowTo || isoDayAgo(0);
-  return `/dashboard/api/usage?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&bucket=month`;
+  const params = new URLSearchParams({ from, to, bucket: "month" });
+  return `/dashboard/api/usage?${params.toString()}`;
 }
 try { sessionStorage.removeItem("sandhi_admin_token"); } catch { /* Storage may be disabled. */ }
 function refreshTokenState() {
