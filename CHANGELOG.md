@@ -17,6 +17,27 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
+## [0.26.0] — Source candidate, 2026-11-24
+
+- Bound every dashboard and admin usage query to a date window: `/dashboard/api/usage` and
+  `/admin/usage` accept `from`/`to` (RFC-3339 or `YYYY-MM-DD` datebox inputs), default to the
+  last 30 days, group charge windows by calendar month or day, and hard-cap ranges at one year —
+  wider requests clamp with an advisory to use direct database queries. The dashboard gains a
+  From/To datebox, a monthly charge-windows table and the advisory banner. The legacy `?since=`
+  parameter keeps its exact lower-bound-only contract.
+- Add an optional PostgreSQL usage store: `SANDHI_USAGE_DSN` selects a `PostgresStore` (sqlx
+  runtime API, `postgres` cargo feature, off by default) for usage reads and the usage sink
+  while the durable enforcement ledger/evidence stays on the SQLite file. A `UsageStore` trait
+  seam keeps both backends drop-in; connect failure or feature-off-with-DSN refuses startup.
+  The `usage_events` table is INSERT-only and lakehouse-managed-table ready; schema auto-init
+  includes the diagnostics ordering key and the legacy completeness/basis/attempts columns.
+  See `docs/operator/postgres-usage-store.md`.
+- Release-smoke readiness retry: a non-200 readiness blip during startup is retried until the
+  deadline instead of failing the release smoke; the CI rust job compiles the optional Postgres
+  usage store so the backend cannot bit-rot unseen.
+- Rust API: new `UsageStore` trait and `StreamEstimate`-parameterized streaming deadlines from
+  0.25.0 remain additive; `ProxyState` gains `usage_store` (readers) beside `store`.
+
 ## [0.25.0] — Source candidate, 2026-11-24
 
 - Raise the streaming body deadline for long completions (ADR-0047). A token-scaled estimate
