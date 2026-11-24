@@ -1614,6 +1614,41 @@ async fn dashboard_usage_endpoint_now_includes_by_model() {
 }
 
 #[tokio::test]
+async fn admin_usage_default_window_covers_recent_events() {
+    // The flagship default (last 30 days, source "default") verified end to
+    // end: an event emitted now is inside it, a year-old event is not.
+    let state = admin_state();
+    let store = state.store.clone().unwrap();
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let old = (time::OffsetDateTime::now_utc() - time::Duration::days(400))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    for ts in [now, old] {
+        store.emit(
+            &UsageEvent::new("r", &ts, "openai", "gpt-4", sandhi_core::Backend::External)
+                .with_attribution(
+                    Some("vk".into()),
+                    Some("alice".into()),
+                    Some("platform".into()),
+                )
+                .with_tokens(10, 5),
+        );
+    }
+    let app = build_app(state);
+    let r = app
+        .oneshot(req("GET", "/admin/usage?by=subject", Some(TOKEN), None))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    assert_eq!(body["window"]["source"], "default");
+    assert!(body["advisory"].is_null());
+    assert_eq!(body["total"]["calls"], 1);
+}
+
+#[tokio::test]
 async fn dashboard_usage_is_window_bounded_with_monthly_buckets_and_cap_advisory() {
     // Windowing contract: bounds are canonical RFC-3339 (from inclusive, to
     // exclusive), charge buckets group by calendar month, ranges beyond one

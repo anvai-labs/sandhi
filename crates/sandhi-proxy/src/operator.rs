@@ -1453,6 +1453,7 @@ pub(crate) async fn budget_usage(
 /// exclusive — matching the lexicographic comparison over the `occurred_at`
 /// index. Every windowed query is date-bounded; the hard maximum exists so a
 /// dashboard request can never become an unbounded scan.
+#[derive(Debug)]
 pub(crate) struct UsageWindow {
     pub from: String,
     pub to: String,
@@ -1491,11 +1492,16 @@ pub(crate) fn parse_usage_window(
             time::Date::from_calendar_date(year, month, day).map_err(|_| ())
         })()
         .map_err(|_| format!("window bound {raw:?} must be RFC-3339 or a YYYY-MM-DD date"))?;
+        // next_day() (Option) instead of +1 day: 9999-12-31 has no successor
+        // and must 400, not panic the handler.
         let midnight = day.with_time(time::Time::MIDNIGHT).assume_utc();
         Ok(if is_from {
             midnight
         } else {
-            midnight + Duration::days(1)
+            day.next_day()
+                .ok_or_else(|| format!("window bound {raw:?} exceeds the supported date range"))?
+                .with_time(time::Time::MIDNIGHT)
+                .assume_utc()
         })
     };
     let to = match to {
@@ -1528,9 +1534,20 @@ pub(crate) fn parse_usage_window(
              window — use direct database queries for older history"
         ));
     }
+    // Canonical UTC: bounds compare lexicographically against stored
+    // occurred_at values, which are always written in UTC "…Z" form. An
+    // offset-bearing input would otherwise exclude in-window rows silently.
+    let format_bound = |value: time::OffsetDateTime| -> Result<String, (StatusCode, String)> {
+        value.to_utc().format(&Rfc3339).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("window bound out of representable range: {error}"),
+            )
+        })
+    };
     Ok(UsageWindow {
-        from: from.format(&Rfc3339).unwrap_or_default(),
-        to: to.format(&Rfc3339).unwrap_or_default(),
+        from: format_bound(from)?,
+        to: format_bound(to)?,
         source,
         advisory,
     })
@@ -3304,5 +3321,89 @@ mod vault_acl_projection_tests {
             vault_acl_response(&entry(None), Some(&plan("legacy_domain"))).unwrap()["class"],
             "legacy_domain"
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_window_tests {
+    use super::*;
+
+    fn parse<'a>(
+        from: Option<&'a str>,
+        to: Option<&'a str>,
+    ) -> Result<UsageWindow, (StatusCode, String)> {
+        parse_usage_window(from, to, time::OffsetDateTime::now_utc())
+    }
+
+    #[test]
+    fn default_window_is_last_thirty_days_ending_now() {
+        let now = time::OffsetDateTime::now_utc();
+        let window = parse_usage_window(None, None, now).unwrap();
+        assert_eq!(window.source, "default");
+        assert!(window.advisory.is_none());
+        let to =
+            time::OffsetDateTime::parse(&window.to, &time::format_description::well_known::Rfc3339)
+                .unwrap();
+        let from = time::OffsetDateTime::parse(
+            &window.from,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(to, now.to_utc());
+        assert_eq!((to - from).whole_days(), 30);
+    }
+
+    #[test]
+    fn offset_bearing_inputs_canonicalize_to_utc() {
+        // +05:30 offset: semantically 2026-01-01T18:30:00Z — stored rows are
+        // UTC "…Z", so the persisted bound must be the canonical UTC form,
+        // not the offset-bearing literal.
+        let window = parse(Some("2026-01-02T00:00:00+05:30"), None).unwrap();
+        assert_eq!(window.from, "2026-01-01T18:30:00Z");
+    }
+
+    #[test]
+    fn date_only_to_covers_its_day_and_date_max_is_rejected_not_a_panic() {
+        let window = parse(Some("2026-07-01"), Some("2026-07-02")).unwrap();
+        assert_eq!(window.from, "2026-07-01T00:00:00Z");
+        assert_eq!(window.to, "2026-07-03T00:00:00Z");
+        assert_eq!(window.source, "explicit");
+        // 9999-12-31 has no successor day: a 400, never a handler panic.
+        let result = parse(None, Some("9999-12-31"));
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn inverted_bounds_and_year_zero_are_refused() {
+        assert_eq!(
+            parse(Some("2026-09-01"), Some("2026-08-01")).unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            parse(Some("2026-01-02T00:00:00Z"), Some("2026-01-02T00:00:00Z"))
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Year 0 with the 30-day default would fall outside the RFC-3339
+        // representable range: refused, never an empty-string bound.
+        let result = parse(None, Some("0000-01-01"));
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(parse(Some("not-a-date"), None).is_err());
+    }
+
+    #[test]
+    fn oversize_range_clamps_from_and_sets_advisory() {
+        let window = parse(Some("2020-01-01"), Some("2026-08-20")).unwrap();
+        assert!(window.advisory.unwrap().contains("direct database"));
+        let to =
+            time::OffsetDateTime::parse(&window.to, &time::format_description::well_known::Rfc3339)
+                .unwrap();
+        let from = time::OffsetDateTime::parse(
+            &window.from,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!((to - from).whole_days(), 366);
     }
 }
