@@ -184,6 +184,10 @@ jobs:
           version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           python scripts/smoke-release-binaries.py --binary-dir target/debug --expected-version "$version"
       - run: cargo test --workspace
+      - name: Optional Postgres usage store compiles
+        run: |
+          cargo clippy -p sandhi-store --features postgres --all-targets -- -D warnings
+          cargo check -p sandhi-proxy --features postgres
       - name: Optional embedded evaluator feature compiles and passes portable tests
         run: |
           cargo clippy --workspace --all-targets --features policy-onnx -- -D warnings

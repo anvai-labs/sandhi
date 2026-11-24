@@ -87,6 +87,7 @@ const DDL: &[&str] = &[
         run_id text, step_id text, parent_id text,
         reasoning_included bigint,
         cache_read_status text, cache_read_source text,
+        completeness text, basis text, attempts bigint,
         id bigserial PRIMARY KEY
     )",
     "CREATE INDEX IF NOT EXISTS idx_usage_subject ON usage_events(subject_id)",
@@ -148,6 +149,21 @@ impl PostgresStore {
     /// design, which keeps this mis-use loud instead of silently serializing a worker.
     fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         self.rt.block_on(fut)
+    }
+
+    /// Test helper: delete rows tagged with `tag` (subjects/groups ending in
+    /// the tag, run ids prefixed with the tagged pg-phase2 form) so repeated
+    /// live-test runs against a shared instance are idempotent.
+    #[cfg(test)]
+    pub(crate) fn cleanup_test_rows(&self) {
+        self.block(async {
+            for pattern in [
+                "DELETE FROM usage_events WHERE run_id LIKE 'pg-phase2-%'",
+                "DELETE FROM usage_events WHERE subject_id LIKE 'alice-%' OR subject_id LIKE 'bob-%'",
+            ] {
+                let _ = sqlx::query(pattern).execute(&self.pool).await;
+            }
+        });
     }
 
     /// One best-effort durable write: never panics, counts and logs failures (ADR-0047 D7).
@@ -839,6 +855,12 @@ mod tests {
         format!("pg-phase2-{}-{}", std::process::id(), tag)
     }
 
+    /// Per-process tag for subject/group keys, so exact-count assertions stay
+    /// correct across repeated runs against the same database.
+    fn test_tag() -> String {
+        std::process::id().to_string()
+    }
+
     fn pg_store() -> Option<PostgresStore> {
         let dsn = std::env::var("SANDHI_TEST_PG_DSN")
             .ok()
@@ -854,15 +876,23 @@ mod tests {
 
     #[test]
     #[ignore = "requires a live Postgres via SANDHI_TEST_PG_DSN"]
-    fn emit_aggregates_and_windows_match_the_sqlite_contract() {
+    fn live_postgres_contract_round_trip() {
+        // One serialized test (both phases) so parallel in-process execution
+        // and repeated runs against a shared instance stay deterministic:
+        // every phase purges the fixture-tagged family first, and its exact
+        // count assertions then hold against only its own rows.
         let Some(store) = pg_store() else {
             panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres tests");
         };
+        let tag = test_tag();
+        let (alice, bob) = (format!("alice-{tag}"), format!("bob-{tag}"));
         let run = test_run_id("windows");
-        crate::UsageStore::emit(&store, &ev("openai", "alice", "team-a", 100, 20));
+        store.cleanup_test_rows();
+
+        crate::UsageStore::emit(&store, &ev("openai", &alice, "team-a", 100, 20));
         crate::UsageStore::emit(
             &store,
-            &ev("anthropic", "bob", "team-b", 200, 40).with_identity(
+            &ev("anthropic", &bob, "team-b", 200, 40).with_identity(
                 None,
                 Some(run.clone()),
                 Some("root".into()),
@@ -877,12 +907,15 @@ mod tests {
         assert!(total.tokens_in >= 300);
 
         let by_subject = store.totals_by_subject().expect("by subject");
-        let alice = by_subject.iter().find(|b| b.key == "alice").expect("alice");
-        assert_eq!(alice.calls, 1);
-        assert_eq!(alice.tokens_in, 100);
-        assert_eq!(alice.billable_tokens, 125); // 100 in + 5 cache-read + 20 out
+        let alice_row = by_subject
+            .iter()
+            .find(|b| b.key == alice)
+            .expect("tagged alice");
+        assert_eq!(alice_row.calls, 1);
+        assert_eq!(alice_row.tokens_in, 100);
+        assert_eq!(alice_row.billable_tokens, 125); // 100 in + 5 cache-read + 20 out
         assert_eq!(
-            alice
+            alice_row
                 .cache_read_coverage
                 .as_ref()
                 .expect("coverage")
@@ -916,30 +949,29 @@ mod tests {
             .totals_since("nope", "2026-01-01T00:00:00Z")
             .unwrap()
             .is_none());
-    }
 
-    #[test]
-    #[ignore = "requires a live Postgres via SANDHI_TEST_PG_DSN"]
-    fn run_cost_tree_and_diagnostics_round_trip() {
-        let Some(store) = pg_store() else {
-            panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres tests");
-        };
-        // September timestamps: the windows test pins exact July counts, so
-        // this test must not add July rows even under parallel execution.
-        let run = test_run_id("tree");
+        // ── Phase 2: run tree + diagnostics. ──
+        store.cleanup_test_rows();
+        let tree_run = test_run_id("tree");
         crate::UsageStore::emit(
             &store,
-            &ev_at("2026-09-19T00:00:00Z", "openai", "alice", "team-a", 10, 5)
-                .with_identity(None, Some(run.clone()), Some("root".into()), None, None)
+            &ev_at("2026-09-19T00:00:00Z", "openai", &alice, "team-a", 10, 5)
+                .with_identity(
+                    None,
+                    Some(tree_run.clone()),
+                    Some("root".into()),
+                    None,
+                    None,
+                )
                 .with_latency(Some(40), Some(20))
                 .with_latency_sources(Some(LatencySource::Origin), Some(LatencySource::Boundary)),
         );
         crate::UsageStore::emit(
             &store,
-            &ev_at("2026-09-19T00:00:00Z", "openai", "alice", "team-a", 20, 10)
+            &ev_at("2026-09-19T00:00:00Z", "openai", &alice, "team-a", 20, 10)
                 .with_identity(
                     None,
-                    Some(run.clone()),
+                    Some(tree_run.clone()),
                     Some("plan".into()),
                     Some("root".into()),
                     None,
@@ -950,12 +982,11 @@ mod tests {
         );
 
         let tree = store
-            .run_cost_tree(&run)
+            .run_cost_tree(&tree_run)
             .expect("tree")
             .expect("run exists");
         assert_eq!(tree.total.calls, 2);
         assert_eq!(tree.total.tokens_in, 30);
-        // Two steps: the root step (no parent) and the child step under it.
         let root = tree
             .roots
             .iter()
@@ -970,9 +1001,8 @@ mod tests {
         assert_eq!(root.rollup.tokens_in, 30, "subtree-inclusive rollup");
         assert!(store.run_cost_tree("no-such-run-404").unwrap().is_none());
 
-        // Diagnostics return the newest-inserted row first and export no attribution columns.
         let query = DiagnosticQuery {
-            selector: DiagnosticSelector::Run(run),
+            selector: DiagnosticSelector::Run(tree_run),
             limit: 10,
         };
         let response = store.diagnostics(&query).expect("diagnostics");
