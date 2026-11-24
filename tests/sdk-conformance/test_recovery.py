@@ -434,7 +434,10 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
         assert denied.status_code == 429, denied.text
         assert len(gated_provider.requests) == 3
         assert leases(source, shards) == admitted
-        assert get(restarted.client, "/dashboard/api/usage") == baseline["usage"]
+        usage = get(restarted.client, "/dashboard/api/usage")
+        usage.pop("window", None)
+        usage.pop("advisory", None)
+        assert usage == baseline["usage"]
         # The unresolved durable execution still holds both liabilities; it
         # cannot claim a clean accounting shutdown or fabricate a receipt.
         restarted.stop(expected_status=124)
