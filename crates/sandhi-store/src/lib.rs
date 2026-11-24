@@ -7,6 +7,8 @@ pub mod alerts;
 pub mod backends;
 pub mod diagnostics;
 pub mod ledger;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod profiles;
 pub mod references;
 pub mod routes;
@@ -29,6 +31,8 @@ use sandhi_core::{
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStore;
 pub use profiles::{ProfileRecord, ProfileStore};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassExactBinding,
@@ -102,6 +106,192 @@ fn cache_observation(status: Option<&str>, source: Option<&str>) -> Option<Cache
 /// an index over [`sandhi_core::UsageAggregator`]'s fold — an optimization for large histories,
 /// never a second definition. `store_matches_core_fold` proves the two agree.
 pub type Bucket = UsageAggregateV1;
+
+/// Backend-agnostic error for usage-store reads. The message only ever reaches an operator
+/// surface or a log (never a client body with SQL in it); both backends map their native errors
+/// into this so [`UsageStore`] consumers never see a driver type.
+#[derive(Debug)]
+pub struct UsageStoreError(String);
+
+impl std::fmt::Display for UsageStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageStoreError {}
+
+impl From<rusqlite::Error> for UsageStoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for UsageStoreError {
+    fn from(error: sqlx::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+/// The read/emit surface the proxy uses against the usage history — one seam so the
+/// dashboard/admin handlers never learn which backend is active. The default backend is
+/// [`SqliteStore`]; the optional Postgres backend ([`postgres::PostgresStore`], cargo feature
+/// `postgres`, selected at runtime by `SANDHI_USAGE_DSN`) implements the same trait. The
+/// enforcement ledger, vault and virtual-key stores are NOT part of this seam — they stay
+/// SQLite-only.
+///
+/// Reads return [`UsageStoreError`] rather than a driver error so the trait stays
+/// backend-agnostic; everything else mirrors `SqliteStore`'s inherent methods exactly
+/// (drop-in for existing callers).
+pub trait UsageStore: Send + Sync {
+    /// Best-effort durable write (ADR-0047 D7): a storage failure never breaks the caller.
+    /// Returns whether the event was persisted; failures are counted by [`Self::emit_failures`]
+    /// and logged, never panicked.
+    fn emit(&self, event: &UsageEvent) -> bool;
+
+    /// How many best-effort `emit`s failed at the store. Non-zero means spend/attribution is
+    /// silently incomplete.
+    fn emit_failures(&self) -> u64;
+
+    /// The grand total across every event.
+    fn grand_total(&self) -> Result<Bucket, UsageStoreError>;
+
+    /// Grand total bounded by `from` (inclusive) and `to` (exclusive) RFC-3339 bounds.
+    fn grand_total_between(&self, from: &str, to: &str) -> Result<Bucket, UsageStoreError>;
+
+    /// Totals grouped by a fixed column within optional `from`/`to` RFC-3339 bounds.
+    fn totals_grouped_between(
+        &self,
+        col: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Vec<Bucket>, UsageStoreError>;
+
+    /// Charge buckets grouped by calendar window (`bucket` = `"month"` or `"day"`),
+    /// strictly bounded by `from` inclusive and `to` exclusive.
+    fn totals_windowed(
+        &self,
+        bucket: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<Bucket>, UsageStoreError>;
+
+    fn totals_by_subject(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_group(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_provider(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_model(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_virtual_key(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_session(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+    fn totals_by_run(&self) -> Result<Vec<Bucket>, UsageStoreError>;
+
+    /// Totals since an RFC 3339 timestamp, grouped by `dimension`
+    /// (`subject` | `group` | `provider` | `model` | `key` | `session` | `run`).
+    /// `None` for an unknown dimension.
+    fn totals_since(
+        &self,
+        dimension: &str,
+        since: &str,
+    ) -> Result<Option<Vec<Bucket>>, UsageStoreError>;
+
+    /// The cost tree of one agent run (ADR-0005 D7). `None` when no event carries the run id.
+    fn run_cost_tree(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<sandhi_core::RunCostTreeV1>, UsageStoreError>;
+
+    /// Bounded, read-only projection of persisted logical-call evidence (ADR-0011).
+    fn diagnostics(
+        &self,
+        query: &diagnostics::DiagnosticQuery,
+    ) -> Result<diagnostics::DiagnosticResponse, UsageStoreError>;
+}
+
+impl UsageStore for SqliteStore {
+    fn emit(&self, event: &UsageEvent) -> bool {
+        self.record(event).is_ok()
+    }
+
+    fn emit_failures(&self) -> u64 {
+        SqliteStore::emit_failures(self)
+    }
+
+    fn grand_total(&self) -> Result<Bucket, UsageStoreError> {
+        SqliteStore::grand_total(self).map_err(UsageStoreError::from)
+    }
+
+    fn grand_total_between(&self, from: &str, to: &str) -> Result<Bucket, UsageStoreError> {
+        SqliteStore::grand_total_between(self, from, to).map_err(UsageStoreError::from)
+    }
+
+    fn totals_grouped_between(
+        &self,
+        col: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_grouped_between(self, col, from, to).map_err(UsageStoreError::from)
+    }
+
+    fn totals_windowed(
+        &self,
+        bucket: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_windowed(self, bucket, from, to).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_subject(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_subject(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_group(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_group(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_provider(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_provider(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_model(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_model(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_virtual_key(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_virtual_key(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_session(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_session(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_by_run(&self) -> Result<Vec<Bucket>, UsageStoreError> {
+        SqliteStore::totals_by_run(self).map_err(UsageStoreError::from)
+    }
+
+    fn totals_since(
+        &self,
+        dimension: &str,
+        since: &str,
+    ) -> Result<Option<Vec<Bucket>>, UsageStoreError> {
+        SqliteStore::totals_since(self, dimension, since).map_err(UsageStoreError::from)
+    }
+
+    fn run_cost_tree(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<sandhi_core::RunCostTreeV1>, UsageStoreError> {
+        SqliteStore::run_cost_tree(self, run_id).map_err(UsageStoreError::from)
+    }
+
+    fn diagnostics(
+        &self,
+        query: &diagnostics::DiagnosticQuery,
+    ) -> Result<diagnostics::DiagnosticResponse, UsageStoreError> {
+        SqliteStore::diagnostics(self, query).map_err(UsageStoreError::from)
+    }
+}
 
 /// The per-connection `synchronous` level to set on a durable connection. `journal_mode=WAL` is
 /// persistent on the database file (every connection to it sees WAL once any sets it); `synchronous`
@@ -293,13 +483,34 @@ impl SqliteStore {
         col: &str,
         since: Option<&str>,
     ) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped_between(col, since, None)
+    }
+
+    /// Totals grouped by a fixed column within `from` (inclusive) and `to`
+    /// (exclusive) RFC-3339 bounds. Both bounds are optional for compatibility
+    /// with the unbounded legacy callers; the dashboard window always supplies
+    /// both so the query stays date-bounded.
+    pub fn totals_grouped_between(
+        &self,
+        col: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> rusqlite::Result<Vec<Bucket>> {
         let conn = self.conn.lock().unwrap();
-        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match since {
-            Some(s) => (
+        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (from, to) {
+            (Some(s), Some(t)) => (
+                "WHERE occurred_at >= ?1 AND occurred_at < ?2".into(),
+                vec![Box::new(s.to_string()), Box::new(t.to_string())],
+            ),
+            (Some(s), None) => (
                 "WHERE occurred_at >= ?1".into(),
                 vec![Box::new(s.to_string())],
             ),
-            None => ("WHERE 1=1".into(), vec![]),
+            (None, Some(t)) => (
+                "WHERE occurred_at < ?1".into(),
+                vec![Box::new(t.to_string())],
+            ),
+            (None, None) => ("WHERE 1=1".into(), vec![]),
         };
         let sql = format!(
             "SELECT COALESCE({col}, '(none)') AS k, COUNT(*), \
@@ -326,13 +537,56 @@ impl SqliteStore {
             })
         })?;
         let mut buckets: Vec<Bucket> = rows.collect::<rusqlite::Result<_>>()?;
-        let samples = Self::latency_samples(&conn, col, since)?;
+        let samples = Self::latency_samples(&conn, col, from)?;
         for b in &mut buckets {
             if let Some((d, t)) = samples.get(&b.key) {
                 b.latency = LatencySummary::from_samples(d, t);
             }
         }
         Ok(buckets)
+    }
+
+    /// Charge buckets grouped by calendar window (`bucket` = `"month"` or
+    /// `"day"` — SQLite strftime grouping over the RFC-3339 `occurred_at`
+    /// index), strictly bounded by `from` inclusive and `to` exclusive.
+    /// Ordered chronologically; no latency sampling — these are charge
+    /// windows, and the attribution tables above carry the latency view.
+    pub fn totals_windowed(
+        &self,
+        bucket: &str,
+        from: &str,
+        to: &str,
+    ) -> rusqlite::Result<Vec<Bucket>> {
+        let pattern = match bucket {
+            "month" => "%Y-%m",
+            "day" => "%Y-%m-%d",
+            _ => return Err(rusqlite::Error::InvalidParameterName(bucket.into())),
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT strftime('{pattern}', occurred_at) AS k, COUNT(*), \
+                COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} \
+             FROM usage_events WHERE occurred_at >= ?1 AND occurred_at < ?2 \
+             GROUP BY k ORDER BY k ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(Bucket {
+                key: r.get(0)?,
+                calls: r.get::<_, i64>(1)? as u64,
+                tokens_in: r.get::<_, i64>(2)? as u64,
+                tokens_out: r.get::<_, i64>(3)? as u64,
+                cache_creation_tokens: r.get::<_, i64>(4)? as u64,
+                cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                reasoning_tokens: r.get::<_, i64>(6)? as u64,
+                billable_tokens: r.get::<_, i64>(7)? as u64,
+                latency: None,
+                cache_read_coverage: Some(cache_coverage(r, 8, r.get::<_, i64>(1)? as u64)?),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
     }
 
     /// Latency samples per group key, most recent first and bounded.
@@ -512,14 +766,48 @@ impl SqliteStore {
             },
         )
     }
+
+    /// Grand total bounded by `from` (inclusive) and `to` (exclusive) RFC-3339
+    /// bounds — the dashboard's windowed headline cards. Latency is sampled
+    /// from the lower-bounded recent history (approximate by design).
+    pub fn grand_total_between(&self, from: &str, to: &str) -> rusqlite::Result<Bucket> {
+        let conn = self.conn.lock().unwrap();
+        let samples = Self::latency_samples(&conn, "'total'", Some(from))?;
+        let latency = samples
+            .get("total")
+            .and_then(|(d, t)| LatencySummary::from_samples(d, t));
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                    COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} \
+                 FROM usage_events WHERE occurred_at >= ?1 AND occurred_at < ?2"
+            ),
+            params![from, to],
+            |r| {
+                Ok(Bucket {
+                    key: "total".to_string(),
+                    calls: r.get::<_, i64>(0)? as u64,
+                    tokens_in: r.get::<_, i64>(1)? as u64,
+                    tokens_out: r.get::<_, i64>(2)? as u64,
+                    cache_creation_tokens: r.get::<_, i64>(3)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(5)? as u64,
+                    billable_tokens: r.get::<_, i64>(6)? as u64,
+                    latency: latency.clone(),
+                    cache_read_coverage: Some(cache_coverage(r, 7, r.get::<_, i64>(0)? as u64)?),
+                })
+            },
+        )
+    }
 }
 
-impl Sink for SqliteStore {
-    fn emit(&self, event: &UsageEvent) {
-        // Best-effort — a storage failure must never break the caller (ADR-0047 D7). But it must
-        // not be silent either: count it and log so an operator knows spend/attribution is
-        // incomplete. A dropped metering event is the one failure mode a meter cannot hide.
-        if let Err(e) = self.insert(event) {
+impl SqliteStore {
+    /// One best-effort durable write: insert, and on failure count + log (never panic). Shared
+    /// by the [`Sink`] impl and the [`UsageStore`] seam so failure observability cannot diverge
+    /// between the two entry points.
+    fn record(&self, event: &UsageEvent) -> rusqlite::Result<()> {
+        self.insert(event).map_err(|e| {
             self.emit_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
                 target: "sandhi.store.emit_failed",
@@ -528,7 +816,17 @@ impl Sink for SqliteStore {
                 provider = %event.provider,
                 "usage-event emit FAILED; event lost (best-effort sink, ADR-0047 D7)"
             );
-        }
+            e
+        })
+    }
+}
+
+impl Sink for SqliteStore {
+    fn emit(&self, event: &UsageEvent) {
+        // Best-effort — a storage failure must never break the caller (ADR-0047 D7). But it must
+        // not be silent either: `record` counts it and logs so an operator knows spend/attribution
+        // is incomplete. A dropped metering event is the one failure mode a meter cannot hide.
+        let _ = self.record(event);
     }
 }
 
@@ -549,6 +847,12 @@ impl SqliteStore {
 mod tests {
     use super::*;
     use sandhi_core::UsageEvent;
+
+    /// Disambiguated [`sandhi_core::Sink::emit`]: this module sees both the `Sink` and the
+    /// [`UsageStore`] `emit` on `SqliteStore`, so the sink entry point is called by name.
+    fn emit(store: &SqliteStore, event: &UsageEvent) {
+        sandhi_core::Sink::emit(store, event);
+    }
 
     fn ev(provider: &str, subject: &str, group: &str, tin: u64, tout: u64) -> UsageEvent {
         UsageEvent::new(
@@ -590,7 +894,7 @@ mod tests {
                 None,
             );
             event.cache_read_observation = observation;
-            store.emit(&event);
+            emit(&store, &event);
             events.push(event);
         }
         let tree = sandhi_core::RunCostTreeV1::from_events("cache-run", &events);
@@ -677,9 +981,9 @@ mod tests {
     #[test]
     fn persists_and_aggregates() {
         let store = SqliteStore::in_memory().unwrap();
-        store.emit(&ev("openai", "alice", "team-a", 100, 20));
-        store.emit(&ev("openai", "alice", "team-a", 50, 10));
-        store.emit(&ev("anthropic", "bob", "team-b", 200, 40));
+        emit(&store, &ev("openai", "alice", "team-a", 100, 20));
+        emit(&store, &ev("openai", "alice", "team-a", 50, 10));
+        emit(&store, &ev("anthropic", "bob", "team-b", 200, 40));
 
         let total = store.grand_total().unwrap();
         assert_eq!(total.calls, 3);
@@ -712,7 +1016,7 @@ mod tests {
             .with_latency(Some(1234), Some(210))
             .with_latency_sources(Some(LatencySource::Origin), Some(LatencySource::Boundary))
             .with_reasoning(Some(33));
-        store.emit(&event);
+        emit(&store, &event);
 
         let conn = store.conn.lock().unwrap();
         let persisted = conn
@@ -751,7 +1055,7 @@ mod tests {
             Some("root".into()),
             None,
         );
-        store.emit(&event);
+        emit(&store, &event);
 
         let conn = store.conn.lock().unwrap();
         let (run, step, parent): (Option<String>, Option<String>, Option<String>) = conn
@@ -797,7 +1101,7 @@ mod tests {
             None,
             None,
         );
-        store.emit(&event);
+        emit(&store, &event);
         let conn = store.conn.lock().unwrap();
         let run: Option<String> = conn
             .query_row("SELECT run_id FROM usage_events", [], |row| row.get(0))
@@ -828,7 +1132,7 @@ mod tests {
             emit_failures: AtomicU64::new(0),
         };
         let event = ev("openai", "alice", "team-a", 1, 2).with_latency(Some(5), None);
-        store.emit(&event);
+        emit(&store, &event);
         assert_eq!(store.grand_total().unwrap().calls, 1);
     }
 
@@ -856,16 +1160,19 @@ mod tests {
             run_ev(None, None, 7, 1),
         ];
         for e in &corpus {
-            store.emit(e);
+            emit(&store, e);
         }
         // An event of a DIFFERENT run must not leak into run-1's tree.
-        store.emit(&ev("openai", "bob", "team-b", 999, 999).with_identity(
-            None,
-            Some("run-2".into()),
-            None,
-            None,
-            None,
-        ));
+        emit(
+            &store,
+            &ev("openai", "bob", "team-b", 999, 999).with_identity(
+                None,
+                Some("run-2".into()),
+                None,
+                None,
+                None,
+            ),
+        );
 
         let stored = store.run_cost_tree("run-1").unwrap().expect("run exists");
         let expected = RunCostTreeV1::from_events("run-1", &corpus);
@@ -879,14 +1186,17 @@ mod tests {
     #[test]
     fn totals_by_run_groups_on_run_id() {
         let store = SqliteStore::in_memory().unwrap();
-        store.emit(&ev("openai", "alice", "team-a", 10, 5).with_identity(
-            None,
-            Some("run-1".into()),
-            None,
-            None,
-            None,
-        ));
-        store.emit(&ev("openai", "alice", "team-a", 20, 5)); // no run → (none)
+        emit(
+            &store,
+            &ev("openai", "alice", "team-a", 10, 5).with_identity(
+                None,
+                Some("run-1".into()),
+                None,
+                None,
+                None,
+            ),
+        );
+        emit(&store, &ev("openai", "alice", "team-a", 20, 5)); // no run → (none)
         let rows = store
             .totals_since("run", "2020-01-01T00:00:00Z")
             .unwrap()
@@ -912,7 +1222,7 @@ mod tests {
             ev("openai", "carol", "team-b", 10, 3).with_reasoning(Some(8)), // unfolded
         ];
         for e in &corpus {
-            store.emit(e);
+            emit(&store, e);
             agg.add(e);
         }
 
@@ -926,12 +1236,64 @@ mod tests {
     }
 
     #[test]
+    fn windowed_totals_are_calendar_bounded_and_exclusive_at_to() {
+        // Dashboard windowing: charge buckets group by calendar window over the
+        // occurred_at index; `from` is inclusive, `to` exclusive; unknown
+        // buckets are refused rather than scanning unbounded.
+        let store = SqliteStore::in_memory().unwrap();
+        let mk = |ts: &str, tin: u64| {
+            UsageEvent::new("r", ts, "openai", "m", Backend::External)
+                .with_attribution(Some("vk".into()), Some("alice".into()), Some("team".into()))
+                .with_tokens(tin, 1)
+        };
+        for (ts, tin) in [
+            ("2026-06-30T23:59:59Z", 1),
+            ("2026-07-01T00:00:00Z", 10),
+            ("2026-07-15T12:00:00Z", 20),
+            ("2026-08-01T00:00:00Z", 40),
+        ] {
+            emit(&store, &mk(ts, tin));
+        }
+        let months = store
+            .totals_windowed("month", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].key, "2026-07");
+        assert_eq!(months[0].calls, 2);
+        assert_eq!(months[0].tokens_in, 30);
+        let total = store
+            .grand_total_between("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(total.calls, 2);
+        let days = store
+            .totals_windowed("day", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].key, "2026-07-01");
+        assert_eq!(days[1].key, "2026-07-15");
+        assert!(store
+            .totals_windowed("week", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .is_err());
+        let grouped = store
+            .totals_grouped_between(
+                "subject_id",
+                Some("2026-07-01T00:00:00Z"),
+                Some("2026-08-01T00:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].calls, 2);
+    }
+
+    #[test]
     fn store_reads_back_latency_it_records() {
         // #68 added duration/TTFT and nothing ever read them. Prove the round trip.
         let store = SqliteStore::in_memory().unwrap();
         for ms in [10_u64, 20, 30, 40, 100] {
-            store
-                .emit(&ev("openai", "alice", "team-a", 10, 5).with_latency(Some(ms), Some(ms / 2)));
+            emit(
+                &store,
+                &ev("openai", "alice", "team-a", 10, 5).with_latency(Some(ms), Some(ms / 2)),
+            );
         }
         let l = store
             .grand_total()
@@ -950,7 +1312,7 @@ mod tests {
     #[test]
     fn latency_is_absent_when_nothing_reported_it() {
         let store = SqliteStore::in_memory().unwrap();
-        store.emit(&ev("openai", "alice", "team-a", 10, 5));
+        emit(&store, &ev("openai", "alice", "team-a", 10, 5));
         assert!(store.grand_total().unwrap().latency.is_none());
     }
 
@@ -969,8 +1331,8 @@ mod tests {
         let unfolded = ev("openai", "alice", "team-a", 10, 3)
             .with_cache(0, 0)
             .with_reasoning(Some(8));
-        store.emit(&folded);
-        store.emit(&unfolded);
+        emit(&store, &folded);
+        emit(&store, &unfolded);
 
         let rust_sum = folded.billable_tokens() + unfolded.billable_tokens(); // 20 + 21
         let total = store.grand_total().unwrap();
@@ -1008,7 +1370,7 @@ mod tests {
                     .with_reasoning_included(included)
                     .with_identity(None, Some("run".into()), Some("step".into()), None, None);
                 expected += event.billable_tokens();
-                store.emit(&event);
+                emit(&store, &event);
             }
         }
         assert_eq!(store.grand_total().unwrap().billable_tokens, expected);
@@ -1034,6 +1396,134 @@ mod tests {
         assert_eq!(total.calls, 0);
         assert_eq!(total.billable_tokens, 0);
         assert!(store.totals_by_group().unwrap().is_empty());
+    }
+
+    // ── The `UsageStore` seam: `SqliteStore` through the trait must be drop-in identical. ──
+
+    #[test]
+    fn usage_store_trait_seam_matches_sqlite_inherent_output() {
+        // Regression guard for the backend seam: every read the proxy makes through
+        // `dyn UsageStore` must return exactly what the inherent `SqliteStore` methods the
+        // dashboard has always used return for the same events.
+        let store = SqliteStore::in_memory().unwrap();
+        let traited: &dyn UsageStore = &store;
+        emit(&store, &ev("openai", "alice", "team-a", 100, 20));
+        emit(
+            &store,
+            &ev("anthropic", "bob", "team-b", 200, 40).with_identity(
+                None,
+                Some("run-7".into()),
+                Some("step".into()),
+                None,
+                None,
+            ),
+        );
+        emit(
+            &store,
+            &ev("openai", "alice", "team-a", 50, 10).with_reasoning(Some(4)),
+        );
+        // The trait's best-effort emit succeeded and counted nothing.
+        assert!(traited.emit(&ev("openai", "carol", "team-b", 5, 1).with_cache(0, 2)));
+        assert_eq!(traited.emit_failures(), 0);
+
+        assert_eq!(traited.grand_total().unwrap(), store.grand_total().unwrap());
+        assert_eq!(
+            traited
+                .grand_total_between("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+                .unwrap(),
+            store
+                .grand_total_between("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+                .unwrap()
+        );
+        for col in [
+            "subject_id",
+            "group_id",
+            "provider",
+            "model",
+            "virtual_key_id",
+            "session_id",
+            "run_id",
+        ] {
+            assert_eq!(
+                traited.totals_grouped_between(col, None, None).unwrap(),
+                SqliteStore::totals_grouped_between(&store, col, None, None).unwrap(),
+                "{col}"
+            );
+            assert_eq!(
+                traited
+                    .totals_grouped_between(col, Some("2026-07-01T00:00:00Z"), None)
+                    .unwrap(),
+                SqliteStore::totals_grouped_between(
+                    &store,
+                    col,
+                    Some("2026-07-01T00:00:00Z"),
+                    None
+                )
+                .unwrap(),
+                "{col}"
+            );
+        }
+        for window in ["month", "day"] {
+            assert_eq!(
+                traited
+                    .totals_windowed(window, "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+                    .unwrap(),
+                SqliteStore::totals_windowed(
+                    &store,
+                    window,
+                    "2026-07-01T00:00:00Z",
+                    "2026-08-01T00:00:00Z"
+                )
+                .unwrap(),
+                "{window}"
+            );
+        }
+        for (dimension, col) in [
+            ("subject", "subject_id"),
+            ("group", "group_id"),
+            ("provider", "provider"),
+            ("model", "model"),
+            ("key", "virtual_key_id"),
+            ("session", "session_id"),
+            ("run", "run_id"),
+        ] {
+            assert_eq!(
+                traited
+                    .totals_since(dimension, "2026-01-01T00:00:00Z")
+                    .unwrap(),
+                Some(
+                    SqliteStore::totals_grouped_since(&store, col, Some("2026-01-01T00:00:00Z"))
+                        .unwrap()
+                ),
+                "{dimension}"
+            );
+        }
+        assert!(traited
+            .totals_since("nope", "2026-01-01T00:00:00Z")
+            .unwrap()
+            .is_none());
+
+        let tree = traited.run_cost_tree("run-7").unwrap().expect("run exists");
+        assert_eq!(store.run_cost_tree("run-7").unwrap().unwrap(), tree);
+        assert!(traited.run_cost_tree("run-404").unwrap().is_none());
+
+        let query = diagnostics::DiagnosticQuery {
+            selector: diagnostics::DiagnosticSelector::Run("run-7".into()),
+            limit: diagnostics::DEFAULT_LIMIT,
+        };
+        let through_trait = traited.diagnostics(&query).unwrap();
+        let inherent = SqliteStore::diagnostics(&store, &query).unwrap();
+        assert_eq!(through_trait.returned_rows, inherent.returned_rows);
+        assert_eq!(
+            serde_json::to_value(&through_trait).unwrap(),
+            serde_json::to_value(&inherent).unwrap()
+        );
+
+        // Failure observability crosses the seam: a broken sink reports `false` through the
+        // trait and still increments the same counter.
+        store.inject_emit_failure();
+        assert!(!traited.emit(&ev("openai", "dave", "team-c", 1, 1)));
+        assert_eq!(traited.emit_failures(), 1);
     }
 
     // ── Scope 2: durability + observable emit failures + no silent loss under contention. ──
@@ -1078,7 +1568,7 @@ mod tests {
         assert_eq!(store.emit_failures(), 0);
         store.inject_emit_failure(); // deterministically break the sink
                                      // A storage failure must never break the request (ADR-0047 D7)...
-        store.emit(&ev("openai", "alice", "team-a", 1, 2));
+        emit(&store, &ev("openai", "alice", "team-a", 1, 2));
         // ...but it must not be silent either — the failure was counted.
         assert_eq!(store.emit_failures(), 1);
     }
@@ -1118,7 +1608,10 @@ mod tests {
                     ReserveOutcome::Admitted(r) => r.id,
                     ReserveOutcome::Denied(_) => panic!("should admit well under the 1M cap"),
                 };
-                store.emit(&ev("openai", "alice", "team-a", i as u64, (i + 1) as u64));
+                emit(
+                    &store,
+                    &ev("openai", "alice", "team-a", i as u64, (i + 1) as u64),
+                );
                 ledger.lock().unwrap().settle_durable(id, 50).unwrap();
             }));
         }

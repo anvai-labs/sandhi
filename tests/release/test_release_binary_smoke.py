@@ -128,10 +128,20 @@ class BinarySmokeTests(unittest.TestCase):
             smoke.wait_ready(process, 1234, 1)
         probe.assert_not_called()
 
-    def test_exit_during_probe_is_rejected(self):
+    def test_exit_during_probe_is_detected_on_the_next_loop_iteration(self):
+        # A non-200 probe (SmokeFailure) is a retryable startup transient; a
+        # proxy exit is still detected at the next loop-top poll and fails.
         process = Mock()
-        process.poll.side_effect = [None, 1]
+        process.poll.side_effect = [None, 1, 1]
         with patch.object(smoke, "probe"), self.assertRaisesRegex(smoke.SmokeFailure, "exited"):
+            smoke.wait_ready(process, 1234, 1)
+
+    def test_non_200_startup_blip_is_retried_until_success(self):
+        # The hosted-runner shape: one 503-readyz blip during startup, then
+        # ready. The loop must ride it out instead of failing the smoke.
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(smoke, "probe", side_effect=[smoke.SmokeFailure("blip"), None, None]):
             smoke.wait_ready(process, 1234, 1)
 
     def test_graceful_shutdown_requires_sigterm_zero_exit(self):

@@ -43,7 +43,7 @@ pub mod otel;
 
 // Re-export the admin API request/response types for the `sandhi` CLI client + the startup
 // rehydration helpers used by the `sandhi-proxy` binary.
-pub use ledger::{reclaim_sweep_at, Admission, ProxyLedger};
+pub use ledger::{liability_release_sweep_at, reclaim_sweep_at, Admission, ProxyLedger};
 pub use operator::{
     admin, build_provider_handle, build_provider_handle_for_endpoint, rehydrate_alerts,
     rehydrate_budgets, rehydrate_live_keys,
@@ -287,6 +287,12 @@ pub struct ProxyState {
     /// The durable store backing the dashboard. When set, `/dashboard` serves usage aggregates;
     /// typically the same object is also used as `sink` so events persist.
     pub store: Option<Arc<SqliteStore>>,
+    /// The usage history backend behind every usage read (`/dashboard/api/*`, `/admin/usage*`,
+    /// diagnostics) — [`SqliteStore`] by default (mirrors `store`, which is also the sink, so
+    /// tests wiring one store see identical behavior), or the optional Postgres backend when
+    /// `SANDHI_USAGE_DSN` is configured and the binary was built with the `postgres` feature.
+    /// Deliberately separate from `store`: the ledger/vault/vkeys stay SQLite-only.
+    pub usage_store: Option<Arc<dyn sandhi_store::UsageStore>>,
 
     // --- TD-0003 P1 operator surface ---
     /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
@@ -447,6 +453,12 @@ impl ProxyState {
             ledger: Mutex::new(ledger),
             sink,
             providers: Mutex::new(providers),
+            // Default the usage backend to the same SQLite store (the dashboard reads it and
+            // it is the sink, so one wiring serves all three); main overrides this when
+            // SANDHI_USAGE_DSN selects the Postgres backend.
+            usage_store: store
+                .as_ref()
+                .map(|sqlite| Arc::clone(sqlite) as Arc<dyn sandhi_store::UsageStore>),
             store,
             vault: None,
             backends: None,
@@ -1548,6 +1560,57 @@ mod drain_contract_tests {
     }
 
     #[tokio::test]
+    async fn aged_unresolved_liability_release_restores_readiness() {
+        // ADR-0048: a durable intent admitted before the retention cutoff with no
+        // final evidence holds readiness down forever. The maintenance sweep
+        // releases it uncharged; the recovery cursor then converges green
+        // without touching the stored evidence.
+        let (state, _sink, _directory) = state();
+        let release_one = {
+            let mut guard = state.ledger.lock().unwrap();
+            match &mut *guard {
+                ProxyLedger::Durable(ledger) => {
+                    let sandhi_store::ledger::evidence::IntentAdmission::Admitted(intent) = ledger
+                        .reserve_with_intent_durable(
+                            "vk:vk_body",
+                            100,
+                            time::OffsetDateTime::now_utc() - time::Duration::hours(48),
+                            time::Duration::seconds(1),
+                            10,
+                        )
+                        .unwrap()
+                    else {
+                        panic!("tracked intent denied")
+                    };
+                    intent.execution_id
+                }
+                ProxyLedger::Memory(_) => panic!("durable ledger required"),
+            }
+        };
+        settlement::buffered::enable(&state, settlement::buffered::Config::default()).unwrap();
+        let app = build_app(state.clone());
+        let response = app
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let now = time::OffsetDateTime::now_utc();
+        assert_eq!(
+            liability_release_sweep_at(&state.ledger, now, now - time::Duration::hours(24)),
+            1
+        );
+        settlement::buffered::recover(state.clone()).await.unwrap();
+        let response = app
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = release_one;
+    }
+
+    #[tokio::test]
     async fn readiness_is_distinct_from_liveness_and_all_dialects_reject_drain() {
         let (state, sink, _directory) = state();
         settlement::buffered::enable(&state, settlement::buffered::Config::default()).unwrap();
@@ -1855,23 +1918,51 @@ async fn require_dashboard_access(state: &ProxyState, headers: &HeaderMap) -> Re
 }
 
 /// Usage aggregates for the dashboard (JSON). 404 when no durable store is configured.
-async fn dashboard_api(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -> Response {
+async fn dashboard_api(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
     if let Err(denied) = require_dashboard_access(&state, &headers).await {
         return denied;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return error(
             StatusCode::NOT_FOUND,
             "dashboard not configured (set SANDHI_STORE)",
         );
     };
+    // Every dashboard aggregate is date-bounded: default last 30 days, hard
+    // maximum one year (the response then carries an advisory pointing at
+    // direct database queries). Buckets are calendar charge windows.
+    let bucket = params.get("bucket").map(String::as_str).unwrap_or("month");
+    if !matches!(bucket, "month" | "day") {
+        return error(StatusCode::BAD_REQUEST, "bucket must be month or day");
+    }
+    let window = match operator::parse_usage_window(
+        params.get("from").map(String::as_str),
+        params.get("to").map(String::as_str),
+        time::OffsetDateTime::now_utc(),
+    ) {
+        Ok(window) => window,
+        Err((status, message)) => return error(status, &message),
+    };
+    let from = window.from.clone();
+    let to = window.to.clone();
+    let bucket_owned = bucket.to_string();
     dashboard_read(move || {
+        let months = store
+            .totals_windowed(&bucket_owned, &from, &to)
+            .map_err(|e| e.to_string())?;
         Ok(json!({
-            "total": store.grand_total().map_err(|e| e.to_string())?,
-            "by_subject": store.totals_by_subject().map_err(|e| e.to_string())?,
-            "by_group": store.totals_by_group().map_err(|e| e.to_string())?,
-            "by_provider": store.totals_by_provider().map_err(|e| e.to_string())?,
-            "by_model": store.totals_by_model().map_err(|e| e.to_string())?,
+            "window": {"from": from, "to": to, "source": window.source, "bucket": bucket_owned},
+            "advisory": window.advisory,
+            "total": store.grand_total_between(&window.from, &window.to).map_err(|e| e.to_string())?,
+            "windows": months,
+            "by_subject": store.totals_grouped_between("subject_id", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_group": store.totals_grouped_between("group_id", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_provider": store.totals_grouped_between("provider", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
+            "by_model": store.totals_grouped_between("model", Some(&window.from), Some(&window.to)).map_err(|e| e.to_string())?,
         }))
     })
     .await

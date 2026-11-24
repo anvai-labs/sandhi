@@ -29,6 +29,11 @@ policy-onnx = ["dep:ort"]
 # sentinelpass-ipc`; without this forwarding edge that documented release path
 # asks Cargo for a feature the package does not define.
 sentinelpass-ipc = ["sandhi-store/sentinelpass-ipc"]
+# Optional Postgres usage store (`SANDHI_USAGE_DSN`). The library keeps no hard sqlx/PG
+# dependency: with the feature off, setting the DSN at startup is a fatal configuration error
+# (never a silent downgrade to SQLite). Release binaries that serve PG usage histories build
+# with `--features postgres`.
+postgres = ["sandhi-store/postgres"]
 # TD-0011 P3 (Scope 5): first-party OTLP export of gen_ai.* spans + metrics. DEFAULT OFF —
 # disposable observability layered beside the prerequisite-free Prometheus `/metrics` path,
 # which stays the default. Only the binary takes these deps (TD-0011 D1: library crates must
@@ -47,10 +52,10 @@ ort = { version = "=2.0.0-rc.15", optional = true, default-features = false, fea
 openidconnect = { version = "4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sandhi-core = { path = "../sandhi-core", version = "0.25.0" }
-sandhi-providers = { path = "../sandhi-providers", version = "0.25.0" }
-sandhi-dialect = { path = "../sandhi-dialect", version = "0.25.0" }
-sandhi-store = { path = "../sandhi-store", version = "0.25.0" }
+sandhi-core = { path = "../sandhi-core", version = "0.26.0" }
+sandhi-providers = { path = "../sandhi-providers", version = "0.26.0" }
+sandhi-dialect = { path = "../sandhi-dialect", version = "0.26.0" }
+sandhi-store = { path = "../sandhi-store", version = "0.26.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 axum = "0.7"
 futures-util = "0.3"

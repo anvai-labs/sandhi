@@ -1448,6 +1448,111 @@ pub(crate) async fn budget_usage(
 }
 
 /// `GET /admin/usage?by=…&since=…` — attribution aggregates (wraps the durable store).
+/// A parsed, validated, bounded usage query window (ADR dashboard windowing).
+/// Bounds are canonical UTC RFC-3339 strings, `from` inclusive and `to`
+/// exclusive — matching the lexicographic comparison over the `occurred_at`
+/// index. Every windowed query is date-bounded; the hard maximum exists so a
+/// dashboard request can never become an unbounded scan.
+#[derive(Debug)]
+pub(crate) struct UsageWindow {
+    pub from: String,
+    pub to: String,
+    pub source: &'static str,
+    pub advisory: Option<String>,
+}
+
+/// Default lookback when no explicit window is supplied.
+const USAGE_WINDOW_DEFAULT_DAYS: i64 = 30;
+/// Hard maximum: beyond one year the dashboard advises direct database queries
+/// instead of widening an HTTP aggregate.
+const USAGE_WINDOW_MAX_DAYS: i64 = 366;
+
+pub(crate) fn parse_usage_window(
+    from: Option<&str>,
+    to: Option<&str>,
+    now: time::OffsetDateTime,
+) -> Result<UsageWindow, (StatusCode, String)> {
+    use time::format_description::well_known::Rfc3339;
+    use time::Duration;
+    let parse_bound = |raw: &str, is_from: bool| -> Result<time::OffsetDateTime, String> {
+        if let Ok(ts) = time::OffsetDateTime::parse(raw, &Rfc3339) {
+            return Ok(ts);
+        }
+        // Date-only (YYYY-MM-DD), interpreted as UTC midnight. A `to` date
+        // advances one day so the exclusive bound covers that whole day.
+        let parts = raw.split('-').collect::<Vec<_>>();
+        let day = (|| {
+            if parts.len() != 3 {
+                return Err(());
+            }
+            let year = parts[0].parse::<i32>().map_err(|_| ())?;
+            let month =
+                time::Month::try_from(parts[1].parse::<u8>().map_err(|_| ())?).map_err(|_| ())?;
+            let day = parts[2].parse::<u8>().map_err(|_| ())?;
+            time::Date::from_calendar_date(year, month, day).map_err(|_| ())
+        })()
+        .map_err(|_| format!("window bound {raw:?} must be RFC-3339 or a YYYY-MM-DD date"))?;
+        // next_day() (Option) instead of +1 day: 9999-12-31 has no successor
+        // and must 400, not panic the handler.
+        let midnight = day.with_time(time::Time::MIDNIGHT).assume_utc();
+        Ok(if is_from {
+            midnight
+        } else {
+            day.next_day()
+                .ok_or_else(|| format!("window bound {raw:?} exceeds the supported date range"))?
+                .with_time(time::Time::MIDNIGHT)
+                .assume_utc()
+        })
+    };
+    let to = match to {
+        Some(raw) => parse_bound(raw, false).map_err(|m| (StatusCode::BAD_REQUEST, m))?,
+        None => now,
+    };
+    let (mut from, source, mut advisory) = match from {
+        Some(raw) => (
+            parse_bound(raw, true).map_err(|m| (StatusCode::BAD_REQUEST, m))?,
+            "explicit",
+            None,
+        ),
+        None => (
+            to - Duration::days(USAGE_WINDOW_DEFAULT_DAYS),
+            "default",
+            None,
+        ),
+    };
+    if from >= to {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "usage window 'from' must precede 'to'".into(),
+        ));
+    }
+    if to - from > Duration::days(USAGE_WINDOW_MAX_DAYS) {
+        from = to - Duration::days(USAGE_WINDOW_MAX_DAYS);
+        advisory = Some(format!(
+            "requested range exceeded the {USAGE_WINDOW_MAX_DAYS}-day maximum; \
+             showing the most recent {USAGE_WINDOW_MAX_DAYS} days of the requested \
+             window — use direct database queries for older history"
+        ));
+    }
+    // Canonical UTC: bounds compare lexicographically against stored
+    // occurred_at values, which are always written in UTC "…Z" form. An
+    // offset-bearing input would otherwise exclude in-window rows silently.
+    let format_bound = |value: time::OffsetDateTime| -> Result<String, (StatusCode, String)> {
+        value.to_utc().format(&Rfc3339).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("window bound out of representable range: {error}"),
+            )
+        })
+    };
+    Ok(UsageWindow {
+        from: format_bound(from)?,
+        to: format_bound(to)?,
+        source,
+        advisory,
+    })
+}
+
 pub(crate) async fn usage(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -1456,7 +1561,7 @@ pub(crate) async fn usage(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured (set SANDHI_STORE)",
@@ -1464,16 +1569,77 @@ pub(crate) async fn usage(
     };
     let by = params.get("by").map(String::as_str).unwrap_or("subject");
     let since = params.get("since").cloned();
-
-    let total = store.grand_total().ok();
-    let buckets = dimension_buckets(&store, by, since.as_deref());
-    Json(json!({
-        "dimension": by,
-        "since": since,
-        "total": total,
-        "buckets": buckets.unwrap_or_default(),
-    }))
-    .into_response()
+    // `from`/`to` bound the window (default: last 30 days, hard max one year).
+    // The legacy `since` parameter keeps its exact contract — a pure lower
+    // bound with no upper cap and an unbounded total — so existing callers
+    // never change semantics, even for future-dated bounds.
+    enum Bounds<'a> {
+        LegacySince(&'a str),
+        Window(UsageWindow),
+    }
+    let bounds = if params.contains_key("from") || params.contains_key("to") {
+        match parse_usage_window(
+            params.get("from").map(String::as_str),
+            params.get("to").map(String::as_str),
+            time::OffsetDateTime::now_utc(),
+        ) {
+            Ok(window) => Bounds::Window(window),
+            Err((status, message)) => return err(status, &message),
+        }
+    } else {
+        match since.as_deref() {
+            Some(lower) => Bounds::LegacySince(lower),
+            None => match parse_usage_window(None, None, time::OffsetDateTime::now_utc()) {
+                Ok(window) => Bounds::Window(window),
+                Err((status, message)) => return err(status, &message),
+            },
+        }
+    };
+    match bounds {
+        Bounds::LegacySince(lower) => {
+            // Store reads run off the async executor — the Postgres backend blocks on its
+            // retained runtime handle and must never run inside a task (SQLite only got this
+            // for free by being fast).
+            let by_owned = by.to_string();
+            let lower_owned = lower.to_string();
+            let (total, buckets) = tokio::task::spawn_blocking(move || {
+                let total = store.grand_total().ok();
+                let buckets =
+                    dimension_buckets_between(&store, &by_owned, Some(&lower_owned), None);
+                (total, buckets)
+            })
+            .await
+            .unwrap_or((None, None));
+            Json(json!({
+                "dimension": by,
+                "since": since,
+                "total": total,
+                "buckets": buckets.unwrap_or_default(),
+            }))
+            .into_response()
+        }
+        Bounds::Window(window) => {
+            let from = window.from.clone();
+            let to = window.to.clone();
+            let by_owned = by.to_string();
+            let (total, buckets) = tokio::task::spawn_blocking(move || {
+                let total = store.grand_total_between(&from, &to).ok();
+                let buckets = dimension_buckets_between(&store, &by_owned, Some(&from), Some(&to));
+                (total, buckets)
+            })
+            .await
+            .unwrap_or((None, None));
+            Json(json!({
+                "dimension": by,
+                "since": since,
+                "window": {"from": window.from, "to": window.to, "source": window.source},
+                "advisory": window.advisory,
+                "total": total,
+                "buckets": buckets.unwrap_or_default(),
+            }))
+            .into_response()
+        }
+    }
 }
 
 /// Run admitted work off the async executor. The blocking closure owns admission, so dropping
@@ -1508,7 +1674,7 @@ pub(crate) async fn usage_diagnostics(
     {
         return response;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured",
@@ -1577,29 +1743,34 @@ pub(crate) async fn usage_run(
     if let Err(r) = require_access(&state, &headers, crate::auth::Permission::Read, false).await {
         return r;
     }
-    let Some(store) = state.store.clone() else {
+    let Some(store) = state.usage_store.clone() else {
         return err(
             StatusCode::SERVICE_UNAVAILABLE,
             "usage store not configured (set SANDHI_STORE)",
         );
     };
-    match store.run_cost_tree(&run_id) {
-        Ok(Some(tree)) => Json(json!({ "run": tree })).into_response(),
-        Ok(None) => err(
+    // Off the async executor (the Postgres backend blocks on its own runtime handle).
+    let task_store = Arc::clone(&store);
+    let task_run = run_id.clone();
+    match tokio::task::spawn_blocking(move || task_store.run_cost_tree(&task_run)).await {
+        Ok(Ok(Some(tree))) => Json(json!({ "run": tree })).into_response(),
+        Ok(Ok(None)) => err(
             StatusCode::NOT_FOUND,
             "unknown run id (no usage event carries it)",
         ),
-        Err(e) => err(
+        Ok(Err(e)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("run query failed: {e}"),
         ),
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "run query failed"),
     }
 }
 
-fn dimension_buckets(
-    store: &Arc<sandhi_store::SqliteStore>,
+fn dimension_buckets_between(
+    store: &Arc<dyn sandhi_store::UsageStore>,
     by: &str,
-    since: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
 ) -> Option<Vec<Value>> {
     let validate = |dim: &str| -> bool {
         matches!(
@@ -1618,8 +1789,18 @@ fn dimension_buckets(
     if !validate(by) {
         return None;
     }
-    let buckets: Vec<sandhi_store::Bucket> = if let Some(since) = since {
-        store.totals_since(by, since).ok()??
+    let col = match by {
+        "subject" | "user" => "subject_id",
+        "group" => "group_id",
+        "provider" => "provider",
+        "model" => "model",
+        "key" | "virtual_key" => "virtual_key_id",
+        "session" => "session_id",
+        "run" => "run_id",
+        _ => return None,
+    };
+    let buckets: Vec<sandhi_store::Bucket> = if from.is_some() || to.is_some() {
+        store.totals_grouped_between(col, from, to).ok()?
     } else {
         match by {
             "subject" | "user" => store.totals_by_subject().ok()?,
@@ -3162,5 +3343,89 @@ mod vault_acl_projection_tests {
             vault_acl_response(&entry(None), Some(&plan("legacy_domain"))).unwrap()["class"],
             "legacy_domain"
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_window_tests {
+    use super::*;
+
+    fn parse<'a>(
+        from: Option<&'a str>,
+        to: Option<&'a str>,
+    ) -> Result<UsageWindow, (StatusCode, String)> {
+        parse_usage_window(from, to, time::OffsetDateTime::now_utc())
+    }
+
+    #[test]
+    fn default_window_is_last_thirty_days_ending_now() {
+        let now = time::OffsetDateTime::now_utc();
+        let window = parse_usage_window(None, None, now).unwrap();
+        assert_eq!(window.source, "default");
+        assert!(window.advisory.is_none());
+        let to =
+            time::OffsetDateTime::parse(&window.to, &time::format_description::well_known::Rfc3339)
+                .unwrap();
+        let from = time::OffsetDateTime::parse(
+            &window.from,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(to, now.to_utc());
+        assert_eq!((to - from).whole_days(), 30);
+    }
+
+    #[test]
+    fn offset_bearing_inputs_canonicalize_to_utc() {
+        // +05:30 offset: semantically 2026-01-01T18:30:00Z — stored rows are
+        // UTC "…Z", so the persisted bound must be the canonical UTC form,
+        // not the offset-bearing literal.
+        let window = parse(Some("2026-01-02T00:00:00+05:30"), None).unwrap();
+        assert_eq!(window.from, "2026-01-01T18:30:00Z");
+    }
+
+    #[test]
+    fn date_only_to_covers_its_day_and_date_max_is_rejected_not_a_panic() {
+        let window = parse(Some("2026-07-01"), Some("2026-07-02")).unwrap();
+        assert_eq!(window.from, "2026-07-01T00:00:00Z");
+        assert_eq!(window.to, "2026-07-03T00:00:00Z");
+        assert_eq!(window.source, "explicit");
+        // 9999-12-31 has no successor day: a 400, never a handler panic.
+        let result = parse(None, Some("9999-12-31"));
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn inverted_bounds_and_year_zero_are_refused() {
+        assert_eq!(
+            parse(Some("2026-09-01"), Some("2026-08-01")).unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            parse(Some("2026-01-02T00:00:00Z"), Some("2026-01-02T00:00:00Z"))
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Year 0 with the 30-day default would fall outside the RFC-3339
+        // representable range: refused, never an empty-string bound.
+        let result = parse(None, Some("0000-01-01"));
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert!(parse(Some("not-a-date"), None).is_err());
+    }
+
+    #[test]
+    fn oversize_range_clamps_from_and_sets_advisory() {
+        let window = parse(Some("2020-01-01"), Some("2026-08-20")).unwrap();
+        assert!(window.advisory.unwrap().contains("direct database"));
+        let to =
+            time::OffsetDateTime::parse(&window.to, &time::format_description::well_known::Rfc3339)
+                .unwrap();
+        let from = time::OffsetDateTime::parse(
+            &window.from,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!((to - from).whole_days(), 366);
     }
 }

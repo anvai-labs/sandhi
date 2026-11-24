@@ -295,8 +295,14 @@ def seed(gateway):
 
 def public_evidence(client):
     budgets = get(client, "/dashboard/api/budgets")["budgets"]
+    # The usage payload now carries a per-request window envelope (bounds are
+    # computed from the request time), so byte-equality across a restart must
+    # compare the evidence content only, not the envelope.
+    usage = get(client, "/dashboard/api/usage")
+    usage.pop("window", None)
+    usage.pop("advisory", None)
     return {
-        "usage": get(client, "/dashboard/api/usage"),
+        "usage": usage,
         "budgets": sorted(budgets, key=lambda budget: budget["scope"]),
         "alerts": get(client, "/admin/alerts"),
         "keys": get(client, "/admin/keys/virtual"),
@@ -428,7 +434,10 @@ def test_real_sigkill_preserves_unexpired_lease_without_fabricating_usage(
         assert denied.status_code == 429, denied.text
         assert len(gated_provider.requests) == 3
         assert leases(source, shards) == admitted
-        assert get(restarted.client, "/dashboard/api/usage") == baseline["usage"]
+        usage = get(restarted.client, "/dashboard/api/usage")
+        usage.pop("window", None)
+        usage.pop("advisory", None)
+        assert usage == baseline["usage"]
         # The unresolved durable execution still holds both liabilities; it
         # cannot claim a clean accounting shutdown or fabricate a receipt.
         restarted.stop(expected_status=124)

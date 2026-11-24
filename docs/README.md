@@ -24,6 +24,7 @@ mistaken for shipped behavior.
 | How do I configure backends and logical models? | [Backend operator guide](operator/backends.md); fixed and logical routes, compatible affinity, cache declarations and credential references |
 | How do embedded clients select compatible endpoint usage conventions? | [Shared endpoint profiles](adr/0039-shared-embedded-endpoint-profiles.md) and [explicit gateway peer](adr/0041-explicit-gateway-peer-contract.md): client dialect, source convention and one server cache compiler |
 | What store and execution contract does HTTP require? | [Mandatory durable owner](adr/0043-mandatory-durable-http-execution.md) and [0.17.1 upgrade](releases/v0.17.1.md): original file/shard1, removed flag, paired holds and shared serving lifecycle |
+| Where does the usage history live? | [Postgres usage store](operator/postgres-usage-store.md): `SANDHI_USAGE_DSN` selects the optional PostgreSQL backend behind the `UsageStore` seam (schema auto-init, pgdatalake lakehouse recipe, SQLite migration); the enforcement ledger stays SQLite |
 | What authorizes native continuation? | [Source-issued native ownership](adr/0044-native-reference-ownership.md) and [backend operator guide](operator/backends.md#native-reference-ownership): same-ledger proof, original deadlines and no caller-ID adoption |
 | How do buffered calls preserve source accounting and tool fields? | [Shared buffered qualification](adr/0040-shared-buffered-source-qualification.md): ordinary/accounted source semantics, terminal-only Codex aggregation and deterministic refusal |
 | Does the routing goal include native Gemini clients? | Yes; [Gemini inventory and fidelity gaps](reviews/gemini-router-cache-inventory-2026-11-11.md) and the four-ingress matrix in TD-0034 |
@@ -128,6 +129,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0045](adr/0045-unified-model-routing-configuration.md) | Proposed typed TOML source manifest, canonical JSON exchange and shared Sandhi/Victor routing vocabulary |
 | [0046](adr/0046-hierarchical-rolling-token-budgets.md) | Independent hourly/daily/weekly/monthly/lifetime caps per scope using immutable trailing settlement time |
 | [0047](adr/0047-streaming-deadline-hot-apply-and-smart-body-estimate.md) | Streaming deadlines hot-apply via config apply; token-scaled body estimate raises only the global default; base body default 540 s |
+| [0048](adr/0048-aged-liability-release-and-recovery-convergence.md) | Maintenance sweep releases budget holds of unresolved execution intents past a 24 h retention (logical stamp, evidence retained); recovery cursor converges and readiness recovers |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |

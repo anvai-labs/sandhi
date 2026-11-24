@@ -2237,3 +2237,143 @@ fn recovery_scope_inventory_is_bounded_and_freezes_new_admissions() {
         ));
     }
 }
+
+#[test]
+fn aged_unresolved_liability_releases_hold_and_classifies_terminal() {
+    // ADR-0048: a tracked intent admitted past the retention window with no
+    // observation, fence or receipt is the incident class — released uncharged,
+    // evidence retained, no receipt fabricated.
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_with_intent_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        1
+    );
+    // Capacity freed; spend untouched; no settlement receipt written.
+    assert_eq!(ledger.reserved_durable("team").unwrap(), 0);
+    assert_eq!(ledger.spent_durable("team").unwrap(), 0);
+    assert_eq!(count(&ledger), 0);
+    // Classification is terminal-by-policy, with the stamp recorded on the row.
+    let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].state, RecoveryState::ReleasedAfterRetention);
+    let stamp: Option<i64> = ledger
+        .conn
+        .query_row(
+            "SELECT liability_released_at FROM budget_execution_intent WHERE execution_id = ?1",
+            [&intent.execution_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(stamp.is_some());
+    // Idempotent: a second sweep releases nothing further.
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn fresh_or_terminal_intents_are_never_released() {
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    // Aged MissingObservation (release target)…
+    let IntentAdmission::Admitted(aged) = ledger
+        .reserve_with_intent_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    // …a fresh unresolved intent (still inside the window)…
+    let fresh = tracked(&mut ledger);
+    // …an aged ReadyToSettle intent (final usage exists — recovery settles it).
+    let IntentAdmission::Admitted(settleable) = ledger
+        .reserve_with_intent_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    ledger
+        .record_terminal_durable("team", &settleable.execution_id, &observed_usage(), 1_000)
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        1
+    );
+    let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+    let states: Vec<_> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.execution_id.clone(), entry.state.clone()))
+        .collect();
+    assert!(states.contains(&(
+        aged.execution_id.clone(),
+        RecoveryState::ReleasedAfterRetention
+    )));
+    assert!(states.iter().any(|(id, state)| id == &fresh.execution_id
+        && matches!(state, RecoveryState::MissingObservation)));
+    assert!(states
+        .iter()
+        .any(|(id, state)| id == &settleable.execution_id
+            && matches!(state, RecoveryState::ReadyToSettle)));
+    // The settleable intent still settles normally after the sweep skipped it.
+    ledger
+        .settle_terminal_durable("team", &settleable.execution_id)
+        .unwrap();
+    assert!(ledger.spent_durable("team").unwrap() > 0);
+}
+
+#[test]
+fn settled_intents_survive_the_release_sweep_untouched() {
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    let intent = tracked(&mut ledger);
+    ledger
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 1_000)
+        .unwrap();
+    ledger
+        .settle_terminal_durable("team", &intent.execution_id)
+        .unwrap();
+    let settled_before = count(&ledger);
+    let now = OffsetDateTime::now_utc();
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, now)
+            .unwrap(),
+        0
+    );
+    let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+    assert!(matches!(page.entries[0].state, RecoveryState::Settled(_)));
+    assert_eq!(count(&ledger), settled_before);
+}
