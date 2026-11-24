@@ -22,6 +22,8 @@
 //! Listener TLS and buffered deadlines are startup-only sections: preview/apply report them as
 //! `restart required`, while process bootstrap validates and activates it before bind. Live
 //! certificate replacement belongs to TD-0017 P2 and is not smuggled into desired-state apply.
+//! Streaming deadlines are the exception (ADR-0047): `POST /admin/config/apply` validates their
+//! endpoint references against the registry as of that apply and activates the policy live.
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -33,7 +35,8 @@ pub struct SandhiFileConfig {
     /// Buffered upstream limits are validated at startup; apply requires a restart.
     #[serde(default)]
     pub buffered_deadlines: Option<crate::deadlines::BufferedDeadlines>,
-    /// Complete streaming limits, activated only at startup.
+    /// Complete streaming limits with the token-scaled body estimate; activated
+    /// live by `POST /admin/config/apply` (no restart, ADR-0047).
     #[serde(default)]
     pub streaming_deadlines: Option<crate::deadlines::StreamingDeadlines>,
     /// Optional listener TLS configuration. Paths are reviewable configuration,
@@ -357,6 +360,95 @@ mod tests {
         ] {
             assert!(streaming_from_json(text).is_err());
         }
+    }
+
+    #[test]
+    fn streaming_estimate_defaults_reject_invalid_params_and_materialize_max() {
+        use crate::deadlines::streaming_from_json;
+        let policy = streaming_from_json(
+            r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":200,"body_ms":1000}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            policy.report()["estimate"],
+            serde_json::json!({"ms_per_output_token":20,"headroom_factor":2.0,"max_body_ms":4900})
+        );
+        for policy_json in [
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"nope":1}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"ms_per_output_token":0}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"headroom_factor":0}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"headroom_factor":-1.0}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"headroom_factor":1000.0}}}),
+            // Would quantize to a zero milli-factor and silently disable scaling.
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"headroom_factor":0.0004}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1,"idle_ms":1,"body_ms":1},"estimate":{"max_body_ms":0}}}),
+            serde_json::json!({"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":1,"body_ms":1},"estimate":{"max_body_ms":4901}}}),
+        ] {
+            assert!(
+                streaming_from_json(&policy_json.to_string()).is_err(),
+                "accepted {policy_json}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_estimate_scales_only_unoverridden_global_resolution() {
+        use crate::deadlines::streaming_from_json;
+        let policy = streaming_from_json(
+            r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":200,"body_ms":1000},
+            "endpoints":{"zai:a":{"default":{"setup_ms":200,"idle_ms":300,"body_ms":2000},
+            "models":{"m":{"setup_ms":300,"idle_ms":400,"body_ms":3000}}}}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        for (reference, model, tokens, expected_body) in [
+            // Explicit endpoint defaults and exact-model overrides are authoritative.
+            ("zai:a", "m", Some(200u64), 3000u64),
+            ("zai:a", "M", Some(200), 2000),
+            // Estimate below the resolved floor never shrinks it.
+            ("other:x", "m", Some(10), 1000),
+            // 200 * 20ms * 2.0 = 8000 capped at max_body_ms (ceiling - setup).
+            ("other:x", "m", Some(200), 4900),
+            // Saturating arithmetic: no overflow panic, still capped.
+            ("other:x", "m", Some(u64::MAX), 4900),
+            // Without a token budget the policy stays static.
+            ("other:x", "m", None, 1000),
+        ] {
+            let (limits, _) = policy.resolve_for_request(reference, model, tokens);
+            assert_eq!(
+                limits.body_ms(),
+                expected_body,
+                "{reference}/{model}/{tokens:?}"
+            );
+        }
+        // Escape hatch: max_body_ms below the floor disables scaling entirely.
+        let pinned = streaming_from_json(
+            r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":100,"idle_ms":200,"body_ms":1000},"estimate":{"max_body_ms":500}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let (limits, _) = pinned.resolve_for_request("other:x", "m", Some(200));
+        assert_eq!(limits.body_ms(), 1000);
+    }
+
+    #[test]
+    fn streaming_default_body_is_540s_and_the_estimate_fits_the_ceiling() {
+        use crate::deadlines::{Source, StreamingDeadlines};
+        let policy = StreamingDeadlines::default();
+        let (limits, source) = policy.resolve("", "");
+        assert_eq!(source, Source::Global);
+        assert_eq!(limits.body_ms(), 540_000);
+        assert_eq!(limits.dispatch_duration().as_millis(), 570_000);
+        assert_eq!(
+            limits.body_lifetime().duration(),
+            std::time::Duration::from_millis(540_000)
+        );
+        // The incident shape: a 32K-token completion at the default estimate
+        // saturates max_body_ms (ceiling - setup) without exceeding the ceiling.
+        let (estimated, _) = policy.resolve_for_request("", "m", Some(32_768));
+        assert_eq!(estimated.body_ms(), 810_000);
+        assert_eq!(estimated.dispatch_duration().as_millis(), 840_000u128);
     }
 
     #[test]

@@ -267,8 +267,11 @@ pub struct ProxyState {
     pub buffered_deadlines: Option<deadlines::BufferedDeadlines>,
     /// Operator-owned output default when a generation client omits a limit.
     pub default_max_output_tokens: u64,
-    /// Startup-only, per-authorized-route streaming setup/idle/body limits.
-    pub streaming_deadlines: Option<deadlines::StreamingDeadlines>,
+    /// Per-authorized-route streaming setup/idle/body limits. Interior-mutable:
+    /// seeded at startup and hot-applied by `POST /admin/config/apply`; readers
+    /// clone an `Arc` snapshot so an apply never tears an in-flight resolution.
+    pub streaming_deadlines:
+        std::sync::RwLock<Option<std::sync::Arc<deadlines::StreamingDeadlines>>>,
     /// One-shot lifecycle; dispatch authorization stops atomically at shutdown cutoff.
     pub lifecycle: Arc<lifecycle::Lifecycle>,
     /// Same-port probe window, included in the total grace and clamped to leave drain time.
@@ -391,6 +394,33 @@ pub struct ProxyState {
 }
 
 impl ProxyState {
+    /// Snapshot the active streaming policy. The `Arc` clone releases the lock
+    /// immediately; callers must not hold the guard across an `await`.
+    #[must_use]
+    pub fn streaming_policy(&self) -> Option<std::sync::Arc<deadlines::StreamingDeadlines>> {
+        self.streaming_deadlines
+            .read()
+            .expect("streaming deadlines poisoned")
+            .clone()
+    }
+
+    /// Install (or remove) the active streaming policy. Used at startup and by
+    /// the admin config-apply path; both validate before calling.
+    pub fn set_streaming_deadlines(&self, policy: Option<deadlines::StreamingDeadlines>) {
+        *self
+            .streaming_deadlines
+            .write()
+            .expect("streaming deadlines poisoned") = policy.map(std::sync::Arc::new);
+    }
+
+    /// Registry-membership predicate shared by the startup and apply-time
+    /// deadline endpoint gates, so the two can never diverge. The providers
+    /// lock moves into the closure; never hold it across an `await`.
+    pub fn registered_reference(&self) -> impl Fn(&str) -> bool + '_ {
+        let providers = self.providers.lock().expect("providers poisoned");
+        move |reference: &str| providers.contains_key(reference)
+    }
+
     /// Build a state with the operator surface defaulted off (no vault, no admin token, no
     /// client-credentials registry). The
     /// existing demo + request-handling path is unchanged.
@@ -409,7 +439,9 @@ impl ProxyState {
             lifecycle: Arc::new(lifecycle::Lifecycle::new()),
             buffered_deadlines: None,
             default_max_output_tokens: DEFAULT_OUTPUT_CEILING,
-            streaming_deadlines: Some(deadlines::StreamingDeadlines::default()),
+            streaming_deadlines: std::sync::RwLock::new(Some(std::sync::Arc::new(
+                deadlines::StreamingDeadlines::default(),
+            ))),
             shutdown_quiesce: Duration::from_secs(1),
             keys,
             ledger: Mutex::new(ledger),
@@ -2272,7 +2304,10 @@ async fn list_models(State(state): State<Arc<ProxyState>>, headers: HeaderMap) -
 /// different limits, the entry says `multiple_targets` rather than pretending one policy is
 /// authoritative before affinity selects a backend.
 fn streaming_policy_metadata(state: &ProxyState, models: &[routing::DiscoveredModel]) -> Value {
-    let Some(policy) = state.streaming_deadlines.as_ref() else {
+    // Raw policy limits, not the token-scaled estimate: discovery has no request
+    // context. The effective body can rise above the advertised floor up to the
+    // configured `estimate.max_body_ms` (docs/operator/streaming-deadlines.md).
+    let Some(policy) = state.streaming_policy() else {
         return Value::Null;
     };
     let mut entries = serde_json::Map::new();

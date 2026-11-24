@@ -127,6 +127,7 @@ TD-0028 keeps its merge/deployment gates separate from the remaining diagnostic 
 | [0044](adr/0044-native-reference-ownership.md) | Same-ledger source-issued native proof, original request/shutdown bounds and no implicit external adoption |
 | [0045](adr/0045-unified-model-routing-configuration.md) | Proposed typed TOML source manifest, canonical JSON exchange and shared Sandhi/Victor routing vocabulary |
 | [0046](adr/0046-hierarchical-rolling-token-budgets.md) | Independent hourly/daily/weekly/monthly/lifetime caps per scope using immutable trailing settlement time |
+| [0047](adr/0047-streaming-deadline-hot-apply-and-smart-body-estimate.md) | Streaming deadlines hot-apply via config apply; token-scaled body estimate raises only the global default; base body default 540 s |
 | [0002](adr/0002-provider-transport-scope-and-modality-admission.md) | Chat-completion transport scope and the admission gate for new modalities |
 | [0003](adr/0003-provider-adapter-authoring-and-codegen.md) | Hand-written transports; generated models/oracles only where bounded |
 | [0004](adr/0004-two-plane-proxy-and-enforcement-boundary.md) | Transparent and translation planes; custody-based enforcement boundary |
