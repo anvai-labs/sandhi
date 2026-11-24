@@ -1448,6 +1448,94 @@ pub(crate) async fn budget_usage(
 }
 
 /// `GET /admin/usage?by=…&since=…` — attribution aggregates (wraps the durable store).
+/// A parsed, validated, bounded usage query window (ADR dashboard windowing).
+/// Bounds are canonical UTC RFC-3339 strings, `from` inclusive and `to`
+/// exclusive — matching the lexicographic comparison over the `occurred_at`
+/// index. Every windowed query is date-bounded; the hard maximum exists so a
+/// dashboard request can never become an unbounded scan.
+pub(crate) struct UsageWindow {
+    pub from: String,
+    pub to: String,
+    pub source: &'static str,
+    pub advisory: Option<String>,
+}
+
+/// Default lookback when no explicit window is supplied.
+const USAGE_WINDOW_DEFAULT_DAYS: i64 = 30;
+/// Hard maximum: beyond one year the dashboard advises direct database queries
+/// instead of widening an HTTP aggregate.
+const USAGE_WINDOW_MAX_DAYS: i64 = 366;
+
+pub(crate) fn parse_usage_window(
+    from: Option<&str>,
+    to: Option<&str>,
+    now: time::OffsetDateTime,
+) -> Result<UsageWindow, (StatusCode, String)> {
+    use time::format_description::well_known::Rfc3339;
+    use time::Duration;
+    let parse_bound = |raw: &str, is_from: bool| -> Result<time::OffsetDateTime, String> {
+        if let Ok(ts) = time::OffsetDateTime::parse(raw, &Rfc3339) {
+            return Ok(ts);
+        }
+        // Date-only (YYYY-MM-DD), interpreted as UTC midnight. A `to` date
+        // advances one day so the exclusive bound covers that whole day.
+        let parts = raw.split('-').collect::<Vec<_>>();
+        let day = (|| {
+            if parts.len() != 3 {
+                return Err(());
+            }
+            let year = parts[0].parse::<i32>().map_err(|_| ())?;
+            let month =
+                time::Month::try_from(parts[1].parse::<u8>().map_err(|_| ())?).map_err(|_| ())?;
+            let day = parts[2].parse::<u8>().map_err(|_| ())?;
+            time::Date::from_calendar_date(year, month, day).map_err(|_| ())
+        })()
+        .map_err(|_| format!("window bound {raw:?} must be RFC-3339 or a YYYY-MM-DD date"))?;
+        let midnight = day.with_time(time::Time::MIDNIGHT).assume_utc();
+        Ok(if is_from {
+            midnight
+        } else {
+            midnight + Duration::days(1)
+        })
+    };
+    let to = match to {
+        Some(raw) => parse_bound(raw, false).map_err(|m| (StatusCode::BAD_REQUEST, m))?,
+        None => now,
+    };
+    let (mut from, source, mut advisory) = match from {
+        Some(raw) => (
+            parse_bound(raw, true).map_err(|m| (StatusCode::BAD_REQUEST, m))?,
+            "explicit",
+            None,
+        ),
+        None => (
+            to - Duration::days(USAGE_WINDOW_DEFAULT_DAYS),
+            "default",
+            None,
+        ),
+    };
+    if from >= to {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "usage window 'from' must precede 'to'".into(),
+        ));
+    }
+    if to - from > Duration::days(USAGE_WINDOW_MAX_DAYS) {
+        from = to - Duration::days(USAGE_WINDOW_MAX_DAYS);
+        advisory = Some(format!(
+            "requested range exceeded the {USAGE_WINDOW_MAX_DAYS}-day maximum; \
+             showing the most recent {USAGE_WINDOW_MAX_DAYS} days of the requested \
+             window — use direct database queries for older history"
+        ));
+    }
+    Ok(UsageWindow {
+        from: from.format(&Rfc3339).unwrap_or_default(),
+        to: to.format(&Rfc3339).unwrap_or_default(),
+        source,
+        advisory,
+    })
+}
+
 pub(crate) async fn usage(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
@@ -1464,16 +1552,59 @@ pub(crate) async fn usage(
     };
     let by = params.get("by").map(String::as_str).unwrap_or("subject");
     let since = params.get("since").cloned();
-
-    let total = store.grand_total().ok();
-    let buckets = dimension_buckets(&store, by, since.as_deref());
-    Json(json!({
-        "dimension": by,
-        "since": since,
-        "total": total,
-        "buckets": buckets.unwrap_or_default(),
-    }))
-    .into_response()
+    // `from`/`to` bound the window (default: last 30 days, hard max one year).
+    // The legacy `since` parameter keeps its exact contract — a pure lower
+    // bound with no upper cap and an unbounded total — so existing callers
+    // never change semantics, even for future-dated bounds.
+    enum Bounds<'a> {
+        LegacySince(&'a str),
+        Window(UsageWindow),
+    }
+    let bounds = if params.contains_key("from") || params.contains_key("to") {
+        match parse_usage_window(
+            params.get("from").map(String::as_str),
+            params.get("to").map(String::as_str),
+            time::OffsetDateTime::now_utc(),
+        ) {
+            Ok(window) => Bounds::Window(window),
+            Err((status, message)) => return err(status, &message),
+        }
+    } else {
+        match since.as_deref() {
+            Some(lower) => Bounds::LegacySince(lower),
+            None => match parse_usage_window(None, None, time::OffsetDateTime::now_utc()) {
+                Ok(window) => Bounds::Window(window),
+                Err((status, message)) => return err(status, &message),
+            },
+        }
+    };
+    match bounds {
+        Bounds::LegacySince(lower) => {
+            let total = store.grand_total().ok();
+            let buckets = dimension_buckets_between(&store, by, Some(lower), None);
+            Json(json!({
+                "dimension": by,
+                "since": since,
+                "total": total,
+                "buckets": buckets.unwrap_or_default(),
+            }))
+            .into_response()
+        }
+        Bounds::Window(window) => {
+            let total = store.grand_total_between(&window.from, &window.to).ok();
+            let buckets =
+                dimension_buckets_between(&store, by, Some(&window.from), Some(&window.to));
+            Json(json!({
+                "dimension": by,
+                "since": since,
+                "window": {"from": window.from, "to": window.to, "source": window.source},
+                "advisory": window.advisory,
+                "total": total,
+                "buckets": buckets.unwrap_or_default(),
+            }))
+            .into_response()
+        }
+    }
 }
 
 /// Run admitted work off the async executor. The blocking closure owns admission, so dropping
@@ -1596,10 +1727,11 @@ pub(crate) async fn usage_run(
     }
 }
 
-fn dimension_buckets(
+fn dimension_buckets_between(
     store: &Arc<sandhi_store::SqliteStore>,
     by: &str,
-    since: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
 ) -> Option<Vec<Value>> {
     let validate = |dim: &str| -> bool {
         matches!(
@@ -1618,8 +1750,18 @@ fn dimension_buckets(
     if !validate(by) {
         return None;
     }
-    let buckets: Vec<sandhi_store::Bucket> = if let Some(since) = since {
-        store.totals_since(by, since).ok()??
+    let col = match by {
+        "subject" | "user" => "subject_id",
+        "group" => "group_id",
+        "provider" => "provider",
+        "model" => "model",
+        "key" | "virtual_key" => "virtual_key_id",
+        "session" => "session_id",
+        "run" => "run_id",
+        _ => return None,
+    };
+    let buckets: Vec<sandhi_store::Bucket> = if from.is_some() || to.is_some() {
+        store.totals_grouped_between(col, from, to).ok()?
     } else {
         match by {
             "subject" | "user" => store.totals_by_subject().ok()?,

@@ -62,6 +62,23 @@ const pending = new Set();
 const panels = new Map();
 let usageData = null;
 let attributionQuery = "";
+// Date-bounded usage window (YYYY-MM-DD strings). Empty = server default: the
+// last 30 days, hard-capped at one year with an advisory when a wider range is
+// requested. Every dashboard aggregate is window-bound; nothing scans unbounded.
+let usageWindowFrom = "";
+let usageWindowTo = "";
+
+function isoDayAgo(days) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function usageWindowQuery() {
+  const from = usageWindowFrom || isoDayAgo(30);
+  const to = usageWindowTo || isoDayAgo(0);
+  return `/dashboard/api/usage?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&bucket=month`;
+}
 try { sessionStorage.removeItem("sandhi_admin_token"); } catch { /* Storage may be disabled. */ }
 function refreshTokenState() {
   const on = signedIn();
@@ -305,18 +322,41 @@ function tbl(id, title, noun, rows) {
       `<tr><td colspan=9>${attributionQuery ? "No matching rows" : "no data yet"}</td></tr>`, noun, true, "table-help");
 }
 
+function monthlyWindowsTable(windows) {
+  if (!windows || !windows.length) {
+    return '<h3>Charge windows</h3><p class="muted">No usage in the selected window.</p>';
+  }
+  const rows = windows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${fmt(r.calls)}</td>`
+    + `<td class="num">${fmt(r.tokens_in)}</td><td class="num">${fmt(r.tokens_out)}</td>`
+    + `<td class="num">${fmt(r.cache_creation_tokens)}</td><td class="num">${fmt(r.cache_read_tokens)}</td>`
+    + `<td class="num">${fmt(r.billable_tokens)}</td></tr>`).join("");
+  return `<h3>Charge windows (calendar months)</h3><div class="table-wrap"><table>
+    <thead><tr><th>window</th><th class="num">calls</th><th class="num">fresh input</th><th class="num">output</th>
+    <th class="num">cache write</th><th class="num">cache read</th><th class="num">observed units</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
 function loadUsage() {
-  return loadPanel("usage", "/dashboard/api/usage", d => {
+  return loadPanel("usage", usageWindowQuery(), d => {
     requireFields(d, ["by_subject", "by_group", "by_provider", "by_model"], ["total"]);
     usageData = d;
     const t = d.total;
+    const advisory = d.advisory
+      ? `<p class="muted" role="note">⚠ ${esc(d.advisory)}</p>`
+      : "";
+    const toolbar = `<div class="table-toolbar">
+      <label for="usage-from">From</label><input id="usage-from" type="date" value="${esc(usageWindowFrom)}">
+      <label for="usage-to">To</label><input id="usage-to" type="date" value="${esc(usageWindowTo)}">
+      <button id="usage-window-apply" type="button">Apply window</button>
+      <span class="muted">Default: last 30 days. Ranges beyond one year are capped — use direct database queries for older history.</span></div>`;
     return '<div class="cards" id="cards">' +
       [["calls", fmt(t.calls)], ["observed units", fmt(t.billable_tokens)], ["fresh input", fmt(t.tokens_in)], ["output tokens", fmt(t.tokens_out)],
        ["cache read", cacheRead(t)], ["cache reporting coverage", cacheCoverageLabel(t)],
        ["latency p50/p95", lat(t.latency)]]
       .map(([l, n]) => `<div class="card${l === "cache reporting coverage" || l === "latency p50/p95" ? " card-detail" : ""}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("")
-      + `</div>${tokenSplit(t)}<p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Historical rows retain their existing reasoning-overlap fallback. Aggregate observations do not establish per-request settlement or qualified source usage.</p><h3>Attribution</h3>
-      <div class="table-toolbar"><label for="usage-filter">Filter attribution</label><input id="usage-filter" type="search" value="${esc(attributionQuery)}" placeholder="Find a user, team, provider or model" maxlength="256"><span class="muted">Totals include all calls.</span></div>
+      + `</div>${tokenSplit(t)}${advisory}${monthlyWindowsTable(d.windows)}<p class="muted">Cache read is reported cache-read input (origin or explicit caller observation), not proof of backend reuse; cache write is an explicit accounting category, not proof of new KV state. Counts are neutral tokens, not prices or savings. Reporting coverage counts calls in each displayed aggregate; it is not a cache hit rate. Historical rows retain their existing reasoning-overlap fallback. Aggregate observations do not establish per-request settlement or qualified source usage.</p><h3>Attribution</h3>
+      ${toolbar}
+      <div class="table-toolbar"><label for="usage-filter">Filter attribution</label><input id="usage-filter" type="search" value="${esc(attributionQuery)}" placeholder="Find a user, team, provider or model" maxlength="256"><span class="muted">Totals cover the selected window.</span></div>
       <p id="table-help" class="muted">On narrow screens, scroll each table horizontally to see every column. Keyboard users can focus a table and use the arrow keys.</p><div id="tables">`
       + usageTables(d)
       + `</div>`;
@@ -885,6 +925,14 @@ document.addEventListener("input", event => {
   if (event.target.id !== "usage-filter" || !usageData) return;
   attributionQuery = event.target.value.slice(0, 256);
   document.getElementById("tables").innerHTML = usageTables(usageData);
+});
+// The usage datebox re-fetches with the selected window; the server bounds and
+// caps the range, so the inputs only ever shape one bounded query.
+document.addEventListener("click", async event => {
+  if (event.target.id !== "usage-window-apply") return;
+  usageWindowFrom = document.getElementById("usage-from")?.value || "";
+  usageWindowTo = document.getElementById("usage-to")?.value || "";
+  await loadUsage();
 });
 if (typeof ResizeObserver === "function") new ResizeObserver(entries => {
   document.documentElement.style.setProperty("--header-h", `${entries[0].target.getBoundingClientRect().height}px`);

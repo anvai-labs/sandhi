@@ -293,13 +293,34 @@ impl SqliteStore {
         col: &str,
         since: Option<&str>,
     ) -> rusqlite::Result<Vec<Bucket>> {
+        self.totals_grouped_between(col, since, None)
+    }
+
+    /// Totals grouped by a fixed column within `from` (inclusive) and `to`
+    /// (exclusive) RFC-3339 bounds. Both bounds are optional for compatibility
+    /// with the unbounded legacy callers; the dashboard window always supplies
+    /// both so the query stays date-bounded.
+    pub fn totals_grouped_between(
+        &self,
+        col: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> rusqlite::Result<Vec<Bucket>> {
         let conn = self.conn.lock().unwrap();
-        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match since {
-            Some(s) => (
+        let (where_clause, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (from, to) {
+            (Some(s), Some(t)) => (
+                "WHERE occurred_at >= ?1 AND occurred_at < ?2".into(),
+                vec![Box::new(s.to_string()), Box::new(t.to_string())],
+            ),
+            (Some(s), None) => (
                 "WHERE occurred_at >= ?1".into(),
                 vec![Box::new(s.to_string())],
             ),
-            None => ("WHERE 1=1".into(), vec![]),
+            (None, Some(t)) => (
+                "WHERE occurred_at < ?1".into(),
+                vec![Box::new(t.to_string())],
+            ),
+            (None, None) => ("WHERE 1=1".into(), vec![]),
         };
         let sql = format!(
             "SELECT COALESCE({col}, '(none)') AS k, COUNT(*), \
@@ -326,13 +347,56 @@ impl SqliteStore {
             })
         })?;
         let mut buckets: Vec<Bucket> = rows.collect::<rusqlite::Result<_>>()?;
-        let samples = Self::latency_samples(&conn, col, since)?;
+        let samples = Self::latency_samples(&conn, col, from)?;
         for b in &mut buckets {
             if let Some((d, t)) = samples.get(&b.key) {
                 b.latency = LatencySummary::from_samples(d, t);
             }
         }
         Ok(buckets)
+    }
+
+    /// Charge buckets grouped by calendar window (`bucket` = `"month"` or
+    /// `"day"` — SQLite strftime grouping over the RFC-3339 `occurred_at`
+    /// index), strictly bounded by `from` inclusive and `to` exclusive.
+    /// Ordered chronologically; no latency sampling — these are charge
+    /// windows, and the attribution tables above carry the latency view.
+    pub fn totals_windowed(
+        &self,
+        bucket: &str,
+        from: &str,
+        to: &str,
+    ) -> rusqlite::Result<Vec<Bucket>> {
+        let pattern = match bucket {
+            "month" => "%Y-%m",
+            "day" => "%Y-%m-%d",
+            _ => return Err(rusqlite::Error::InvalidParameterName(bucket.into())),
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT strftime('{pattern}', occurred_at) AS k, COUNT(*), \
+                COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} \
+             FROM usage_events WHERE occurred_at >= ?1 AND occurred_at < ?2 \
+             GROUP BY k ORDER BY k ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![from, to], |r| {
+            Ok(Bucket {
+                key: r.get(0)?,
+                calls: r.get::<_, i64>(1)? as u64,
+                tokens_in: r.get::<_, i64>(2)? as u64,
+                tokens_out: r.get::<_, i64>(3)? as u64,
+                cache_creation_tokens: r.get::<_, i64>(4)? as u64,
+                cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                reasoning_tokens: r.get::<_, i64>(6)? as u64,
+                billable_tokens: r.get::<_, i64>(7)? as u64,
+                latency: None,
+                cache_read_coverage: Some(cache_coverage(r, 8, r.get::<_, i64>(1)? as u64)?),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
     }
 
     /// Latency samples per group key, most recent first and bounded.
@@ -496,6 +560,40 @@ impl SqliteStore {
                     COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} FROM usage_events"
             ),
             [],
+            |r| {
+                Ok(Bucket {
+                    key: "total".to_string(),
+                    calls: r.get::<_, i64>(0)? as u64,
+                    tokens_in: r.get::<_, i64>(1)? as u64,
+                    tokens_out: r.get::<_, i64>(2)? as u64,
+                    cache_creation_tokens: r.get::<_, i64>(3)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(4)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(5)? as u64,
+                    billable_tokens: r.get::<_, i64>(6)? as u64,
+                    latency: latency.clone(),
+                    cache_read_coverage: Some(cache_coverage(r, 7, r.get::<_, i64>(0)? as u64)?),
+                })
+            },
+        )
+    }
+
+    /// Grand total bounded by `from` (inclusive) and `to` (exclusive) RFC-3339
+    /// bounds — the dashboard's windowed headline cards. Latency is sampled
+    /// from the lower-bounded recent history (approximate by design).
+    pub fn grand_total_between(&self, from: &str, to: &str) -> rusqlite::Result<Bucket> {
+        let conn = self.conn.lock().unwrap();
+        let samples = Self::latency_samples(&conn, "'total'", Some(from))?;
+        let latency = samples
+            .get("total")
+            .and_then(|(d, t)| LatencySummary::from_samples(d, t));
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), \
+                    COALESCE(SUM(cache_creation_tokens),0), COALESCE(SUM(cache_read_tokens),0), \
+                    COALESCE(SUM(reasoning_tokens),0), {BILLABLE_SQL}, {CACHE_COVERAGE_SQL} \
+                 FROM usage_events WHERE occurred_at >= ?1 AND occurred_at < ?2"
+            ),
+            params![from, to],
             |r| {
                 Ok(Bucket {
                     key: "total".to_string(),
@@ -923,6 +1021,56 @@ mod tests {
             assert_eq!(sql, fold, "SQL row must equal the core fold row");
         }
         assert_eq!(store.grand_total().unwrap(), agg.total());
+    }
+
+    #[test]
+    fn windowed_totals_are_calendar_bounded_and_exclusive_at_to() {
+        // Dashboard windowing: charge buckets group by calendar window over the
+        // occurred_at index; `from` is inclusive, `to` exclusive; unknown
+        // buckets are refused rather than scanning unbounded.
+        let store = SqliteStore::in_memory().unwrap();
+        let mk = |ts: &str, tin: u64| {
+            UsageEvent::new("r", ts, "openai", "m", Backend::External)
+                .with_attribution(Some("vk".into()), Some("alice".into()), Some("team".into()))
+                .with_tokens(tin, 1)
+        };
+        for (ts, tin) in [
+            ("2026-06-30T23:59:59Z", 1),
+            ("2026-07-01T00:00:00Z", 10),
+            ("2026-07-15T12:00:00Z", 20),
+            ("2026-08-01T00:00:00Z", 40),
+        ] {
+            store.emit(&mk(ts, tin));
+        }
+        let months = store
+            .totals_windowed("month", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].key, "2026-07");
+        assert_eq!(months[0].calls, 2);
+        assert_eq!(months[0].tokens_in, 30);
+        let total = store
+            .grand_total_between("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(total.calls, 2);
+        let days = store
+            .totals_windowed("day", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].key, "2026-07-01");
+        assert_eq!(days[1].key, "2026-07-15");
+        assert!(store
+            .totals_windowed("week", "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z")
+            .is_err());
+        let grouped = store
+            .totals_grouped_between(
+                "subject_id",
+                Some("2026-07-01T00:00:00Z"),
+                Some("2026-08-01T00:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].calls, 2);
     }
 
     #[test]

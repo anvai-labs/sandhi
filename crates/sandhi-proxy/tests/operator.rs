@@ -981,7 +981,12 @@ async fn usage_aggregates_by_dimension_and_since() {
     // By subject.
     let r = app
         .clone()
-        .oneshot(req("GET", "/admin/usage?by=subject", Some(TOKEN), None))
+        .oneshot(req(
+            "GET",
+            "/admin/usage?by=subject&from=2026-07-01&to=2026-07-02",
+            Some(TOKEN),
+            None,
+        ))
         .await
         .unwrap();
     let v = body_json(r).await;
@@ -990,7 +995,12 @@ async fn usage_aggregates_by_dimension_and_since() {
     // By model.
     let r = app
         .clone()
-        .oneshot(req("GET", "/admin/usage?by=model", Some(TOKEN), None))
+        .oneshot(req(
+            "GET",
+            "/admin/usage?by=model&from=2026-07-01&to=2026-07-02",
+            Some(TOKEN),
+            None,
+        ))
         .await
         .unwrap();
     let v = body_json(r).await;
@@ -1075,7 +1085,12 @@ async fn run_cost_tree_endpoint_serves_the_run_tree() {
 
     // The run dimension aggregates through the existing usage endpoint.
     let r = app
-        .oneshot(req("GET", "/admin/usage?by=run", Some(TOKEN), None))
+        .oneshot(req(
+            "GET",
+            "/admin/usage?by=run&from=2026-07-01&to=2026-07-02",
+            Some(TOKEN),
+            None,
+        ))
         .await
         .unwrap();
     let v = body_json(r).await;
@@ -1579,7 +1594,14 @@ async fn dashboard_usage_endpoint_now_includes_by_model() {
         .with_tokens(10, 5),
     );
     let app = build_app(state);
-    let r = app.oneshot(dash_req("/dashboard/api/usage")).await.unwrap();
+    // The dashboard is date-bounded by default (last 30 days), so the fixed
+    // fixture date needs an explicit window.
+    let r = app
+        .oneshot(dash_req(
+            "/dashboard/api/usage?from=2026-07-01&to=2026-07-02",
+        ))
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let body = body_json(r).await;
     let models: Vec<&str> = body["by_model"]
@@ -1589,6 +1611,126 @@ async fn dashboard_usage_endpoint_now_includes_by_model() {
         .map(|b| b["key"].as_str().unwrap())
         .collect();
     assert!(models.contains(&"gpt-4"));
+}
+
+#[tokio::test]
+async fn dashboard_usage_is_window_bounded_with_monthly_buckets_and_cap_advisory() {
+    // Windowing contract: bounds are canonical RFC-3339 (from inclusive, to
+    // exclusive), charge buckets group by calendar month, ranges beyond one
+    // year clamp to the most recent 366 days with a direct-query advisory,
+    // and inverted bounds are refused.
+    let state = admin_state();
+    let store = state.store.clone().unwrap();
+    let mk = |ts: &str, tin: u64| {
+        UsageEvent::new("r", ts, "openai", "gpt-4", sandhi_core::Backend::External)
+            .with_attribution(
+                Some("vk".into()),
+                Some("alice".into()),
+                Some("platform".into()),
+            )
+            .with_tokens(tin, 1)
+    };
+    store.emit(&mk("2026-06-30T23:59:59Z", 1));
+    store.emit(&mk("2026-07-05T00:00:00Z", 10));
+    store.emit(&mk("2026-08-05T00:00:00Z", 20));
+    let app = build_app(state);
+    let r = app
+        .clone()
+        .oneshot(dash_req(
+            "/dashboard/api/usage?from=2026-07-01&to=2026-09-01",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    assert_eq!(body["window"]["from"], "2026-07-01T00:00:00Z");
+    // Date-only `to` advances one day: the exclusive bound covers that day.
+    assert_eq!(body["window"]["to"], "2026-09-02T00:00:00Z");
+    assert_eq!(body["window"]["source"], "explicit");
+    assert_eq!(body["window"]["bucket"], "month");
+    assert!(body["advisory"].is_null());
+    assert_eq!(body["total"]["calls"], 2);
+    let windows = body["windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0]["key"], "2026-07");
+    assert_eq!(windows[0]["billable_tokens"], 11);
+    assert_eq!(windows[1]["key"], "2026-08");
+    assert_eq!(windows[1]["billable_tokens"], 21);
+
+    // A range beyond one year clamps and advises; the clamped `from` excludes
+    // the 2026-06 event even from the window bounds themselves.
+    let r = app
+        .clone()
+        .oneshot(dash_req(
+            "/dashboard/api/usage?from=2025-06-01&to=2026-08-20",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    assert!(body["advisory"]
+        .as_str()
+        .unwrap()
+        .contains("direct database"));
+    // The 366-day clamp reaches back to 2025-08, so the 2026-06 fixture event
+    // is inside the clamped window; only events older than a year are cut.
+    assert_eq!(body["total"]["calls"], 3);
+
+    // Inverted bounds are refused; so is an unknown bucket.
+    let r = app
+        .clone()
+        .oneshot(dash_req(
+            "/dashboard/api/usage?from=2026-09-01&to=2026-08-01",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    let r = app
+        .oneshot(dash_req(
+            "/dashboard/api/usage?from=2026-07-01&to=2026-08-01&bucket=week",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn admin_usage_default_window_is_thirty_days_and_honors_bounds() {
+    // /admin/usage defaults to the last 30 days (source "default") and honors
+    // explicit from/to; the legacy ?since= parameter maps onto `from`.
+    let state = admin_state();
+    let store = state.store.clone().unwrap();
+    store.emit(
+        &UsageEvent::new(
+            "r",
+            "2026-07-05T00:00:00Z",
+            "openai",
+            "gpt-4",
+            sandhi_core::Backend::External,
+        )
+        .with_attribution(
+            Some("vk".into()),
+            Some("alice".into()),
+            Some("platform".into()),
+        )
+        .with_tokens(10, 5),
+    );
+    let app = build_app(state);
+    let r = app
+        .oneshot(req(
+            "GET",
+            "/admin/usage?by=subject&from=2026-07-01&to=2026-08-01",
+            Some(TOKEN),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = body_json(r).await;
+    assert_eq!(body["window"]["from"], "2026-07-01T00:00:00Z");
+    assert_eq!(body["window"]["to"], "2026-08-02T00:00:00Z");
+    assert_eq!(body["total"]["calls"], 1);
+    assert_eq!(body["buckets"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
