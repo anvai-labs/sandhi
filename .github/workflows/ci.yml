@@ -158,7 +158,7 @@ jobs:
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           python3 scripts/check-release-version.py --version "$version"
-          cargo build --release --locked --features sentinelpass-ipc,policy-onnx --target "$TARGET" --bin sandhi-proxy --bin sandhi
+          cargo build --release --locked --features sentinelpass-ipc,policy-onnx,postgres --target "$TARGET" --bin sandhi-proxy --bin sandhi
           python3 scripts/smoke-release-binaries.py --binary-dir "target/$TARGET/release" --expected-version "$version"
 
   rust:
