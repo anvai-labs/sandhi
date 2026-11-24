@@ -525,15 +525,26 @@ fn diagnostics_sql(query: &DiagnosticQuery) -> String {
     let projection = FIELDS
         .iter()
         .map(|(name, kind)| {
+            // Timestamps project back to canonical UTC RFC-3339 text (matching
+            // the SQLite stored form); octet_length on a timestamptz column
+            // would be a prepare-time type error, and the type is structural.
+            let value_expr = match kind {
+                FieldKind::Text => name.to_string(),
+                FieldKind::Timestamp => format!(
+                    "to_char({name} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+                ),
+                FieldKind::Count | FieldKind::Boolean => name.to_string(),
+            };
             let valid = match kind {
                 FieldKind::Text => {
                     format!("{name} IS NOT NULL AND octet_length({name}) <= {MAX_FIELD_BYTES}")
                 }
+                FieldKind::Timestamp => format!("{name} IS NOT NULL"),
                 FieldKind::Count => format!("{name} IS NOT NULL AND {name} >= 0"),
                 FieldKind::Boolean => format!("{name} IS NOT NULL AND {name} IN (0,1)"),
             };
             // The second projection distinguishes an absent value from a rejected value.
-            format!("CASE WHEN {valid} THEN {name} ELSE NULL END, {name} IS NOT NULL")
+            format!("CASE WHEN {valid} THEN {value_expr} ELSE NULL END, {name} IS NOT NULL")
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -554,7 +565,8 @@ fn project_row(row: &PgRow) -> Value {
     let mut warnings = BTreeSet::new();
     for (index, (name, kind)) in FIELDS.iter().enumerate() {
         let canonical = match kind {
-            FieldKind::Text => row
+            // The Timestamp projection is already to_char text (canonical UTC).
+            FieldKind::Text | FieldKind::Timestamp => row
                 .try_get::<Option<String>, _>(index * 2)
                 .ok()
                 .flatten()
@@ -745,6 +757,13 @@ mod tests {
             let sql = diagnostics_sql(&query);
             assert!(sql.contains("ORDER BY id DESC LIMIT $2"), "{sql}");
             assert!(sql.contains("octet_length(request_id)"), "{sql}");
+            // occurred_at is timestamptz: guarded by NULL-ness only and
+            // projected to canonical UTC RFC-3339 text — never octet_length.
+            assert!(
+                sql.contains("to_char(occurred_at AT TIME ZONE 'UTC'"),
+                "{sql}"
+            );
+            assert!(!sql.contains("octet_length(occurred_at)"), "{sql}");
             assert!(!sql.contains("virtual_key_id"), "{sql}");
             assert!(!sql.contains("subject_id"), "{sql}");
             assert!(!sql.contains("group_id"), "{sql}");

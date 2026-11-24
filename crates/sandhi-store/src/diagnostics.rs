@@ -110,6 +110,9 @@ impl DiagnosticResponse {
 #[derive(Clone, Copy)]
 pub(crate) enum FieldKind {
     Text,
+    /// RFC-3339 text in SQLite; `timestamptz` in PostgreSQL (projected back to
+    /// canonical UTC RFC-3339 text so both backends emit identical values).
+    Timestamp,
     Count,
     Boolean,
 }
@@ -122,7 +125,7 @@ pub(crate) const FIELDS: &[(&str, FieldKind)] = &[
     ("run_id", FieldKind::Text),
     ("step_id", FieldKind::Text),
     ("parent_id", FieldKind::Text),
-    ("occurred_at", FieldKind::Text),
+    ("occurred_at", FieldKind::Timestamp),
     ("provider", FieldKind::Text),
     ("model", FieldKind::Text),
     ("tokens_in", FieldKind::Count),
@@ -144,7 +147,7 @@ fn sql(query: &DiagnosticQuery) -> String {
         .iter()
         .map(|(name, kind)| {
             let valid = match kind {
-                FieldKind::Text => format!(
+                FieldKind::Text | FieldKind::Timestamp => format!(
                     "typeof({name})='text' AND length(CAST({name} AS BLOB))<={MAX_FIELD_BYTES}"
                 ),
                 FieldKind::Count => format!("typeof({name})='integer' AND {name}>=0"),
@@ -211,6 +214,10 @@ fn project(row: &Row<'_>) -> rusqlite::Result<Value> {
         let present: bool = row.get(index * 2 + 1)?;
         let canonical = match (kind, value) {
             (FieldKind::Text, ValueRef::Text(bytes)) => std::str::from_utf8(bytes)
+                .ok()
+                .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+                .map(|value| Value::String(value.to_owned())),
+            (FieldKind::Timestamp, ValueRef::Text(bytes)) => std::str::from_utf8(bytes)
                 .ok()
                 .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
                 .map(|value| Value::String(value.to_owned())),
