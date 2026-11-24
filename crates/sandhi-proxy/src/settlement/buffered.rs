@@ -330,7 +330,11 @@ pub(crate) async fn handle(
             task_id.clone(),
             scope,
             ceiling,
-            time::Duration::seconds((transport + wait * 3).as_secs() as i64 + 60),
+            // The liability window never outlives the documented reservation TTL
+            // (ceiling + headroom ≤ TTL); a max-ceiling stream fits because the
+            // body owner checks remaining lease ≥ body + headroom after setup.
+            time::Duration::seconds((transport + wait * 3).as_secs() as i64 + 60)
+                .min(time::Duration::seconds(crate::ledger::RESERVATION_TTL_SECS)),
             100_000,
         )
         .expect("validated generated admission")

@@ -2219,10 +2219,10 @@ fn add_deadline_status(
     state: &ProxyState,
     cfg: &crate::config::SandhiFileConfig,
 ) {
-    if state.streaming_deadlines.is_some() || cfg.streaming_deadlines.is_some() {
+    if state.streaming_policy().is_some() || cfg.streaming_deadlines.is_some() {
         payload["streaming_deadlines"] = json!({
-            "activation": "restart required",
-            "active": state.streaming_deadlines.as_ref().map(|policy|policy.report()),
+            "activation": "applies on apply",
+            "active": state.streaming_policy().map(|policy|policy.report()),
             "desired": cfg.streaming_deadlines.as_ref().map(|policy|policy.report()),
         });
     }
@@ -2404,6 +2404,22 @@ pub(crate) async fn config_apply(
     }
     let mut alerts_created = Vec::new();
     let mut alerts_skipped = Vec::new();
+
+    // Streaming deadlines hot-apply (ADR-0047): validated against the provider
+    // registry as of THIS apply — so a file adding a provider and a deadline
+    // reference together succeeds. Applied after providers/backends/routes so
+    // the references they register are visible here. Refusal leaves the active
+    // policy untouched; other sections still apply (no rollback). The apply
+    // response's deadline status (active vs desired) is the convergence receipt.
+    if let Some(desired) = &cfg.streaming_deadlines {
+        match desired.validate_endpoints(state.registered_reference()) {
+            Ok(()) => state.set_streaming_deadlines(Some(desired.clone())),
+            Err(message) => failures.push(json!({
+                "component":"streaming_deadlines",
+                "error": format!("{message}; streaming policy not activated"),
+            })),
+        }
+    }
 
     let mut budgets_applied = Vec::new();
     for b in &cfg.budgets {

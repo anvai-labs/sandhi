@@ -2,22 +2,43 @@
 
 The current standalone candidate always selects a bounded streaming policy.
 Without an explicit section, its source defaults are 30 seconds for setup,
-180 seconds for idle gaps and 420 seconds for the body, within an 840-second
+180 seconds for idle gaps and 540 seconds for the body, within an 840-second
 ceiling. Operators can override them through `streaming_deadlines` in
 `SANDHI_CONFIG`. These are configured source defaults, not proof of a particular
 process's effective override or a physical token guarantee.
 
-The section is startup-only: config preview/apply reports active and desired
-policies and `restart required`. Invalid configuration or an unregistered
-transport reference fails startup. The pure provider FFI has no ledger owner;
+The section hot-applies (ADR-0047): `POST /admin/config/apply` validates the
+declared endpoint references against the registry as of that apply and activates
+the policy live — no restart. Config preview reports the active and desired
+policies with the `applies on apply` mode. An unregistered reference refuses the
+apply (accumulated failure, active policy untouched); invalid configuration
+still fails startup. Apply is additive-only, like every config section: deleting
+the section from the file never changes the active policy. Reverting to the
+built-in defaults is itself a declared policy — set the section to the default
+values and apply, or restart. The pure provider FFI has no ledger owner;
 Rust library body-only options are described separately in
 [streaming body ownership](stream-body-lifetime.md).
+
+## Token-scaled body estimate
+
+A fixed body limit is too short for legitimately long completions (a 32K-token
+reply at ~50 tok/s needs ~650 s). When a streaming request resolves to the
+*global default* — no explicit endpoint default and no exact-model override —
+the effective body limit is raised to
+`max(resolved body, min(max_output_tokens × ms_per_output_token × headroom_factor, max_body_ms))`.
+Defaults: `ms_per_output_token` 20, `headroom_factor` 2.0, `max_body_ms`
+`ceiling_ms − default.setup_ms`. Explicit overrides are always authoritative:
+the estimate never applies to them, and it never shrinks a limit. Setting
+`max_body_ms` at or below the default body disables scaling (escape hatch).
+`GET /v1/models` advertises the raw policy limits; the effective body can be
+higher, up to `max_body_ms`.
 
 ```json
 {
   "streaming_deadlines": {
     "ceiling_ms": 600000,
     "default": {"setup_ms": 30000, "idle_ms": 90000, "body_ms": 120000},
+    "estimate": {"ms_per_output_token": 20, "headroom_factor": 2.0},
     "endpoints": {
       "inferflux:local": {
         "default": {"setup_ms": 60000, "idle_ms": 90000, "body_ms": 180000},
@@ -30,7 +51,7 @@ Rust library body-only options are described separately in
 }
 ```
 
-Register the transport reference before restarting with an override. A direct
+Register the transport reference before applying an override. A direct
 credential uses its `provider:label`; an explicit backend route uses
 `backend/<backend-id>`. References are opaque registered keys, not provider
 aliases or URLs. Resolution is exact actual model → endpoint default → global
@@ -49,7 +70,7 @@ whole route. For the DS3 `route/coding` Qwen target whose explicit backend ID is
 {
   "streaming_deadlines": {
     "ceiling_ms": 840000,
-    "default": {"setup_ms": 30000, "idle_ms": 180000, "body_ms": 420000},
+    "default": {"setup_ms": 30000, "idle_ms": 180000, "body_ms": 540000},
     "endpoints": {
       "backend/qwen-coding-plan": {
         "models": {
@@ -65,8 +86,9 @@ whole route. For the DS3 `route/coding` Qwen target whose explicit backend ID is
 }
 ```
 
-This is startup-only and requires a deliberate service restart plus a sanitized
-active-policy receipt. The old default remains in force until both are recorded.
+This applies on the next `POST /admin/config/apply`; the apply response's
+deadline status (active converging to desired) is the sanitized active-policy
+receipt. The old policy remains in force until the apply is accepted.
 
 Authenticated OpenAI-shaped `GET /v1/models` responses include a
 `sandhi_streaming` object with the sanitized ceiling and per-model effective

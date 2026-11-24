@@ -704,7 +704,7 @@ fn state(
         upstream_ref: "up1".into(),
         ..Default::default()
     });
-    let mut state = ProxyState::new(
+    let state = ProxyState::new(
         keys,
         ProxyLedger::Durable(
             sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
@@ -713,8 +713,12 @@ fn state(
         HashMap::from([("up1".into(), provider(profile, uri))]),
         None,
     );
-    state.streaming_deadlines =
-        Some(serde_json::from_value(json!({"ceiling_ms":10000,"default":limits})).unwrap());
+    state.set_streaming_deadlines(Some(
+        serde_json::from_value(
+            json!({"ceiling_ms":10000,"default":limits,"estimate":{"max_body_ms":1}}),
+        )
+        .unwrap(),
+    ));
     let state = Arc::new(state);
     sandhi_proxy::settlement::buffered::enable(
         &state,

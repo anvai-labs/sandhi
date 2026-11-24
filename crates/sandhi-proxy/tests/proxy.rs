@@ -449,7 +449,7 @@ async fn version_endpoint_is_unauthenticated_and_reports_the_contract() {
 }
 
 #[tokio::test]
-async fn config_preview_and_apply_acknowledge_startup_only_sections() {
+async fn config_preview_and_apply_acknowledge_section_lifecycle() {
     // Adversarial-review finding on the TLS PR: the config module's doc promised that
     // preview/apply would report the startup-only `tls` section as `restart required`, but the
     // responses never mentioned it — an operator applying a TLS edit got silent ignorance of a
@@ -534,19 +534,32 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
         "apply must acknowledge that it did NOT activate listener TLS"
     );
     assert_eq!(apply["buffered_deadlines"], preview["buffered_deadlines"]);
+    // Streaming deadlines hot-apply (ADR-0047): preview reports the activation
+    // mode and the untouched default; the apply converges active to desired.
     assert_eq!(
         preview["streaming_deadlines"]["activation"],
-        "restart required"
+        "applies on apply"
     );
     assert_eq!(
         preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"],
-        420000
+        540000
     );
     assert_eq!(
         preview["streaming_deadlines"]["desired"]["default"]["limits"]["body_ms"],
         2000
     );
-    assert_eq!(apply["streaming_deadlines"], preview["streaming_deadlines"]);
+    assert_eq!(
+        apply["streaming_deadlines"]["activation"],
+        "applies on apply"
+    );
+    assert_eq!(
+        apply["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"], 2000,
+        "hot-apply must converge the active policy to the desired one without a restart"
+    );
+    assert_eq!(
+        apply["streaming_deadlines"]["desired"],
+        apply["streaming_deadlines"]["active"]
+    );
 
     std::fs::write(&cfg_path, r#"{"providers": []}"#).unwrap();
     let response = app
@@ -568,8 +581,102 @@ async fn config_preview_and_apply_acknowledge_startup_only_sections() {
     assert_eq!(preview["tls"], "not configured");
     assert!(
         preview.get("buffered_deadlines").is_none()
-            && preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"] == 420000,
-        "configured defaults remain visible after removing a desired override"
+            && preview["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"] == 2000,
+        "the last hot-applied policy remains active after removing it from the file"
+    );
+    let _ = std::fs::remove_file(&cfg_path);
+}
+
+#[tokio::test]
+async fn config_apply_validates_streaming_endpoint_references_and_refuses_unknown_ones() {
+    // ADR-0047: apply-time validation mirrors the startup gate, but refuses the
+    // streaming section (accumulated failure, no rollback) instead of exiting.
+    let keys = KeyStore::new();
+    let mut state = support::state(
+        keys,
+        support::Ledger::new(),
+        Arc::new(InMemorySink::new()),
+        HashMap::new(),
+        None,
+    );
+    state.admin_token = Some("admin".into());
+    let cfg_path =
+        std::env::temp_dir().join(format!("sandhi-stream-apply-{}.json", std::process::id()));
+    std::fs::write(
+        &cfg_path,
+        r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000},
+            "endpoints":{"zai:ghost":{"models":{"m":{"setup_ms":1000,"idle_ms":1000,"body_ms":3000}}}}}}"#,
+    )
+    .unwrap();
+    state.config_path = Some(cfg_path.clone());
+    let app = build_app(Arc::new(state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/config/apply")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let apply: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(apply["ok"], false);
+    assert!(
+        apply["failures"].as_array().unwrap().iter().any(|failure| {
+            failure["component"] == "streaming_deadlines"
+                && failure["error"].as_str().unwrap().contains("zai:ghost")
+        }),
+        "{}",
+        apply["failures"]
+    );
+    // The active policy is untouched: the built-in default is still serving.
+    assert_eq!(
+        apply["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"],
+        540000
+    );
+    assert_eq!(
+        apply["streaming_deadlines"]["desired"]["default"]["limits"]["body_ms"],
+        2000
+    );
+
+    // Dropping the unregistered reference lets the same file hot-apply.
+    std::fs::write(
+        &cfg_path,
+        r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000}}}"#,
+    )
+    .unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/config/apply")
+                .header("authorization", "Bearer admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let apply: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(apply["ok"], true);
+    assert_eq!(
+        apply["streaming_deadlines"]["active"]["default"]["limits"]["body_ms"], 2000,
+        "a global-only policy applies without any registered endpoint reference"
     );
     let _ = std::fs::remove_file(&cfg_path);
 }
@@ -613,7 +720,7 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
         )
         .unwrap();
         if streaming {
-            state.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":20,"idle_ms":1000,"body_ms":1000},"endpoints":{"openai:default":{"models":{"long":{"setup_ms":2000,"idle_ms":1000,"body_ms":1000}}}}}}"#).unwrap();
+            state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":20,"idle_ms":1000,"body_ms":1000},"estimate":{"max_body_ms":1},"endpoints":{"openai:default":{"models":{"long":{"setup_ms":2000,"idle_ms":1000,"body_ms":1000}}}}}}"#).unwrap());
         }
         let app = build_app(Arc::new(state));
         let call = |model: &str, translated: bool| {
@@ -686,7 +793,7 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
         )
         .unwrap();
         if streaming {
-            state.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":840000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":839000}}}"#).unwrap();
+            state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":840000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":839000}}}"#).unwrap());
         }
         let state = Arc::new(state);
         let response = build_app(state.clone())
@@ -732,7 +839,7 @@ async fn route_deadlines_enforce_authorized_model_in_both_planes_without_replay(
             sandhi_proxy::deadlines::from_json(r#"{"buffered_deadlines":{"ceiling_ms":120000}}"#)
                 .unwrap();
         if streaming {
-            custom.streaming_deadlines=sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":1000}}}"#).unwrap();
+            custom.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(r#"{"streaming_deadlines":{"ceiling_ms":5000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":1000},"estimate":{"max_body_ms":1}}}"#).unwrap());
         }
         // This provider returns 504 if called. A configured override must instead
         // reject the unsupported extension before invoking it.
@@ -4319,8 +4426,9 @@ fn owned_state_with_stream_policy(
             sandhi_store::ShardedLedger::open_sharded(path.to_str().unwrap(), 1).unwrap(),
         ),
     );
-    Arc::get_mut(&mut state).unwrap().streaming_deadlines =
-        policy.map(|policy| serde_json::from_value(policy).unwrap());
+    Arc::get_mut(&mut state)
+        .unwrap()
+        .set_streaming_deadlines(policy.map(|policy| serde_json::from_value(policy).unwrap()));
     sandhi_proxy::settlement::buffered::enable(
         &state,
         sandhi_proxy::settlement::buffered::Config::new(
@@ -5023,7 +5131,7 @@ async fn owned_http_sink_panic_cannot_erase_terminal_evidence() {
         .ok()
         .unwrap();
         state.sink = sink.clone();
-        state.streaming_deadlines = Some(serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000}})).unwrap());
+        state.set_streaming_deadlines(Some(serde_json::from_value(serde_json::json!({"ceiling_ms":10000,"default":{"setup_ms":1000,"idle_ms":1000,"body_ms":2000},"estimate":{"max_body_ms":1}})).unwrap()));
         let state = Arc::new(state);
         sandhi_proxy::settlement::buffered::enable(
             &state,

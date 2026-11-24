@@ -1,4 +1,5 @@
-//! Startup-only route deadlines. Lease renewal is deliberately unsupported.
+//! Route deadlines. Streaming policy hot-applies via admin config; buffered
+//! policy stays startup-only. Lease renewal is deliberately unsupported.
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Duration};
 
@@ -234,6 +235,38 @@ fn validate_routes<'a, T: 'a>(
     Ok(())
 }
 
+/// Smart body scaling for the *global* streaming default. Never applied to an
+/// explicit endpoint-default or exact-model override.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamEstimate {
+    #[serde(default = "default_ms_per_output_token")]
+    ms_per_output_token: u64,
+    #[serde(default = "default_headroom_factor")]
+    headroom_factor: f64,
+    /// None is materialized to ceiling_ms minus the default setup_ms during validation.
+    #[serde(default)]
+    max_body_ms: Option<u64>,
+}
+
+fn default_ms_per_output_token() -> u64 {
+    20
+}
+
+fn default_headroom_factor() -> f64 {
+    2.0
+}
+
+impl Default for StreamEstimate {
+    fn default() -> Self {
+        Self {
+            ms_per_output_token: default_ms_per_output_token(),
+            headroom_factor: default_headroom_factor(),
+            max_body_ms: None,
+        }
+    }
+}
+
 /// Complete limits; partial inheritance cannot accidentally leave a phase unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(try_from = "RawStreamLimits")]
@@ -317,6 +350,8 @@ pub struct StreamingDeadlines(StreamingFile);
 struct StreamingFile {
     ceiling_ms: u64,
     default: StreamLimits,
+    #[serde(default)]
+    estimate: StreamEstimate,
     #[serde(default, deserialize_with = "unique_map")]
     endpoints: BTreeMap<String, StreamingEndpoint>,
 }
@@ -330,7 +365,7 @@ struct StreamingEndpoint {
 }
 impl TryFrom<StreamingFile> for StreamingDeadlines {
     type Error = String;
-    fn try_from(file: StreamingFile) -> Result<Self, String> {
+    fn try_from(mut file: StreamingFile) -> Result<Self, String> {
         let maximum = (crate::ledger::RESERVATION_TTL_SECS as u64) * 1000 - SETTLEMENT_HEADROOM_MS;
         if file.ceiling_ms == 0 || file.ceiling_ms > maximum {
             return Err(format!(
@@ -345,6 +380,32 @@ impl TryFrom<StreamingFile> for StreamingDeadlines {
             }),
             check,
         )?;
+        if file.estimate.ms_per_output_token == 0 {
+            return Err("estimate ms_per_output_token must be positive".into());
+        }
+        if !file.estimate.headroom_factor.is_finite()
+            || file.estimate.headroom_factor <= 0.0
+            || file.estimate.headroom_factor > 100.0
+            // The milli-factor quantization must not silently round to zero.
+            || (file.estimate.headroom_factor * 1000.0).round() < 1.0
+        {
+            return Err(
+                "estimate headroom_factor must be finite, at least 0.001 and at most 100".into(),
+            );
+        }
+        // The estimate only ever raises the *global* default, whose limits are
+        // exactly `file.default`; so the ceiling invariant is checked against it.
+        let limit = file.ceiling_ms.saturating_sub(file.default.setup_ms());
+        match file.estimate.max_body_ms {
+            Some(0) => return Err("estimate max_body_ms must be positive".into()),
+            Some(value) if value > limit => {
+                return Err(format!(
+                    "estimate max_body_ms must not exceed ceiling_ms minus default setup_ms ({limit})"
+                ));
+            }
+            None => file.estimate.max_body_ms = Some(limit),
+            Some(_) => {}
+        }
         Ok(Self(file))
     }
 }
@@ -360,8 +421,9 @@ impl Default for StreamingDeadlines {
             default: StreamLimits {
                 setup_ms: 30_000,
                 idle_ms: 180_000,
-                body_ms: 420_000,
+                body_ms: 540_000,
             },
+            estimate: StreamEstimate::default(),
             endpoints: BTreeMap::new(),
         }
         .try_into()
@@ -395,6 +457,46 @@ impl StreamingDeadlines {
             model,
         )
     }
+    /// Route resolution plus token-aware body scaling. The estimate only ever
+    /// *raises* the resolved body, and only when no explicit override resolved:
+    /// endpoint defaults and exact-model overrides are always authoritative.
+    pub fn resolve_for_request(
+        &self,
+        reference: &str,
+        model: &str,
+        max_output_tokens: Option<u64>,
+    ) -> (StreamLimits, Source) {
+        let (limits, source) = self.resolve(reference, model);
+        let Some(tokens) = max_output_tokens else {
+            return (limits, source);
+        };
+        if matches!(source, Source::Model | Source::Endpoint) {
+            return (limits, source);
+        }
+        let estimate = &self.0.estimate;
+        // Fixed-point milli-factor arithmetic: deterministic and overflow-safe.
+        let factor_millis = (estimate.headroom_factor * 1000.0).round() as u128;
+        let estimated = (u128::from(tokens))
+            .saturating_mul(u128::from(estimate.ms_per_output_token))
+            .saturating_mul(factor_millis)
+            .saturating_div(1000)
+            .min(u128::from(u64::MAX)) as u64;
+        let capped = estimated.min(
+            estimate
+                .max_body_ms
+                .expect("estimate max_body_ms materialized during validation"),
+        );
+        let body = limits.body_ms().max(capped);
+        let scaled = StreamLimits {
+            setup_ms: limits.setup_ms(),
+            idle_ms: limits.idle_ms(),
+            body_ms: body,
+        };
+        // Invariant from validation: body only grows from a validated triple and
+        // never exceeds ceiling - setup, so the rebuilt limits stay valid.
+        debug_assert!(scaled.validate(self.0.ceiling_ms).is_ok());
+        (scaled, source)
+    }
     pub fn report(&self) -> serde_json::Value {
         let resolved = |reference: &str, model: &str| {
             let (limits, source) = self.resolve(reference, model);
@@ -416,7 +518,8 @@ impl StreamingDeadlines {
                 )
             })
             .collect();
-        serde_json::json!({"ceiling_ms":self.0.ceiling_ms,"default":resolved("",""),"endpoints":endpoints})
+        let estimate = serde_json::to_value(self.0.estimate).expect("estimate serializes");
+        serde_json::json!({"ceiling_ms":self.0.ceiling_ms,"default":resolved("",""),"estimate":estimate,"endpoints":endpoints})
     }
 }
 

@@ -218,7 +218,7 @@ pub(crate) async fn select(
             Some(TrackedDelivery::Counting) => true,
             Some(TrackedDelivery::Buffered) => provider.preflight_owned_buffered(request).is_ok(),
             Some(TrackedDelivery::Streaming) => {
-                state.streaming_deadlines.is_some()
+                state.streaming_policy().is_some()
                     && provider.supports_streaming_deadlines()
                     && provider.preflight_owned_streaming(request).is_ok()
             }
