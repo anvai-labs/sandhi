@@ -746,11 +746,21 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         // ADR-0048: retention window for aged unresolved durable liabilities.
         // Admission age past this cutoff releases the held budget capacity
         // (evidence retained, nothing fabricated). Zero disables the sweep.
-        let liability_retention_secs: i64 = std::env::var("SANDHI_LIABILITY_RELEASE_AFTER_SECS")
-            .ok()
-            .and_then(|raw| raw.parse().ok())
-            .filter(|secs| *secs >= 0)
-            .unwrap_or(86_400);
+        // Invalid supplied values refuse startup — never silently downgrade.
+        let liability_retention_secs: i64 = match std::env::var(
+            "SANDHI_LIABILITY_RELEASE_AFTER_SECS",
+        ) {
+            Ok(raw) => match raw.parse::<i64>() {
+                Ok(secs) if secs >= 0 => secs,
+                _ => {
+                    eprintln!(
+                        "sandhi-proxy: SANDHI_LIABILITY_RELEASE_AFTER_SECS must be a non-negative integer of seconds, got {raw:?}"
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(_) => 86_400,
+        };
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await; // discard the immediate first tick

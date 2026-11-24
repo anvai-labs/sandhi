@@ -836,7 +836,12 @@ impl SqliteLedger {
         let mut released = 0usize;
         let mut after_id = 0i64;
         loop {
-            let tx = self.conn.transaction()?;
+            // Immediate: classification reads the post-commit state of any
+            // concurrently settling transaction instead of racing a stale
+            // WAL snapshot into a SQLITE_BUSY_SNAPSHOT error.
+            let tx = self
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let candidates: Vec<(String, i64, String)> = {
                 let mut statement = tx.prepare(
                     "SELECT i.execution_id, i.reservation_id, r.scope
