@@ -589,7 +589,9 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
                         count += 1;
                     } else if !matches!(
                         entry.state,
-                        RecoveryState::Settled(_) | RecoveryState::ClosedBeforeDispatch(_)
+                        RecoveryState::Settled(_)
+                            | RecoveryState::ClosedBeforeDispatch(_)
+                            | RecoveryState::ReleasedAfterRetention
                     ) {
                         cursor.unresolved += 1;
                     }
