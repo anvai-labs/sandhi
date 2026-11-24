@@ -525,9 +525,11 @@ fn diagnostics_sql(query: &DiagnosticQuery) -> String {
     let projection = FIELDS
         .iter()
         .map(|(name, kind)| {
-            // Timestamps project back to canonical UTC RFC-3339 text (matching
-            // the SQLite stored form); octet_length on a timestamptz column
-            // would be a prepare-time type error, and the type is structural.
+            // Timestamps project back to canonical UTC RFC-3339 text —
+            // cross-comparable with SQLite's stored form, though PG renders a
+            // fixed 6-digit fraction where SQLite keeps the raw stored text.
+            // octet_length on a timestamptz column would be a prepare-time
+            // type error, and the type is structural.
             let value_expr = match kind {
                 FieldKind::Text => name.to_string(),
                 FieldKind::Timestamp => format!(
@@ -724,6 +726,20 @@ mod tests {
         .with_cache(0, 5)
     }
 
+    fn ev_at(
+        ts: &str,
+        provider: &str,
+        subject: &str,
+        group: &str,
+        tin: u64,
+        tout: u64,
+    ) -> UsageEvent {
+        UsageEvent::new("r", ts, provider, "m", Backend::External)
+            .with_attribution(Some("vk".into()), Some(subject.into()), Some(group.into()))
+            .with_tokens(tin, tout)
+            .with_cache(0, 5)
+    }
+
     #[test]
     fn bounds_clause_covers_all_window_shapes() {
         let (clause, binds) = bounds_clause(Some("f"), Some("t"));
@@ -817,9 +833,10 @@ mod tests {
     // connect). Tests only touch rows tagged with the unique `pg-phase2-` run id, so a
     // shared instance stays usable; nothing is dropped.
 
-    /// A unique run id per process so shared instances never cross-test-contaminate.
-    fn test_run_id() -> String {
-        format!("pg-phase2-{}", std::process::id())
+    /// A unique run id per process AND per test so shared instances (and
+    /// cargo's in-process parallel test threads) never cross-contaminate.
+    fn test_run_id(tag: &str) -> String {
+        format!("pg-phase2-{}-{}", std::process::id(), tag)
     }
 
     fn pg_store() -> Option<PostgresStore> {
@@ -841,7 +858,7 @@ mod tests {
         let Some(store) = pg_store() else {
             panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres tests");
         };
-        let run = test_run_id();
+        let run = test_run_id("windows");
         crate::UsageStore::emit(&store, &ev("openai", "alice", "team-a", 100, 20));
         crate::UsageStore::emit(
             &store,
@@ -907,17 +924,19 @@ mod tests {
         let Some(store) = pg_store() else {
             panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres tests");
         };
-        let run = test_run_id();
+        // September timestamps: the windows test pins exact July counts, so
+        // this test must not add July rows even under parallel execution.
+        let run = test_run_id("tree");
         crate::UsageStore::emit(
             &store,
-            &ev("openai", "alice", "team-a", 10, 5)
+            &ev_at("2026-09-19T00:00:00Z", "openai", "alice", "team-a", 10, 5)
                 .with_identity(None, Some(run.clone()), Some("root".into()), None, None)
                 .with_latency(Some(40), Some(20))
                 .with_latency_sources(Some(LatencySource::Origin), Some(LatencySource::Boundary)),
         );
         crate::UsageStore::emit(
             &store,
-            &ev("openai", "alice", "team-a", 20, 10)
+            &ev_at("2026-09-19T00:00:00Z", "openai", "alice", "team-a", 20, 10)
                 .with_identity(
                     None,
                     Some(run.clone()),
@@ -925,6 +944,8 @@ mod tests {
                     Some("root".into()),
                     None,
                 )
+                .with_latency(Some(20), Some(10))
+                .with_latency_sources(Some(LatencySource::Origin), Some(LatencySource::Boundary))
                 .with_reasoning(Some(8)),
         );
 
