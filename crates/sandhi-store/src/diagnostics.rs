@@ -16,7 +16,7 @@ pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_SELECTOR_BYTES: usize = 256;
 pub const DEFAULT_LIMIT: usize = 100;
 pub const MAX_LIMIT: usize = 500;
-const MAX_FIELD_BYTES: usize = 256;
+pub(crate) const MAX_FIELD_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -32,7 +32,7 @@ pub enum DiagnosticSelector {
 }
 
 impl DiagnosticSelector {
-    fn value(&self) -> &str {
+    pub(crate) fn value(&self) -> &str {
         match self {
             Self::Request(value) | Self::Session(value) | Self::Run(value) => value,
         }
@@ -90,7 +90,7 @@ pub struct DiagnosticResponse {
 }
 
 impl DiagnosticResponse {
-    fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             schema_version: "1",
             rows: Vec::new(),
@@ -108,7 +108,7 @@ impl DiagnosticResponse {
 }
 
 #[derive(Clone, Copy)]
-enum FieldKind {
+pub(crate) enum FieldKind {
     Text,
     Count,
     Boolean,
@@ -116,7 +116,7 @@ enum FieldKind {
 
 // This is an allowlist, deliberately not UsageEvent serialization. No credential, attribution,
 // arbitrary metadata, URL, raw usage, header, prompt or response-body column is selected.
-const FIELDS: &[(&str, FieldKind)] = &[
+pub(crate) const FIELDS: &[(&str, FieldKind)] = &[
     ("request_id", FieldKind::Text),
     ("session_id", FieldKind::Text),
     ("run_id", FieldKind::Text),
@@ -163,6 +163,46 @@ fn sql(query: &DiagnosticQuery) -> String {
     )
 }
 
+/// Shared row-finishing pass for both backends: cache-read observation assembly, latency
+/// source provenance validation and the warning channel. `object` holds the canonical values
+/// already extracted per field (absent fields simply not inserted).
+pub(crate) fn finish_diagnostic_row(
+    mut object: Map<String, Value>,
+    mut warnings: BTreeSet<String>,
+) -> Value {
+    let status = object.remove("cache_read_status");
+    let source = object.remove("cache_read_source");
+    let observation = crate::cache_observation(
+        status.as_ref().and_then(Value::as_str),
+        source.as_ref().and_then(Value::as_str),
+    );
+    if observation.is_none() && (status.is_some() || source.is_some()) {
+        warnings.insert("cache_read_observation".into());
+    }
+    object.insert("cache_read_observation".into(), json!(observation));
+    for (metric, source) in [
+        ("duration_ms", "duration_source"),
+        ("time_to_first_token_ms", "time_to_first_token_source"),
+    ] {
+        let valid_source = matches!(
+            object.get(source).and_then(Value::as_str),
+            Some("origin" | "boundary")
+        );
+        if !valid_source || !object.contains_key(metric) {
+            if object.remove(source).is_some() {
+                warnings.insert(source.into());
+            }
+            if object.contains_key(metric) {
+                object.insert(source.into(), Value::Null);
+            }
+        }
+    }
+    if !warnings.is_empty() {
+        object.insert("warnings".into(), json!(warnings));
+    }
+    Value::Object(object)
+}
+
 fn project(row: &Row<'_>) -> rusqlite::Result<Value> {
     let mut object = Map::new();
     let mut warnings = BTreeSet::new();
@@ -181,40 +221,10 @@ fn project(row: &Row<'_>) -> rusqlite::Result<Value> {
         if let Some(value) = canonical {
             object.insert((*name).into(), value);
         } else if present {
-            warnings.insert(*name);
+            warnings.insert((*name).into());
         }
     }
-    let status = object.remove("cache_read_status");
-    let source = object.remove("cache_read_source");
-    let observation = crate::cache_observation(
-        status.as_ref().and_then(Value::as_str),
-        source.as_ref().and_then(Value::as_str),
-    );
-    if observation.is_none() && (status.is_some() || source.is_some()) {
-        warnings.insert("cache_read_observation");
-    }
-    object.insert("cache_read_observation".into(), json!(observation));
-    for (metric, source) in [
-        ("duration_ms", "duration_source"),
-        ("time_to_first_token_ms", "time_to_first_token_source"),
-    ] {
-        let valid_source = matches!(
-            object.get(source).and_then(Value::as_str),
-            Some("origin" | "boundary")
-        );
-        if !valid_source || !object.contains_key(metric) {
-            if object.remove(source).is_some() {
-                warnings.insert(source);
-            }
-            if object.contains_key(metric) {
-                object.insert(source.into(), Value::Null);
-            }
-        }
-    }
-    if !warnings.is_empty() {
-        object.insert("warnings".into(), json!(warnings));
-    }
-    Ok(Value::Object(object))
+    Ok(finish_diagnostic_row(object, warnings))
 }
 
 impl SqliteStore {
