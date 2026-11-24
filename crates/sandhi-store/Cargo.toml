@@ -31,13 +31,20 @@ keyring = { version = "3", default-features = false, features = [
 # is published to crates.io; no local path patch is needed.
 sentinelpass-protocol = { version = "=0.20.0", optional = true }
 tokio = { version = "1", default-features = false, features = ["rt", "time"], optional = true }
+# Optional Postgres usage store (`postgres` feature, NON-default): the runtime-API-only async
+# driver. No sqlite feature — the SQLite backend stays on rusqlite; no macros/offline mode —
+# the house SQL is dynamic. Only the usage-event sink + aggregation queries move to PG; the
+# enforcement ledger, vault and vkeys remain SQLite this phase.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"], optional = true }
 
 [features]
 sentinelpass-ipc = ["dep:sentinelpass-protocol", "dep:tokio"]
+postgres = ["dep:sqlx", "dep:tokio"]
 
 [dev-dependencies]
 # Test-only stdio control channel; protocol framing uses the real optional crate.
-tokio = { version = "1", features = ["io-std", "io-util"] }
+# rt/rt-multi-thread/macros back the #[ignore]-gated PostgresStore tests.
+tokio = { version = "1", features = ["io-std", "io-util", "rt", "rt-multi-thread", "macros"] }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 

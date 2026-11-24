@@ -7,6 +7,8 @@ pub mod alerts;
 pub mod backends;
 pub mod diagnostics;
 pub mod ledger;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod profiles;
 pub mod references;
 pub mod routes;
@@ -29,6 +31,8 @@ use sandhi_core::{
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStore;
 pub use profiles::{ProfileRecord, ProfileStore};
 pub use vault::{
     hash_secret, CredentialScheme, InMemoryVault, KeyringVault, SentinelPassExactBinding,
