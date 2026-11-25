@@ -1,8 +1,10 @@
-//! Optional Postgres enforcement ledger (cargo feature `postgres`, NON-default) — PR-A of the
-//! Phase 3 design (`PHASE3-postgres-ledger-design.md`). This is the *ledger core*: budget
-//! limits, the atomic conditional admit (C3), idempotent settle (C2), TTL leases (C1), the
-//! idempotency dedup and the migration inserts. The evidence subsystem (fenced intents,
-//! outbox, recovery paging) is PR-B; the proxy wiring (`SANDHI_LEDGER_DSN`) is PR-D.
+//! Optional Postgres enforcement ledger (cargo feature `postgres`, NON-default) — the Phase 3
+//! design (`PHASE3-postgres-ledger-design.md`), PR-A (ledger core) + PR-B (evidence
+//! subsystem). This module holds the *ledger core*: budget limits, the atomic conditional
+//! admit (C3), idempotent settle (C2), TTL leases (C1), the idempotency dedup and the
+//! migration inserts. The evidence subsystem — fenced intents, terminal observations, the
+//! settlement outbox, recovery paging and the ADR-0048 aged-liability release — lives in
+//! [`evidence`]; the proxy wiring (`SANDHI_LEDGER_DSN`) is PR-D.
 //!
 //! Semantics are a port of [`crate::ledger::SqliteLedger`] — same methods, same invariants —
 //! with these recorded decisions (all from the approved design):
@@ -13,8 +15,8 @@
 //!   transactions are serialized per scope by `pg_advisory_xact_lock`: the admit is
 //!   `BEGIN → scope lock → reclaim → budget read → SUMs → INSERT RETURNING id →
 //!   COMMIT`, which is SQLite's `BEGIN IMMEDIATE` narrowed from the whole file to one scope.
-//!   (PR-A's reclaim DELETE is deliberately unguarded — no evidence tables exist yet, so the
-//!   NOT EXISTS arms have nothing to protect; PR-B restores them.)
+//!   (PR-B restored the NOT-EXISTS evidence guards on every reclaim: a reservation pinned
+//!   by an intent, back leg or fence is never expiry-reclaimed.)
 //!   The lock key is `fnv1a64(scope)` computed in Rust (never PG's `hashtext`, whose
 //!   algorithm is a version detail) masked to `i64::MAX`; a paired (two-scope) transaction
 //!   acquires both keys ASCENDING (deadlock-free house rule). Multi-scope sweeps need no
@@ -23,8 +25,7 @@
 //!   verbatim and then `setval` ([`PostgresLedger::insert_migrated_reservation`] does the
 //!   `setval` itself). `RETURNING id` replaces SQLite's `last_insert_rowid`.
 //! - **No `INSERT OR REPLACE`.** Its delete+insert collides with child FK rows; the migration
-//!   inserts use `ON CONFLICT (id) DO UPDATE`. (The evidence child tables are PR-B, but the
-//!   shape is frozen here so PR-B inherits no hazard.)
+//!   inserts use `ON CONFLICT (id) DO UPDATE`. (The evidence child tables exist since PR-B.)
 //! - **`settled` stays a 0/1 `bigint`, never boolean** — the invariant arithmetic
 //!   (`SUM(ceiling) WHERE settled = 0`) is shared verbatim with the SQLite backend.
 //! - **Clock.** Explicit `now` params stay authoritative; the one SQL default (SQLite's
@@ -40,11 +41,9 @@
 //! callers must be ordinary blocking threads, never async-executor tasks. Runtime sqlx API
 //! only (no `query!` macros), so nothing here needs a live DB to compile.
 //!
-//! Deferred to later PRs (design Decision 5): evidence tables + the guarded reclaim/`NOT
-//! EXISTS` arms they need (PR-B — until then the PG reclaim deletes are unguarded, which is
-//! exactly right because nothing on a PR-A ledger can be tracked), REPEATABLE READ recovery
-//! pagers (PR-B), the `RAISE(ABORT)`-equivalent fault triggers (PR-B/PR-C), operator stores
-//! (PR-C), and the `SANDHI_LEDGER_DSN` startup seam (PR-D).
+//! Deferred to later PRs (design Decision 5): the `RAISE(ABORT)`-equivalent fault triggers
+//! as shipped fixtures (PR-B tests create them per-test-schema; PR-C owns the operator
+//! surfaces), operator stores (PR-C), and the `SANDHI_LEDGER_DSN` startup seam (PR-D).
 
 use std::future::Future;
 use std::time::Duration;
@@ -57,6 +56,8 @@ use sandhi_core::{Denied, EnforcementLedger, LedgerView, Policy, Reservation, Wi
 
 use crate::ledger::{BudgetRow, ReserveOutcome};
 use crate::{fnv1a, window_start_ts, LedgerStoreError};
+
+pub(crate) mod evidence;
 
 /// Advisory key for the retained-intent `COUNT(*)` in `reserve_intent` (PR-B). Scope keys are
 /// always non-negative (masked to `i64::MAX`), so any negative key is dedicated: the
@@ -179,6 +180,11 @@ impl PostgresLedger {
         for statement in DDL {
             sqlx::query(statement).execute(&pool).await?;
         }
+        // PR-B: the evidence subsystem lives on the same ledger — fenced intents,
+        // outbox, recovery paging (see `evidence`).
+        evidence::init(&pool)
+            .await
+            .map_err(evidence::into_store_error)?;
         Ok(Self {
             pool,
             rt: tokio::runtime::Handle::current(),
@@ -356,13 +362,15 @@ impl PostgresLedger {
             .bind(scope_advisory_key(scope))
             .execute(&mut *tx)
             .await?;
-        // Opportunistic reclaim: drop this scope's unsettled, expired leases before measuring.
-        // PR-B adds the NOT-EXISTS guards for the evidence tables (intent / back leg / fence);
-        // on a PR-A ledger nothing can be tracked, so the unguarded delete is exact.
-        sqlx::query(
+        // Opportunistic reclaim: drop this scope's unsettled, expired leases before
+        // measuring — never a reservation pinned by execution evidence (PR-B restores
+        // the NOT-EXISTS guards alongside the evidence tables they protect; unknown
+        // usage keeps both liabilities through expiry/restart, ADR-0043).
+        sqlx::query(&format!(
             "DELETE FROM budget_reservation \
-             WHERE scope = $1 AND settled = 0 AND expires_at <= $2",
-        )
+             WHERE scope = $1 AND settled = 0 AND expires_at <= $2 {}",
+            evidence::EVIDENCE_RECLAIM_GUARD_SQL
+        ))
         .bind(scope)
         .bind(now_ts)
         .execute(&mut *tx)
@@ -437,21 +445,28 @@ impl PostgresLedger {
 
     /// Idempotently settle a reservation to its actual billable usage. Guarded by
     /// `settled = 0`, so a retried or replayed settle updates zero rows and changes nothing
-    /// (ADR-0005 D2/C2). The guard makes this a CAS-shaped single statement, safe under READ
-    /// COMMITTED without the scope lock.
-    ///
-    /// PR-B adds the tracked-reservation refusal ([`LedgerStoreError::TrackedSettlementRequired`])
-    /// once the evidence tables exist; on a PR-A ledger no reservation can be tracked.
+    /// (ADR-0005 D2/C2). A reservation pinned by the evidence subsystem (PR-B: an intent,
+    /// back leg or fence back-reference) refuses legacy settlement with
+    /// [`LedgerStoreError::TrackedSettlementRequired`] — its charge may only be resolved by
+    /// `settle_terminal_durable`.
     pub fn settle_durable(&self, reservation_id: u64, actual: u64) -> Result<(), LedgerStoreError> {
         self.block(self.settle_async(reservation_id, actual))
     }
 
     async fn settle_async(&self, reservation_id: u64, actual: u64) -> Result<(), LedgerStoreError> {
+        let mut tx = self.pool.begin().await?;
+        if evidence::is_tracked(&mut tx, reservation_id as i64)
+            .await
+            .map_err(evidence::into_store_error)?
+        {
+            return Err(LedgerStoreError::TrackedSettlementRequired);
+        }
         sqlx::query(SETTLE_SQL)
             .bind(reservation_id as i64)
             .bind(actual as i64)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -556,11 +571,13 @@ impl PostgresLedger {
 
     async fn reclaim_async(&self, now: OffsetDateTime) -> Result<usize, LedgerStoreError> {
         let now_ts = now.unix_timestamp();
-        let leases =
-            sqlx::query("DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= $1")
-                .bind(now_ts)
-                .execute(&self.pool)
-                .await?;
+        let leases = sqlx::query(&format!(
+            "DELETE FROM budget_reservation WHERE settled = 0 AND expires_at <= $1 {}",
+            evidence::EVIDENCE_RECLAIM_GUARD_SQL
+        ))
+        .bind(now_ts)
+        .execute(&self.pool)
+        .await?;
         // TD-0021 P4 review finding: the dedup table is not prune-on-sight only — without
         // this, a key used once and never retried lives forever.
         let dedup = sqlx::query("DELETE FROM idempotency_dedup WHERE expires_at <= $1")
@@ -812,6 +829,104 @@ impl EnforcementLedger for PostgresLedger {
     }
 }
 
+/// Shared live-Postgres test support (PR-A ledger-core suite and the PR-B evidence
+/// suite in `evidence/tests` both run against per-test schemas of one shared DSN).
+#[cfg(test)]
+pub(crate) mod pg_test {
+    use std::time::Duration;
+
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    use super::PostgresLedger;
+
+    pub(crate) fn dsn() -> String {
+        std::env::var("SANDHI_TEST_PG_DSN")
+            .ok()
+            .map(|dsn| dsn.trim().to_string())
+            .filter(|dsn| !dsn.is_empty())
+            .unwrap_or_else(|| {
+                panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres ledger tests")
+            })
+    }
+
+    pub(crate) fn schema(tag: &str) -> String {
+        format!("ledger_test_{}_{}", std::process::id(), tag)
+    }
+
+    /// Connect a ledger into `schema`, creating the schema first. Each call owns a fresh
+    /// runtime (leaked deliberately: the ledger retains its handle and the pool's background
+    /// tasks must outlive every blocking statement below).
+    pub(crate) fn ledger_in_schema(schema: &str) -> PostgresLedger {
+        let dsn = dsn();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let ledger = rt.block_on(async {
+            let root: PgConnectOptions = dsn.parse().expect("parse DSN");
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect_with(root.clone())
+                .await
+                .expect("connect root pool");
+            sqlx::query(&format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#))
+                .execute(&pool)
+                .await
+                .expect("create schema");
+            pool.close().await;
+            let scoped = root.options([("search_path", schema)]);
+            PostgresLedger::connect_with(scoped)
+                .await
+                .expect("connect ledger")
+        });
+        std::mem::forget(rt);
+        ledger
+    }
+
+    /// Empty every ledger table (core + evidence) in one statement so FK/identity
+    /// handling is uniform; CASCADE covers the referencing evidence tables.
+    pub(crate) fn reset_all_tables(ledger: &PostgresLedger) {
+        ledger.block(async {
+            sqlx::query(
+                "TRUNCATE budget_reservation, budget_limit, idempotency_dedup, \
+                 budget_execution_intent, budget_request_correlation, budget_dispatch_fence, \
+                 budget_settlement_outbox, budget_terminal_observation, budget_execution_context, \
+                 budget_execution_back_leg, budget_physical_attempt RESTART IDENTITY CASCADE",
+            )
+            .execute(&ledger.pool)
+            .await
+            .expect("truncate ledger tables");
+        });
+    }
+
+    pub(crate) fn drop_schema_best_effort(schema: &str) {
+        let Ok(dsn) = std::env::var("SANDHI_TEST_PG_DSN") else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let _ = rt.block_on(async {
+            let root: PgConnectOptions = dsn.trim().parse().ok()?;
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect_with(root)
+                .await
+                .ok()?;
+            let _ = sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE"#))
+                .execute(&pool)
+                .await;
+            pool.close().await;
+            Some(())
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,49 +1024,12 @@ mod tests {
     // connect and dropped best-effort on exit. DDL and TRUNCATE make a fresh or previously
     // dirtied schema identical, so the suite is robust to an empty database by design.
 
-    fn test_dsn() -> String {
-        std::env::var("SANDHI_TEST_PG_DSN")
-            .ok()
-            .map(|dsn| dsn.trim().to_string())
-            .filter(|dsn| !dsn.is_empty())
-            .unwrap_or_else(|| {
-                panic!("set SANDHI_TEST_PG_DSN to run the live-Postgres ledger tests")
-            })
-    }
-
     fn test_schema(tag: &str) -> String {
-        format!("ledger_test_{}_{}", std::process::id(), tag)
+        pg_test::schema(tag)
     }
 
-    /// Connect a ledger into `schema`, creating the schema first. Each call owns a fresh
-    /// runtime (leaked deliberately: the ledger retains its handle and the pool's background
-    /// tasks must outlive every blocking statement below).
     fn pg_ledger_in_schema(schema: &str) -> PostgresLedger {
-        let dsn = test_dsn();
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        let ledger = rt.block_on(async {
-            let root: PgConnectOptions = dsn.parse().expect("parse DSN");
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(Duration::from_secs(5))
-                .connect_with(root.clone())
-                .await
-                .expect("connect root pool");
-            sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
-                .execute(&pool)
-                .await
-                .expect("create schema");
-            pool.close().await;
-            let scoped = root.options([("search_path", schema)]);
-            PostgresLedger::connect_with(scoped)
-                .await
-                .expect("connect ledger")
-        });
-        std::mem::forget(rt);
-        ledger
+        pg_test::ledger_in_schema(schema)
     }
 
     /// A fresh ledger in its own schema: created, initialized, and emptied — identical
@@ -963,46 +1041,14 @@ mod tests {
     }
 
     fn drop_schema_best_effort(schema: &str) {
-        let Ok(dsn) = std::env::var("SANDHI_TEST_PG_DSN") else {
-            return;
-        };
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
-        let _ = rt.block_on(async {
-            let root: PgConnectOptions = dsn.trim().parse().ok()?;
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(Duration::from_secs(5))
-                .connect_with(root)
-                .await
-                .ok()?;
-            let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
-                .execute(&pool)
-                .await;
-            pool.close().await;
-            Some(())
-        });
+        pg_test::drop_schema_best_effort(schema)
     }
 
     impl PostgresLedger {
-        /// Test helper: empty the ledger tables so a reused schema starts clean.
+        /// Test helper: empty the ledger tables (including PR-B's evidence tables, which
+        /// reference reservations) so a reused schema starts clean.
         fn reset_tables(&self) {
-            self.block(async {
-                for statement in [
-                    "TRUNCATE budget_reservation RESTART IDENTITY",
-                    "TRUNCATE budget_limit",
-                    "TRUNCATE idempotency_dedup",
-                ] {
-                    sqlx::query(statement)
-                        .execute(&self.pool)
-                        .await
-                        .expect("truncate ledger table");
-                }
-            });
+            pg_test::reset_all_tables(self);
         }
 
         /// Test helper: seed a settled reservation verbatim (window-boundary fixtures).

@@ -145,7 +145,7 @@ pub struct PhysicalAttempt {
 }
 
 impl AttemptEvidence {
-    fn encode(&self) -> Result<String, EvidenceError> {
+    pub(crate) fn encode(&self) -> Result<String, EvidenceError> {
         validate_execution_id(&self.attempt_id)?;
         let valid_ms = |at: i64| at >= 0 && OffsetDateTime::from_unix_timestamp(at / 1000).is_ok();
         let diagnostic_label = |value: &str, cap: usize| {

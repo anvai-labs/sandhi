@@ -38,11 +38,12 @@ pub struct TerminalObservation {
 
 /// In-process cursor for one scope on the original ledger and fixed topology.
 /// Not portable across database replacement/restore; not an authorization credential.
+/// Fields are crate-visible so both ledger backends construct and validate cursors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryCursor {
-    scope: String,
-    after_id: u64,
-    through_id: u64,
+    pub(crate) scope: String,
+    pub(crate) after_id: u64,
+    pub(crate) through_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,7 +525,9 @@ fn settle_receipt(
         params![id, charge, receipt.settled_at],
     )?;
     if updated != 1 {
-        return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+        return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+            "statement affected no rows".into(),
+        )));
     }
     let inserted = tx.execute(
         "INSERT INTO budget_settlement_outbox
@@ -533,7 +536,9 @@ fn settle_receipt(
         params![receipt.receipt_id, id, scope, charge, receipt.settled_at],
     )?;
     if inserted != 1 {
-        return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+        return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+            "statement affected no rows".into(),
+        )));
     }
     Ok(SettlementOutcome::Committed(receipt))
 }
@@ -551,8 +556,8 @@ pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
 /// Opaque scope inventory cursor on the original ledger; not an authorization token.
 #[derive(Debug, Clone)]
 pub struct ScopeCursor {
-    after: String,
-    through_id: u64,
+    pub(crate) after: String,
+    pub(crate) through_id: u64,
 }
 #[derive(Debug)]
 pub struct ScopePage {
@@ -1098,7 +1103,9 @@ impl SqliteLedger {
             params![execution_id, encoded, charge, observed_at],
         )?;
         if inserted != 1 {
-            return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+            return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                "statement affected no rows".into(),
+            )));
         }
         tx.commit()?;
         Ok(ObservationOutcome::Recorded(TerminalObservation {
@@ -1245,7 +1252,9 @@ impl SqliteLedger {
             params![execution_id, reservation.id as i64, now.unix_timestamp()],
         )?;
         if inserted != 1 {
-            return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+            return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                "statement affected no rows".into(),
+            )));
         }
         if prepared {
             mark_admission(progress, AdmissionStage::WriteFence);
@@ -1254,7 +1263,9 @@ impl SqliteLedger {
                 [&execution_id],
             )?;
             if inserted != 1 {
-                return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+                return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                    "statement affected no rows".into(),
+                )));
             }
         }
         if let Some(request_id) = request_id {
@@ -1387,7 +1398,9 @@ impl SqliteLedger {
                 params![receipt.receipt_id, claim_token, until],
             )?;
             if updated != 1 {
-                return Err(EvidenceError::Storage(LedgerStoreError::Backend("statement affected no rows".into())));
+                return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                    "statement affected no rows".into(),
+                )));
             }
             claims.push(ClaimedSettlement {
                 receipt,
