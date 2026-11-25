@@ -235,6 +235,29 @@ def test_release_checks_package_and_binary_identity_before_publishing():
         assert "npm version" not in commands(release["jobs"][name])
 
 
+def test_release_asset_equivalence_compares_content_not_gzip_bytes():
+    # A partially-published release re-run must converge: gzip headers embed
+    # build timestamps, so raw cmp on the .tar.gz made every rebuild differ
+    # (v0.26.1 needed manual asset deletion). The check must compare extracted
+    # trees and file modes, with each extraction as a separate simple command —
+    # an `&&` chain exempts the first failure under errexit and would compare
+    # two empty trees (fail-open).
+    step = next(
+        step
+        for step in workflow("release.yml")["jobs"]["create-release"]["steps"]
+        if step.get("name") == "Publish built binary assets without overwriting"
+    )
+    run = step["run"]
+    assert 'tar -xzf "$archive" -C "$new_tree"' in run
+    assert 'tar -xzf "existing/$name" -C "$old_tree"' in run
+    assert 'diff -r "$new_tree" "$old_tree"' in run
+    assert 'find . -printf \'%m %p\'' in run
+    # Fail-closed shape: no byte comparison, no chained extraction.
+    assert 'cmp "$archive"' not in run
+    assert '&& tar -xzf' not in run
+    assert run.count("exit 1") >= 2
+
+
 def test_ci_always_checks_release_safeguards():
     check_ci(workflow("ci.yml"))
 

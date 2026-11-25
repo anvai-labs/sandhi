@@ -153,9 +153,11 @@ and the [release safeguards](docs/product/release-safeguards.md#registry-configu
 
 Only an explicit registry 404 authorizes a missing-version upload; timeouts, rate limits, authentication
 failures and server errors stop the job. Crates already present still undergo final non-yanked
-verification. PyPI skips already-uploaded files. Existing binary archives must match locally built
-bytes; existing npm versions must match the checked tarball integrity before being skipped. A rebuilt
-archive that differs is a blocker, not permission to overwrite. Prefer retrying the original immutable
+verification. PyPI skips already-uploaded files. Existing binary archives must match the locally
+built archive's extracted content, file set and file modes — gzip container bytes are not compared,
+since they embed build timestamps; existing npm versions must match the checked tarball integrity
+before being skipped. A rebuilt archive whose content, file set or modes differ is a blocker, not
+permission to overwrite. Prefer retrying the original immutable
 artifact bundle after diagnosing a partial failure.
 
 The final verifier explicitly requires all targets on a tag push, or npm only on an authorized
