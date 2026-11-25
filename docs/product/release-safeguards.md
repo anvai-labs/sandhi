@@ -16,7 +16,7 @@ and validation evidence behind that process.
 | Immutable build identity | Keep every target on the reviewed source | Source/control hashes and artifact-ID selection, revalidated before publishing |
 | Least publisher authority | Keep registry credentials out of build jobs | Build and publisher job separation; narrow registry permissions and explicit environments |
 | Artifact validation | Reject incomplete or inconsistent packages | Binary versions/smokes, wheel install/import coverage, crate metadata and npm tarball/dependency checks |
-| Partial-publication recovery | Preserve already published immutable content | Matching archive bytes and package integrity; upload only explicitly missing artifacts |
+| Partial-publication recovery | Preserve already published immutable content | Matching archive content (extracted trees, not gzip bytes) and package integrity; upload only explicitly missing artifacts |
 | Final verification | Confirm every declared target | Read-only registry and release-asset verification; installation checks remain a distinct evidence category |
 
 ## Design boundaries
