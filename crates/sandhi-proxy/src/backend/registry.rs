@@ -104,6 +104,7 @@ fn bind(handle: ProviderHandle, record: &BackendRecord, entry: &VaultEntry) -> P
             endpoint_profile: match definition.endpoint.endpoint_profile {
                 BackendProfile::Standard => "standard",
                 BackendProfile::ChatGptCodex => "chatgpt_codex",
+                BackendProfile::OpenaiChatCompletions => "openai_chat_completions",
                 BackendProfile::AnthropicImplicitCache => "anthropic_implicit_cache",
                 BackendProfile::OpenaiTerminalChunkUsage => "openai_terminal_chunk_usage",
                 BackendProfile::ZaiFinalChoiceUsage => "zai_final_choice_usage",

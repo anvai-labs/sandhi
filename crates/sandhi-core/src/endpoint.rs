@@ -9,6 +9,10 @@ pub enum EndpointProfileV1 {
     Standard,
     #[serde(rename = "chatgpt_codex")]
     ChatGptCodex,
+    /// OpenAI Chat Completions with newer parameter naming (max_completion_tokens instead of max_tokens).
+    /// Alias: openai_api, codex_chat
+    #[serde(rename = "openai_chat_completions")]
+    OpenaiChatCompletions,
     AnthropicImplicitCache,
     OpenaiTerminalChunkUsage,
     ZaiFinalChoiceUsage,
@@ -32,6 +36,12 @@ impl EndpointProfileV1 {
             Self::Standard => Ok(()),
             Self::ChatGptCodex if family == EndpointFamilyV1::OpenaiResponses => Ok(()),
             Self::ChatGptCodex => Err("Codex profile requires OpenAI Responses"),
+            Self::OpenaiChatCompletions if family == EndpointFamilyV1::OpenaiChatCompletions => {
+                Ok(())
+            }
+            Self::OpenaiChatCompletions => {
+                Err("OpenAI Chat Completions profile requires OpenAI Chat Completions endpoint")
+            }
             Self::AnthropicImplicitCache if family == EndpointFamilyV1::AnthropicMessages => Ok(()),
             Self::AnthropicImplicitCache => {
                 Err("implicit Messages usage profile requires Anthropic Messages")
@@ -60,7 +70,10 @@ impl std::str::FromStr for EndpointProfileV1 {
         }
         match value.trim().to_ascii_lowercase().as_str() {
             "standard" => Ok(Self::Standard),
-            "chatgpt_codex" => Ok(Self::ChatGptCodex),
+            "chatgpt_codex" | "codex" => Ok(Self::ChatGptCodex),
+            "openai_chat_completions" | "openai_api" | "openaiapi" => {
+                Ok(Self::OpenaiChatCompletions)
+            }
             "anthropic_implicit_cache" => Ok(Self::AnthropicImplicitCache),
             "openai_terminal_chunk_usage" => Ok(Self::OpenaiTerminalChunkUsage),
             "zai_final_choice_usage" => Ok(Self::ZaiFinalChoiceUsage),
@@ -86,6 +99,10 @@ mod tests {
                 "deepseek_final_choice_usage",
             ),
             (EndpointProfileV1::ChatGptCodex, "chatgpt_codex"),
+            (
+                EndpointProfileV1::OpenaiChatCompletions,
+                "openai_chat_completions",
+            ),
             (
                 EndpointProfileV1::AnthropicImplicitCache,
                 "anthropic_implicit_cache",

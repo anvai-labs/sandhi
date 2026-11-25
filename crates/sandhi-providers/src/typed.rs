@@ -145,6 +145,8 @@ pub struct ProviderTransportConfig {
     pub anthropic_usage_profile: sandhi_core::usage::AnthropicUsageProfile,
     pub gemini_auth_scheme: GeminiAuthScheme,
     pub openai_responses_profile: OpenAiResponsesProfile,
+    /// OpenAI Chat Completions endpoint profile (determines parameter naming: max_tokens vs max_completion_tokens)
+    pub openai_chat_profile: sandhi_core::EndpointProfileV1,
     /// Per-endpoint User-Agent override. Rides the static headers to the wire,
     /// replacing the shared client's default (`sandhi/<version>`). Some upstreams
     /// gate on client identity (agent-allowlisting plans); a credential can carry
@@ -177,6 +179,7 @@ impl ProviderTransportConfig {
             anthropic_usage_profile: Default::default(),
             gemini_auth_scheme: GeminiAuthScheme::ApiKey,
             openai_responses_profile: OpenAiResponsesProfile::Standard,
+            openai_chat_profile: sandhi_core::EndpointProfileV1::Standard,
             user_agent: None,
             connect_timeout_secs: None,
         }
@@ -1130,6 +1133,7 @@ impl ProviderRuntime {
             ProviderFamily::OpenAiCompat => Arc::new(TypedOpenAiCompat {
                 slug: config.slug.clone(),
                 raw,
+                endpoint_profile: config.openai_chat_profile,
             }),
             ProviderFamily::Anthropic => Arc::new(crate::anthropic_typed::TypedAnthropic::new(
                 raw,
@@ -1261,6 +1265,7 @@ impl ProviderRuntime {
             stream_setup_timeout_secs,
             stream_idle_timeout_secs,
             Default::default(),
+            sandhi_core::EndpointProfileV1::Standard,
         )
     }
 
@@ -1277,6 +1282,7 @@ impl ProviderRuntime {
         stream_setup_timeout_secs: Option<f64>,
         stream_idle_timeout_secs: Option<f64>,
         profile: sandhi_core::usage::OpenAiStreamUsageProfile,
+        endpoint_profile: sandhi_core::EndpointProfileV1,
     ) -> ProviderHandle {
         let slug = slug.into();
         let mut config = ProviderTransportConfig::new(
@@ -1290,6 +1296,7 @@ impl ProviderRuntime {
         config.timeout_secs = timeout_secs;
         config.stream_setup_timeout_secs = stream_setup_timeout_secs;
         config.stream_idle_timeout_secs = stream_idle_timeout_secs;
+        config.openai_chat_profile = endpoint_profile;
         let raw_forwarder = Some(
             build_raw_forwarder(self.ca_file.as_ref(), &config)
                 .with_openai_stream_usage_profile(profile),
@@ -1301,7 +1308,11 @@ impl ProviderRuntime {
         ProviderHandle {
             provider_identity: None,
             upstream_budget_scope: format!("upstream:{slug}").into(),
-            inner: Arc::new(TypedOpenAiCompat { slug, raw }),
+            inner: Arc::new(TypedOpenAiCompat {
+                slug,
+                raw,
+                endpoint_profile,
+            }),
             family: ProviderFamily::OpenAiCompat,
             source_convention: raw_forwarder
                 .as_ref()
@@ -1669,6 +1680,7 @@ impl ProviderRuntime {
 struct TypedOpenAiCompat {
     slug: String,
     raw: Arc<dyn Provider>,
+    endpoint_profile: sandhi_core::EndpointProfileV1,
 }
 
 #[async_trait]
@@ -1688,12 +1700,17 @@ impl ChatProvider for TypedOpenAiCompat {
     fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {
         let role = self.raw.peer_role();
         let mut body = encode_openai_request_for_peer(request, role)?;
-        if role == sandhi_core::PeerRoleV1::Provider && openai_neutral_o_series(&self.slug, request)
-        {
+        if role == sandhi_core::PeerRoleV1::Provider {
             let object = body.as_object_mut().expect("OpenAI request is an object");
-            object.remove("temperature");
-            if let Some(limit) = object.remove("max_tokens") {
-                object.insert("max_completion_tokens".into(), limit);
+            // o-series models don't support temperature
+            if openai_neutral_o_series(&self.slug, request) {
+                object.remove("temperature");
+            }
+            // OpenAI Chat Completions profile uses max_completion_tokens instead of max_tokens
+            if self.endpoint_profile == sandhi_core::EndpointProfileV1::OpenaiChatCompletions {
+                if let Some(limit) = object.remove("max_tokens") {
+                    object.insert("max_completion_tokens".into(), limit);
+                }
             }
         }
         Ok(body)
@@ -2975,6 +2992,7 @@ mod tests {
         let provider = TypedOpenAiCompat {
             slug: "moonshot".into(),
             raw,
+            endpoint_profile: sandhi_core::EndpointProfileV1::Standard,
         };
         let mut request = request();
         request.model = "kimi-k3".into();
@@ -3780,6 +3798,7 @@ mod tests {
                 "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
             }))),
+            endpoint_profile: sandhi_core::EndpointProfileV1::Standard,
         }
     }
 

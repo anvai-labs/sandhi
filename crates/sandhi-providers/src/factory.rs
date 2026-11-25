@@ -212,6 +212,7 @@ impl ProviderRuntime {
                 setup,
                 idle,
                 profile.openai_stream_usage_profile(),
+                profile,
             ),
             ProviderFamily::OpenAiResponses if profile == Profile::ChatGptCodex => self
                 .chatgpt_responses(
