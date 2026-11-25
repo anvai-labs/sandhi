@@ -822,10 +822,13 @@ impl SqliteLedger {
     /// Released rows keep their full evidence, gain `liability_released_at`, and
     /// their reservation closes as an explicit zero-charge policy release —
     /// `spent` is never touched and no settlement receipt is written, so nothing
-    /// is fabricated. Rows that settled or carry a settleable charge are skipped
-    /// untouched (recovery settles those normally). Re-verification happens
-    /// inside the same transaction as the stamp, so a race with live settlement
-    /// resolves to the receipt, never to a release. Returns the released count.
+    /// is fabricated. The paired back leg closes with the same zero-charge
+    /// release (on the normal path it rides the primary's settle); an
+    /// already-settled back leg is untouched. Rows that settled or carry a
+    /// settleable charge are skipped untouched (recovery settles those
+    /// normally). Re-verification happens inside the same transaction as the
+    /// stamp, so a race with live settlement resolves to the receipt, never to
+    /// a release. Returns the released count.
     pub fn release_aged_unresolved_liabilities_durable(
         &mut self,
         now: OffsetDateTime,
@@ -834,6 +837,7 @@ impl SqliteLedger {
         let released_at = now.unix_timestamp();
         let cutoff_ts = cutoff.unix_timestamp();
         let mut released = 0usize;
+        let mut converged = false;
         let mut after_id = 0i64;
         loop {
             // Immediate: classification reads the post-commit state of any
@@ -842,6 +846,32 @@ impl SqliteLedger {
             let tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            // Converge residuals from releases that shipped before the paired
+            // close: their intents are already stamped, so the candidate loop
+            // never revisits them, and reclaim explicitly exempts back legs —
+            // the stranded upstream holds were permanent admission denial
+            // (reserved_durable ignores expiry). Stamped with the intent's OWN
+            // release stamp, not the sweep clock: paired::read requires the
+            // state mirrors to be exactly equal, and the primary kept the
+            // original stamp. Once per sweep call, not per page transaction —
+            // budget_reservation only grows; idempotent via settled = 0.
+            if !converged {
+                tx.execute(
+                    "UPDATE budget_reservation SET actual = 0, settled = 1,
+                        settled_at = (SELECT i.liability_released_at
+                                      FROM budget_execution_back_leg b
+                                      JOIN budget_execution_intent i
+                                        ON i.execution_id = b.execution_id
+                                      WHERE b.reservation_id = budget_reservation.id)
+                     WHERE settled = 0 AND EXISTS (
+                       SELECT 1 FROM budget_execution_back_leg b
+                       JOIN budget_execution_intent i ON i.execution_id = b.execution_id
+                       WHERE b.reservation_id = budget_reservation.id
+                         AND i.liability_released_at IS NOT NULL)",
+                    [],
+                )?;
+                converged = true;
+            }
             let candidates: Vec<(String, i64, String)> = {
                 let mut statement = tx.prepare(
                     "SELECT i.execution_id, i.reservation_id, r.scope
@@ -917,6 +947,18 @@ impl SqliteLedger {
                 if changed != 1 {
                     return Err(EvidenceError::CorruptObservation);
                 }
+                // The paired back leg rides the primary's settle on the normal
+                // path (paired::settle); a policy release must close it the same
+                // way or its upstream hold stays unsettled forever. Same
+                // zero-charge release semantics; an already-settled or absent
+                // back leg is left untouched.
+                tx.execute(
+                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
+                     WHERE id = (SELECT reservation_id FROM budget_execution_back_leg
+                                 WHERE execution_id = ?2)
+                       AND settled = 0",
+                    params![released_at, execution_id],
+                )?;
                 released += 1;
             }
             let full_page = candidate_count == 200;

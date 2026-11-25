@@ -2290,6 +2290,247 @@ fn aged_unresolved_liability_releases_hold_and_classifies_terminal() {
     );
 }
 
+fn paired_context() -> context::ExecutionContext {
+    serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"translation",
+        "upstream_ref":"openai:default","upstream_budget_scope":"upstream:team","requested_model":"model","actual_model":"model","provider":"models",
+        "endpoint_family":"openai_chat_completions","transport":{"upstream_host":"upstream.test","policy":{"buffered":{"duration_ms":30000}}},"transport_binding_sha256":"a".repeat(64),"accounting_policy":{"version":1,"cache_read_weight":1000}})).unwrap()
+}
+
+#[test]
+fn aged_release_closes_the_paired_back_leg_with_the_same_zero_charge() {
+    // On the normal path the back leg rides the primary's settle; a policy
+    // release that closed only the primary would leave the upstream hold
+    // unsettled forever (observed on a live edge: 4 released intents, 4
+    // permanently unsettled upstream reservations).
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger =
+        SqliteLedger::open(dir.path().join("backleg-release.db").to_str().unwrap()).unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_paired_contextual_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+            "request",
+            &paired_context(),
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    let back_id: i64 = ledger
+        .conn
+        .query_row(
+            "SELECT reservation_id FROM budget_execution_back_leg WHERE execution_id = ?1",
+            [&intent.execution_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        1
+    );
+    let (primary_actual, primary_settled, primary_at): (i64, i64, Option<i64>) = ledger
+        .conn
+        .query_row(
+            "SELECT actual, settled, settled_at FROM budget_reservation WHERE id = ?1",
+            [intent.reservation.id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    let (back_actual, back_settled, back_at): (i64, i64, Option<i64>) = ledger
+        .conn
+        .query_row(
+            "SELECT actual, settled, settled_at FROM budget_reservation WHERE id = ?1",
+            [back_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    // Same zero-charge policy release on both legs, same stamp.
+    assert_eq!((primary_actual, primary_settled), (0, 1));
+    assert_eq!((back_actual, back_settled), (0, 1));
+    assert_eq!(primary_at, Some(now.unix_timestamp()));
+    assert_eq!(back_at, primary_at);
+    // The released pair satisfies the state-mirror invariant: the back leg is
+    // readable through the scope-checked paired view (pre-fix releases left
+    // this exact read failing with InconsistentSettlement forever).
+    let back = ledger
+        .execution_back_leg_durable("team", &intent.execution_id)
+        .unwrap()
+        .expect("released paired intent keeps a readable back leg");
+    assert_eq!(back.id as i64, back_id);
+    assert_eq!(back.scope, "upstream:team");
+}
+
+#[test]
+fn aged_release_skips_a_closed_before_dispatch_pair_untouched() {
+    // A closed-before-dispatch pair is already terminal: both legs were closed
+    // by paired::close, and the sweep must not stamp or re-close either.
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger =
+        SqliteLedger::open(dir.path().join("backleg-closed.db").to_str().unwrap()).unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_paired_contextual_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+            "request",
+            &paired_context(),
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    assert!(matches!(
+        ledger.close_before_dispatch_durable("team", &intent.execution_id),
+        Ok(ClosureOutcome::Closed(_))
+    ));
+    let read_legs = |ledger: &SqliteLedger| -> Vec<(i64, i64, Option<i64>)> {
+        let back_id: i64 = ledger
+            .conn
+            .query_row(
+                "SELECT reservation_id FROM budget_execution_back_leg WHERE execution_id = ?1",
+                [&intent.execution_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        ["primary", "back"]
+            .iter()
+            .map(|which| {
+                let id = if *which == "primary" {
+                    intent.reservation.id as i64
+                } else {
+                    back_id
+                };
+                ledger
+                    .conn
+                    .query_row(
+                        "SELECT actual, settled, settled_at FROM budget_reservation WHERE id = ?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap()
+            })
+            .collect()
+    };
+    let legs_before = read_legs(&ledger);
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        0
+    );
+    // Both legs exactly as close_before_dispatch_durable left them: the sweep
+    // skipped the terminal pair and re-stamped nothing.
+    assert_eq!(legs_before[0], (0, 1, legs_before[0].2));
+    assert_eq!(legs_before[1], (0, 1, legs_before[0].2));
+    assert_eq!(read_legs(&ledger), legs_before);
+}
+
+#[test]
+fn release_sweep_converges_back_legs_stranded_by_older_releases() {
+    // Releases that shipped before the paired close left already-stamped
+    // intents with permanently unsettled upstream holds (observed live:
+    // 4 released intents holding 155,969 ceiling tokens). The candidate loop
+    // never revisits a stamped intent, so convergence must reach them too.
+    let dir = tempfile::tempdir().unwrap();
+    let mut ledger =
+        SqliteLedger::open(dir.path().join("backleg-converge.db").to_str().unwrap()).unwrap();
+    let IntentAdmission::Admitted(intent) = ledger
+        .reserve_paired_contextual_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+            "request",
+            &paired_context(),
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    let back_id: i64 = ledger
+        .conn
+        .query_row(
+            "SELECT reservation_id FROM budget_execution_back_leg WHERE execution_id = ?1",
+            [&intent.execution_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        1
+    );
+    assert_eq!(ledger.reserved_durable("team").unwrap(), 0);
+    // Recreate the pre-fix residual: intent stamped, back leg unsettled again.
+    ledger
+        .conn
+        .execute(
+            "UPDATE budget_reservation SET settled = 0, settled_at = NULL WHERE id = ?1",
+            [back_id],
+        )
+        .unwrap();
+    let (primary_at, back_ceiling): (Option<i64>, i64) = ledger
+        .conn
+        .query_row(
+            "SELECT (SELECT settled_at FROM budget_reservation WHERE id = ?1),
+                    (SELECT ceiling FROM budget_reservation WHERE id = ?2)",
+            [intent.reservation.id as i64, back_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    // The stranded hold is withheld from the upstream scope until the
+    // convergence pass closes it.
+    assert_eq!(ledger.reserved_durable("upstream:team").unwrap(), 100);
+    // A LATER sweep clock: production's 60 s cadence guarantees the healing
+    // sweep's now differs from the original release stamp, so the convergence
+    // must restore the intent's OWN stamp — not the sweep's — for the state
+    // mirrors to satisfy paired::read.
+    let later = now + time::Duration::seconds(120);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(later, cutoff)
+            .unwrap(),
+        0,
+        "no new release, only convergence"
+    );
+    let (back_actual, back_settled, back_at): (i64, i64, Option<i64>) = ledger
+        .conn
+        .query_row(
+            "SELECT actual, settled, settled_at FROM budget_reservation WHERE id = ?1",
+            [back_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((back_actual, back_settled), (0, 1));
+    // The healed mirror carries the ORIGINAL release stamp, not the sweep's.
+    assert_eq!(back_at, primary_at);
+    assert_ne!(primary_at, Some(later.unix_timestamp()));
+    // The pair is readable again through the scope-checked paired view.
+    let back = ledger
+        .execution_back_leg_durable("team", &intent.execution_id)
+        .unwrap()
+        .expect("converged paired intent keeps a readable back leg");
+    assert_eq!(back.id as i64, back_id);
+    // The upstream capacity hold is freed from the admission view.
+    assert_eq!(ledger.reserved_durable("upstream:team").unwrap(), 0);
+    assert_eq!(back_ceiling, 100);
+}
+
 #[test]
 fn fresh_or_terminal_intents_are_never_released() {
     let mut ledger = SqliteLedger::open(":memory:").unwrap();
