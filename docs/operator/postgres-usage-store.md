@@ -66,8 +66,8 @@ set (timestamptz/int8/text/float8), so the table can be managed by the
 [`anvai-labs/pgdatalake`](https://github.com/anvai-labs/pgdatalake) fork as an Iceberg
 lakehouse table. **No lakehouse DDL lives in Sandhi code** — the fork's staged-write pipeline,
 publisher and catalog are operator concerns. The recipe (server-mode; embedded mode does not
-exist yet — see the co-design handoff
-[`HANDOFF-pgdatalake-embedded-mode-codesign-20261124.md`](../../HANDOFF-pgdatalake-embedded-mode-codesign-20261124.md)):
+exist yet — see the co-design handoff `HANDOFF-pgdatalake-embedded-mode-codesign-20261124.md`,
+retained with the pgdatalake fork's session notes):
 
 ```sql
 CREATE EXTENSION lakehouse;
