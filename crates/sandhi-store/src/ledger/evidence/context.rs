@@ -219,7 +219,7 @@ impl ExecutionContext {
         }
         Ok(())
     }
-    pub(super) fn encode(&self) -> Result<String, EvidenceError> {
+    pub(crate) fn encode(&self) -> Result<String, EvidenceError> {
         self.validate()?;
         let encoded = serde_json::to_string(self).map_err(|_| EvidenceError::InvalidInput)?;
         if encoded.len() > MAX_CONTEXT_BYTES {
@@ -228,7 +228,7 @@ impl ExecutionContext {
         Ok(encoded)
     }
 
-    fn validate_historical(&self) -> Result<(), EvidenceError> {
+    pub(crate) fn validate_historical(&self) -> Result<(), EvidenceError> {
         if self.transport.upstream_host.is_some()
             || self.transport.policy
                 != match self.delivery {
