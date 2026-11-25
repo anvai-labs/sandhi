@@ -59,6 +59,8 @@ pub(crate) fn resolve(
         | BackendProfile::ZaiFinalChoiceUsage
         | BackendProfile::DeepseekFinalChoiceUsage
             if family == ProviderFamily::OpenAiCompat && scheme != CredentialScheme::Oauth => {}
+        BackendProfile::OpenaiChatCompletions
+            if family == ProviderFamily::OpenAiCompat && scheme != CredentialScheme::Oauth => {}
         _ => return None,
     }
     Some(ResolvedEndpoint {

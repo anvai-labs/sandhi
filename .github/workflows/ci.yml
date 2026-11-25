@@ -165,6 +165,22 @@ jobs:
     needs: changes
     if: ${{ always() && needs.changes.result == 'success' && needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-24.04
+    services:
+      # The optional Postgres backends' gated live suites run against this service on every
+      # PR (Phase 3 PR-A: the enforcement-ledger core joins the pre-existing usage store).
+      postgres:
+        image: mirror.gcr.io/library/postgres:16-alpine
+        env:
+          POSTGRES_USER: sandhi
+          POSTGRES_PASSWORD: sandhi
+          POSTGRES_DB: sandhi_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sandhi -d sandhi_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -188,6 +204,16 @@ jobs:
         run: |
           cargo clippy -p sandhi-store --features postgres --all-targets -- -D warnings
           cargo check -p sandhi-proxy --features postgres
+      # The ignore-gated Postgres suites (usage store round trip + Phase 3 enforcement-ledger
+      # core, incl. the TD-0007 conformance suite and the cross-connection concurrency proofs)
+      # run for real on every PR. Both suites self-initialize their schema, so a fresh empty
+      # service database is a supported starting state.
+      - name: Gated Postgres suites run against the service
+        env:
+          SANDHI_TEST_PG_DSN: postgres://sandhi:sandhi@localhost:5432/sandhi_test
+        run: |
+          cargo test -p sandhi-store --features postgres
+          cargo test -p sandhi-store --features postgres -- --ignored
       - name: Optional embedded evaluator feature compiles and passes portable tests
         run: |
           cargo clippy --workspace --all-targets --features policy-onnx -- -D warnings

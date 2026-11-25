@@ -9,6 +9,10 @@ pub enum EndpointProfileV1 {
     Standard,
     #[serde(rename = "chatgpt_codex")]
     ChatGptCodex,
+    /// OpenAI Chat Completions with newer parameter naming (max_completion_tokens instead of max_tokens).
+    /// FromStr aliases: openai_api, openaiapi; serde accepts only `openai_chat_completions`.
+    #[serde(rename = "openai_chat_completions")]
+    OpenaiChatCompletions,
     AnthropicImplicitCache,
     OpenaiTerminalChunkUsage,
     ZaiFinalChoiceUsage,
@@ -32,6 +36,12 @@ impl EndpointProfileV1 {
             Self::Standard => Ok(()),
             Self::ChatGptCodex if family == EndpointFamilyV1::OpenaiResponses => Ok(()),
             Self::ChatGptCodex => Err("Codex profile requires OpenAI Responses"),
+            Self::OpenaiChatCompletions if family == EndpointFamilyV1::OpenaiChatCompletions => {
+                Ok(())
+            }
+            Self::OpenaiChatCompletions => {
+                Err("OpenAI Chat Completions profile requires OpenAI Chat Completions endpoint")
+            }
             Self::AnthropicImplicitCache if family == EndpointFamilyV1::AnthropicMessages => Ok(()),
             Self::AnthropicImplicitCache => {
                 Err("implicit Messages usage profile requires Anthropic Messages")
@@ -60,7 +70,10 @@ impl std::str::FromStr for EndpointProfileV1 {
         }
         match value.trim().to_ascii_lowercase().as_str() {
             "standard" => Ok(Self::Standard),
-            "chatgpt_codex" => Ok(Self::ChatGptCodex),
+            "chatgpt_codex" | "codex" => Ok(Self::ChatGptCodex),
+            "openai_chat_completions" | "openai_api" | "openaiapi" => {
+                Ok(Self::OpenaiChatCompletions)
+            }
             "anthropic_implicit_cache" => Ok(Self::AnthropicImplicitCache),
             "openai_terminal_chunk_usage" => Ok(Self::OpenaiTerminalChunkUsage),
             "zai_final_choice_usage" => Ok(Self::ZaiFinalChoiceUsage),
@@ -73,6 +86,33 @@ impl std::str::FromStr for EndpointProfileV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
+    #[test]
+    fn openai_chat_completions_profile_family_and_aliases() {
+        let profile = EndpointProfileV1::OpenaiChatCompletions;
+        assert!(profile
+            .validate_family(EndpointFamilyV1::OpenaiChatCompletions)
+            .is_ok());
+        for family in [
+            EndpointFamilyV1::OpenaiResponses,
+            EndpointFamilyV1::AnthropicMessages,
+            EndpointFamilyV1::GeminiGenerateContent,
+        ] {
+            assert!(
+                profile.validate_family(family).is_err(),
+                "{family:?} must reject the profile"
+            );
+        }
+        // FromStr aliases; serde (the store/admin-JSON surface) accepts only the
+        // exact wire name.
+        assert_eq!(
+            EndpointProfileV1::from_str("openai_chat_completions").unwrap(),
+            profile
+        );
+        assert_eq!(EndpointProfileV1::from_str("openai_api").unwrap(), profile);
+        assert_eq!(EndpointProfileV1::from_str("openaiapi").unwrap(), profile);
+        assert!(EndpointProfileV1::from_str("codex_chat").is_err());
+    }
     #[test]
     fn stored_profile_names_keep_their_existing_values() {
         for (profile, wire) in [
@@ -86,6 +126,10 @@ mod tests {
                 "deepseek_final_choice_usage",
             ),
             (EndpointProfileV1::ChatGptCodex, "chatgpt_codex"),
+            (
+                EndpointProfileV1::OpenaiChatCompletions,
+                "openai_chat_completions",
+            ),
             (
                 EndpointProfileV1::AnthropicImplicitCache,
                 "anthropic_implicit_cache",

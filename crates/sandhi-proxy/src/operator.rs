@@ -574,6 +574,7 @@ fn build_provider_handle_with_endpoint(
             None,
             None,
             endpoint.profile.openai_stream_usage_profile(),
+            endpoint.profile,
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,
