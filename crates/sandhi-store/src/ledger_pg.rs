@@ -11,8 +11,10 @@
 //!   No dual-write: dual owners break C3. The enum seam (`ProxyLedger`) is PR-D's concern.
 //! - **Concurrency = MVCC + transactional advisory locks, not a write lock.** READ COMMITTED
 //!   transactions are serialized per scope by `pg_advisory_xact_lock`: the admit is
-//!   `BEGIN → scope lock → guarded reclaim → budget read → SUMs → INSERT RETURNING id →
+//!   `BEGIN → scope lock → reclaim → budget read → SUMs → INSERT RETURNING id →
 //!   COMMIT`, which is SQLite's `BEGIN IMMEDIATE` narrowed from the whole file to one scope.
+//!   (PR-A's reclaim DELETE is deliberately unguarded — no evidence tables exist yet, so the
+//!   NOT EXISTS arms have nothing to protect; PR-B restores them.)
 //!   The lock key is `fnv1a64(scope)` computed in Rust (never PG's `hashtext`, whose
 //!   algorithm is a version detail) masked to `i64::MAX`; a paired (two-scope) transaction
 //!   acquires both keys ASCENDING (deadlock-free house rule). Multi-scope sweeps need no
