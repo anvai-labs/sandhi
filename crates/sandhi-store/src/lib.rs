@@ -8,6 +8,8 @@ pub mod backends;
 pub mod diagnostics;
 pub mod ledger;
 #[cfg(feature = "postgres")]
+pub mod ledger_pg;
+#[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod profiles;
 pub mod references;
@@ -32,6 +34,8 @@ use time::OffsetDateTime;
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+#[cfg(feature = "postgres")]
+pub use ledger_pg::PostgresLedger;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
 pub use profiles::{ProfileRecord, ProfileStore};
