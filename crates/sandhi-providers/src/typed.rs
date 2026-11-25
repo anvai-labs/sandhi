@@ -4216,3 +4216,60 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod endpoint_profile_tests {
+    use super::*;
+    use crate::escape_hatch::FnProvider;
+    use std::sync::Arc;
+
+    fn codec(profile: sandhi_core::EndpointProfileV1) -> TypedOpenAiCompat {
+        TypedOpenAiCompat {
+            slug: "openai".into(),
+            raw: Arc::new(FnProvider::new("test", |_req| async {
+                unimplemented!("translation test never completes a call")
+            })),
+            endpoint_profile: profile,
+        }
+    }
+
+    fn request(model: &str) -> ChatRequestV1 {
+        serde_json::from_value(json!({
+            "model": model,
+            "max_output_tokens": 64,
+            "messages": [{"role": "user", "content": "ping"}]
+        }))
+        .expect("valid neutral request")
+    }
+
+    #[test]
+    fn openai_chat_completions_profile_translates_non_o_series_models() {
+        // The profile drives the parameter naming independently of the model
+        // heuristic: a non-o-series model under the profile translates.
+        let body = codec(sandhi_core::EndpointProfileV1::OpenaiChatCompletions)
+            .execution_request(&request("gpt-4o"))
+            .unwrap();
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 64);
+    }
+
+    #[test]
+    fn standard_profile_keeps_max_tokens_for_non_o_series_models() {
+        let body = codec(sandhi_core::EndpointProfileV1::Standard)
+            .execution_request(&request("gpt-4o"))
+            .unwrap();
+        assert_eq!(body["max_tokens"], 64);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn o_series_models_translate_without_a_profile() {
+        // The model heuristic is the default: o-series models reject max_tokens.
+        let body = codec(sandhi_core::EndpointProfileV1::Standard)
+            .execution_request(&request("o3"))
+            .unwrap();
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 64);
+        assert!(body.get("temperature").is_none());
+    }
+}

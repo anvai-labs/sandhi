@@ -195,6 +195,7 @@ impl ExecutionContext {
                         "standard"
                             | "chatgpt_codex"
                             | "anthropic_implicit_cache"
+                            | "openai_chat_completions"
                             | "openai_terminal_chunk_usage"
                             | "zai_final_choice_usage"
                             | "deepseek_final_choice_usage"
@@ -207,6 +208,8 @@ impl ExecutionContext {
                         || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
                     && (b.endpoint_profile != "chatgpt_codex"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiResponses)
+                    && (b.endpoint_profile != "openai_chat_completions"
+                        || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
             })
             && self.cache.as_ref().is_none_or(|c| {
                 digest(&c.plan_sha256) && digest(&c.binding_sha256) && c.intent.validate().is_ok()
