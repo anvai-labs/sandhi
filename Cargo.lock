@@ -3118,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-core"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "regex",
  "schemars 0.8.22",
@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-dialect"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "base64 0.22.1",
  "http",
@@ -3143,7 +3143,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-providers"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3166,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-proxy"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "sandhi-store"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "base64 0.22.1",
  "criterion",

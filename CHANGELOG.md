@@ -17,6 +17,25 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
+## [0.26.1] — Source candidate, 2026-11-25
+
+- Fix the ADR-0048 aged-liability release to close the paired back leg with the same zero-charge
+  policy release inside the same transaction. Previously a released execution left its
+  upstream-scope reservation unsettled forever: reclaim explicitly exempts back-leg reservations
+  and the reserved-capacity view ignores expiry, so each released incident permanently withheld
+  its upstream ceiling (observed live as four holds retaining ~155,969 tokens). A convergence
+  pass in the maintenance sweep also closes back legs stranded by releases that shipped before
+  this fix, stamped with the intent's own release stamp so the paired state mirrors stay exactly
+  equal for `paired::read`. Released pairs are readable again through
+  `execution_back_leg_durable`.
+- Distinguish recovery ledger-busy contention from unresolved accounting: the 1 s recovery tick
+  colliding with the 60 s maintenance sweep's ledger hold now logs at debug as
+  `ledger_busy_contention` instead of warning `durable_accounting_recovery_unresolved` roughly
+  once per minute on a quiet edge. Real recovery failures remain warn-level and the `/readyz`
+  contract is unchanged.
+- Docs: remove a dead relative link in `docs/operator/postgres-usage-store.md` that failed the
+  strict documentation build on every pull request.
+
 ## [0.26.0] — Source candidate, 2026-11-24
 
 - Bound every dashboard and admin usage query to a date window: `/dashboard/api/usage` and
