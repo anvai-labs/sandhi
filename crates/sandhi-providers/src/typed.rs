@@ -1706,8 +1706,12 @@ impl ChatProvider for TypedOpenAiCompat {
             if openai_neutral_o_series(&self.slug, request) {
                 object.remove("temperature");
             }
-            // OpenAI Chat Completions profile uses max_completion_tokens instead of max_tokens
-            if self.endpoint_profile == sandhi_core::EndpointProfileV1::OpenaiChatCompletions {
+            // OpenAI Chat Completions profile uses max_completion_tokens instead of max_tokens;
+            // o-series models require the same translation by default (model heuristic),
+            // independent of the configured profile.
+            if self.endpoint_profile == sandhi_core::EndpointProfileV1::OpenaiChatCompletions
+                || openai_neutral_o_series(&self.slug, request)
+            {
                 if let Some(limit) = object.remove("max_tokens") {
                     object.insert("max_completion_tokens".into(), limit);
                 }
