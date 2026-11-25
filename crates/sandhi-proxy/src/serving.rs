@@ -48,7 +48,14 @@ impl RecoveryTask {
                             break;
                         }
                         if let Err(reason) = buffered::recover(state.clone()).await {
-                            tracing::warn!(reason, "durable_accounting_recovery_unresolved");
+                            // The recovery tick re-fires in one second; losing it to the
+                            // 60 s maintenance sweep's ledger hold is routine and needs
+                            // no operator attention. Everything else stays fail-visible.
+                            if reason == "ledger_busy_contention" {
+                                tracing::debug!(reason, "recovery tick deferred; ledger busy");
+                            } else {
+                                tracing::warn!(reason, "durable_accounting_recovery_unresolved");
+                            }
                         }
                     }
                 }
