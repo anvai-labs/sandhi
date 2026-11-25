@@ -18,7 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 GATE = "release-binary-preflight"
 BUILD = (
-    "cargo build --release --locked --features sentinelpass-ipc,policy-onnx "
+    "cargo build --release --locked --features sentinelpass-ipc,policy-onnx,postgres "
     '--target "$TARGET" --bin sandhi-proxy --bin sandhi'
 )
 

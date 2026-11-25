@@ -508,6 +508,6 @@ def test_remediated_oidc_crypto_advisory_cannot_retain_an_ignore(tmp_path, oidc_
 
 def test_binary_release_ships_optional_sensitive_policy():
     run = commands(workflow("release.yml")["jobs"]["binaries"])
-    assert "--features sentinelpass-ipc,policy-onnx" in run
+    assert "--features sentinelpass-ipc,policy-onnx,postgres" in run
     for artifact in ["scripts/sensitive_policy.py", "crates/sandhi-proxy/assets/sensitive-text-v1", "docs/operator/sensitive-policy.md"]:
         assert artifact in run
