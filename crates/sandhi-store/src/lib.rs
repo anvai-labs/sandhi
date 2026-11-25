@@ -25,8 +25,9 @@ use std::time::Duration;
 use rusqlite::{params, Connection};
 use sandhi_core::{
     Backend, CacheReadCoverage, CacheReadObservation, LatencySource, LatencySummary, Sink,
-    UsageAggregateV1, UsageEvent,
+    UsageAggregateV1, UsageEvent, Window,
 };
+use time::OffsetDateTime;
 
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
@@ -131,6 +132,72 @@ impl From<rusqlite::Error> for UsageStoreError {
 impl From<sqlx::Error> for UsageStoreError {
     fn from(error: sqlx::Error) -> Self {
         Self(error.to_string())
+    }
+}
+
+/// Backend-agnostic error for the durable enforcement ledger — the [`SqliteLedger`] /
+/// [`ShardedLedger`] seam and the optional Postgres ledger (`postgres` feature). The message
+/// only ever reaches an operator surface or a log (never a client body with SQL in it); every
+/// backend maps its native errors into this so ledger consumers never see a driver type.
+#[derive(Debug)]
+pub enum LedgerStoreError {
+    /// The storage layer failed. The rendered message is operator-safe.
+    Backend(String),
+    /// The reservation is tracked by the evidence subsystem (an execution intent, back leg or
+    /// dispatch fence references it) and refuses legacy settlement — its charge may only be
+    /// resolved by `settle_terminal_durable`. The reservation itself is unchanged.
+    TrackedSettlementRequired,
+}
+
+impl std::fmt::Display for LedgerStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Backend(message) => message,
+            // Same rendered shape as `EvidenceError::TrackedSettlementRequired`, so the
+            // refactor off the old synthesized SQLITE_CONSTRAINT is message-compatible.
+            Self::TrackedSettlementRequired => "tracked reservation requires terminal settlement",
+        })
+    }
+}
+
+impl std::error::Error for LedgerStoreError {}
+
+impl From<rusqlite::Error> for LedgerStoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for LedgerStoreError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+
+/// FNV-1a 64-bit — explicit and stable forever, unlike `DefaultHasher` (SipHash, algorithm may
+/// change between std releases). Shared between the sharded ledger's scope routing and the
+/// Postgres ledger's advisory-lock keys (both must derive the same stable identity from a scope).
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The exclusive lower bound (unix seconds) of a fixed trailing window. `Total` returns -1 so
+/// every durable timestamp is included. Old consumption leaves continuously as time advances.
+/// Backend-agnostic by definition — both the SQLite and Postgres ledgers must derive identical
+/// window bounds from the same `(now, window)` pair.
+pub(crate) fn window_start_ts(now: OffsetDateTime, window: Window) -> i64 {
+    match window {
+        Window::Total => -1,
+        Window::Hourly => now.unix_timestamp().saturating_sub(3_600),
+        Window::Daily => now.unix_timestamp().saturating_sub(86_400),
+        Window::Weekly => now.unix_timestamp().saturating_sub(86_400 * 7),
+        Window::Monthly => now.unix_timestamp().saturating_sub(86_400 * 30),
     }
 }
 
