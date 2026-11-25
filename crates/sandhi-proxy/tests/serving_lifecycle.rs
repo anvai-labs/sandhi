@@ -554,7 +554,11 @@ async fn public_driver_recovers_after_bounded_busy_storage_refusal_without_infer
     let reason = sandhi_proxy::settlement::buffered::recover(state.clone())
         .await
         .unwrap_err();
-    assert_eq!(reason, "durable_accounting_recovery_unresolved");
+    // A held ledger mutex is expected contention with the maintenance sweep, not
+    // unresolved durable accounting: it must carry its own diagnostic code so the
+    // serving supervisor can defer quietly instead of warning every collision.
+    assert_eq!(reason, "ledger_busy_contention");
+    assert_ne!(reason, "durable_accounting_recovery_unresolved");
     let addr = address();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_with_shutdown_timeout(

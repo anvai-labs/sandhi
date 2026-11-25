@@ -602,7 +602,13 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
                 }
                 Ok(count)
             })
-            .map_err(|_| "durable_accounting_recovery_unresolved")?;
+            .map_err(|failure| match failure {
+                // The 60 s maintenance sweep holds the ledger mutex; a recovery tick
+                // colliding with it is expected contention, not unresolved accounting.
+                // Keep the code distinct so the supervisor can stay quiet about it.
+                super::Failure::LedgerBusy => "ledger_busy_contention",
+                _ => "durable_accounting_recovery_unresolved",
+            })?;
             settled += result;
             if cursor.current.is_none() && cursor.scopes.is_none() {
                 cursor.complete = true;
