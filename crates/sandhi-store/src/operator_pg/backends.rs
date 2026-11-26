@@ -106,19 +106,22 @@ impl PostgresBackendStore {
     ///
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
-    pub async fn connect(dsn: &str) -> Result<Self, BackendStoreError> {
-        let pool = super::OperatorPool::connect(dsn, 2).await?;
-        Self::init(pool.pool()).await?;
-        Ok(Self { pool })
-    }
-
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
         let pool = super::OperatorPool::connect_with(options, 2).await?;
         Self::init(pool.pool()).await.map_err(|error| match error {
             BackendStoreError::Database(error) => error,
             other => sqlx::Error::Configuration(other.to_string().into()),
         })?;
+        Ok(Self { pool })
+    }
+
+    /// Open the store on `dsn` and run the idempotent init (table, namespace migration,
+    /// corrupt-binding check, immutability trigger).
+    pub async fn connect(dsn: &str) -> Result<Self, BackendStoreError> {
+        let pool = super::OperatorPool::connect(dsn, 2).await?;
+        Self::init(pool.pool()).await?;
         Ok(Self { pool })
     }
 

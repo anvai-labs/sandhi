@@ -129,10 +129,19 @@ impl PostgresStore {
     /// Must be called on a `tokio` runtime (the proxy connects inside its startup `block_on`);
     /// that runtime's handle is retained for every later blocking statement.
     pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| sqlx::Error::Configuration(format!("invalid DSN: {e}").into()))?;
+        Self::connect_with(options).await
+    }
+
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite may point `search_path` at a per-test schema).
+    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
         let pool = PgPoolOptions::new()
             .max_connections(4)
             .acquire_timeout(Duration::from_secs(5))
-            .connect(dsn)
+            .connect_with(options)
             .await?;
         for statement in DDL {
             sqlx::query(statement).execute(&pool).await?;

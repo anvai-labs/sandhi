@@ -169,9 +169,10 @@ impl PostgresLedger {
         Self::connect_with(options).await
     }
 
-    /// Like [`Self::connect`] from pre-parsed options (the test suite points `search_path`
-    /// at a per-test schema for isolation against shared instances).
-    async fn connect_with(options: PgConnectOptions) -> Result<Self, LedgerStoreError> {
+    /// Like [`Self::connect`] from pre-parsed options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema
+    /// for isolation against shared instances).
+    pub async fn connect_with(options: PgConnectOptions) -> Result<Self, LedgerStoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .acquire_timeout(Duration::from_secs(5))

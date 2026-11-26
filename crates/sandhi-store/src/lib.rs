@@ -6,6 +6,7 @@
 pub mod alerts;
 pub mod backends;
 pub mod diagnostics;
+pub mod durable_exec;
 pub mod ledger;
 #[cfg(feature = "postgres")]
 pub mod ledger_pg;
@@ -13,6 +14,7 @@ pub mod ledger_pg;
 pub mod operator_pg;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod operator_traits;
 pub mod profiles;
 pub mod references;
 pub mod routes;
@@ -36,6 +38,11 @@ use time::OffsetDateTime;
 pub use alerts::{AlertRuleRecord, AlertStore, CreateAlertRequest};
 pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreError};
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+pub use durable_exec::DurableExecutionLedger;
+pub use operator_traits::{
+    DynAlertStore, DynBackendStore, DynPolicyAuditStore, DynProfileStore, DynReferenceStore,
+    DynRouteStore, DynVaultStore, DynVirtualKeyStore,
+};
 #[cfg(feature = "postgres")]
 pub use ledger_pg::PostgresLedger;
 #[cfg(feature = "postgres")]

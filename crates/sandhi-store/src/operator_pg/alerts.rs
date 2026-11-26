@@ -3,50 +3,10 @@
 //! differs. Errors render through [`crate::OperatorStoreError`] (the SQLite twin's
 //! `rusqlite::Result` seam).
 
-use sandhi_core::AlertChannel;
-use serde::Serialize;
-
 use super::{init_ddl, OperatorPool};
 use crate::OperatorStoreError;
 
-/// A persisted alert rule (+ firing/ack state) — the same record shape as the SQLite
-/// twin's [`crate::alerts::AlertRuleRecord`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AlertRuleRecord {
-    pub id: String,
-    pub scope: String,
-    pub threshold_pct: u8,
-    /// Channel as the wire spelling (`log` / `webhook:<url>`).
-    pub channel: String,
-    pub created_at: String,
-    pub last_fired_at: Option<String>,
-    pub acked_at: Option<String>,
-}
-
-impl AlertRuleRecord {
-    /// Decode the stored wire spelling back into the core enum.
-    pub fn channel_enum(&self) -> AlertChannel {
-        AlertChannel::parse(&self.channel)
-    }
-
-    /// The [`AlertRule`] view used by the live registry.
-    pub fn to_rule(&self) -> sandhi_core::AlertRule {
-        sandhi_core::AlertRule {
-            id: self.id.clone(),
-            scope: self.scope.clone(),
-            threshold_pct: self.threshold_pct,
-            channel: self.channel_enum(),
-        }
-    }
-}
-
-/// Inputs to [`PostgresAlertStore::create`] — the same request shape as the SQLite twin.
-#[derive(Debug, Clone)]
-pub struct CreateAlertRequest {
-    pub scope: String,
-    pub threshold_pct: u8,
-    pub channel: AlertChannel,
-}
+pub use crate::alerts::{AlertRuleRecord, CreateAlertRequest};
 
 /// Idempotent schema init, mirroring the SQLite DDL column-for-column (types map
 /// TEXT→text, INTEGER→integer — a percent fits easily; the timestamps stay RFC-3339
@@ -85,17 +45,20 @@ impl PostgresAlertStore {
     ///
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
-    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect(dsn, 2).await?;
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+        let pool = OperatorPool::connect_with(options, 2).await?;
         init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect_with(options, 2).await?;
-        init_ddl(pool.pool(), DDL).await?;
-        Ok(Self { pool })
+    /// Open the store on `dsn` and initialize the schema (idempotent).
+    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| sqlx::Error::Configuration(format!("invalid DSN: {e}").into()))?;
+        Self::connect_with(options).await
     }
 
     /// Create a rule. Returns the persisted record.
@@ -250,6 +213,8 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    use sandhi_core::AlertChannel;
     use super::*;
 
     fn req(scope: &str, pct: u8) -> CreateAlertRequest {

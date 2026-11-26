@@ -75,17 +75,20 @@ impl PostgresRouteStore {
     ///
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
-    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
-        let pool = super::OperatorPool::connect(dsn, 2).await?;
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+        let pool = super::OperatorPool::connect_with(options, 2).await?;
         super::init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
-        let pool = super::OperatorPool::connect_with(options, 2).await?;
-        super::init_ddl(pool.pool(), DDL).await?;
-        Ok(Self { pool })
+    /// Open the store on `dsn` and initialize the schema (idempotent).
+    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| sqlx::Error::Configuration(format!("invalid DSN: {e}").into()))?;
+        Self::connect_with(options).await
     }
 
     pub fn get(&self, id: &str) -> Result<Option<RouteRecord>, Error> {

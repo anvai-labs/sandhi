@@ -82,23 +82,25 @@ impl PostgresVaultStore {
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
     pub async fn connect(dsn: &str, backend: Box<dyn Vault>) -> Result<Self, VaultError> {
-        let pool = OperatorPool::connect(dsn, 2)
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| VaultError::Backend(format!("vault connect: invalid DSN: {e}")))?;
+        Self::connect_with(options, backend).await
+    }
+
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+        backend: Box<dyn Vault>,
+    ) -> Result<Self, VaultError> {
+        let pool = OperatorPool::connect_with(options, 2)
             .await
             .map_err(|e| VaultError::Backend(format!("vault connect: {e}")))?;
         init_schema(pool.pool())
             .await
             .map_err(|e| VaultError::Backend(format!("vault init: {e}")))?;
         Ok(Self { pool, backend })
-    }
-
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect_with(options, 2).await?;
-        init_schema(pool.pool()).await?;
-        Ok(Self {
-            pool,
-            backend: Box::new(crate::vault::InMemoryVault::new()),
-        })
     }
 
     /// Store a credential: writes the secret to the backend and the metadata to Postgres.
@@ -488,7 +490,9 @@ mod tests {
     }
 
     fn pg_vault(tag: &str) -> (String, PostgresVaultStore) {
-        super::super::pg_test::connect_in_schema(tag, PostgresVaultStore::connect_with)
+        super::super::pg_test::connect_in_schema(tag, |options| {
+            PostgresVaultStore::connect_with(options, Box::new(crate::vault::InMemoryVault::new()))
+        })
     }
 
     fn drop_schema(schema: &str) {
@@ -602,7 +606,12 @@ mod tests {
 
         let reopened = super::super::pg_test::connect_in_schema(
             "vault-generation",
-            PostgresVaultStore::connect_with,
+            |options| {
+                PostgresVaultStore::connect_with(
+                    options,
+                    Box::new(crate::vault::InMemoryVault::new()),
+                )
+            },
         )
         .1;
         assert_eq!(
@@ -687,7 +696,12 @@ mod tests {
             .build()
             .expect("test runtime");
         let store = rt
-            .block_on(PostgresVaultStore::connect_with(options))
+            .block_on(PostgresVaultStore::connect_with(
+                options,
+                Box::new(SyntheticExactBackend {
+                    exact_calls: Mutex::new(0),
+                }),
+            ))
             .map(|store| PostgresVaultStore {
                 backend: Box::new(SyntheticExactBackend {
                     exact_calls: Mutex::new(0),
