@@ -17,6 +17,26 @@ the source version. See
 [RELEASING.md](RELEASING.md). PyPI/npm use trusted publishing; crates reuse the existing token.
 A partly published release remains incomplete even when some artifacts are available.
 
+## [0.27.0] — Source candidate, 2026-11-26
+
+- **Whole-store Postgres backend (ADR-0049)**: `SANDHI_STORE_DSN` selects ONE PostgreSQL
+  database for every durable surface — the enforcement ledger + evidence subsystem (Phase 3
+  PR-A/B), the 8 operator stores (vault metadata, virtual keys, backends, profiles, alerts,
+  routes, native references, policy receipts — PR-C), the usage store (#518), and the
+  native-reference registry. Pure replace, single writer, no downgrade; SQLite remains the
+  untouched default when the variable is unset. `SANDHI_STORE_DSN` supersedes the legacy
+  usage-only `SANDHI_USAGE_DSN` (still honored). All Postgres stores are behind the
+  non-default `postgres` cargo feature, which release binaries now carry.
+- Migration discipline: `scripts/migrate_sqlite_to_postgres.py` (run with writers quiesced;
+  ids preserved verbatim; sequences reset; validated against a live PostgreSQL 18 instance on the co-design
+  edge — CI's gated suites run postgres:16-alpine).
+- Container-enforcement smoke: the OOM probe now accepts both enforcement mechanisms
+  (kernel OOM-kill or allocator refusal — hosted-runner kernels differ), recording which
+  fired; only a clean exit fails the smoke.
+- Rust API: `UsageStore` / `DurableExecutionLedger` / object-safe `Dyn*` operator-store seams;
+  `PostgresLedger` / `PostgresStore` / `Postgres*Store`; `ProxyState` operator fields are now
+  object-safe seams (breaking for direct constructors — the 0.4.0 MINOR precedent applies).
+
 ## [0.26.1] — Source candidate, 2026-11-25
 
 - Fix the ADR-0048 aged-liability release to close the paired back leg with the same zero-charge
