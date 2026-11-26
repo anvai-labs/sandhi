@@ -238,10 +238,12 @@ pub fn encode_ollama_request(request: &ChatRequestV1) -> Result<Value, ProviderE
                     .tools
                     .iter()
                     .map(|tool| {
-                        json!({"type":"function", "function":{
-                            "name":tool.name, "description":tool.description,
-                            "parameters":tool.parameters
-                        }})
+                        // Map-built: unset optionals are OMITTED, never null.
+                        let mut function = Map::new();
+                        function.insert("name".into(), Value::String(tool.name.clone()));
+                        insert_optional(&mut function, "description", tool.description.clone());
+                        function.insert("parameters".into(), tool.parameters.clone());
+                        json!({"type": "function", "function": function})
                     })
                     .collect(),
             ),
@@ -459,9 +461,41 @@ fn decode_done_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
+/// Insert `value` only when `Some` — unset optional fields are OMITTED on
+/// the wire, never a JSON null.
+fn insert_optional<T: serde::Serialize>(
+    body: &mut Map<String, Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        if let Ok(value) = serde_json::to_value(value) {
+            body.insert(key.into(), value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unset_tool_description_is_omitted_not_null() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"llama3",
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"name":"lookup","parameters":{"type":"object"}}]
+        }))
+        .unwrap();
+        let body = encode_ollama_request(&request).unwrap();
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["name"], "lookup");
+        assert!(
+            function.get("description").is_none(),
+            "description must be absent when unset, got {:?}",
+            function.get("description")
+        );
+    }
 
     #[test]
     fn removed_w3d_field_fails_loudly() {

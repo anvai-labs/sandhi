@@ -3,6 +3,20 @@
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
+/// Insert `value` only when `Some` — unset optional fields are OMITTED on
+/// the wire, never a JSON null.
+fn insert_optional<T: serde::Serialize>(
+    body: &mut Map<String, Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        if let Ok(value) = serde_json::to_value(value) {
+            body.insert(key.into(), value);
+        }
+    }
+}
+
 #[cfg(test)]
 use sandhi_core::UsageCompleteness;
 use sandhi_core::{
@@ -10,7 +24,7 @@ use sandhi_core::{
     ContentPart, FinishReasonV1, MessageContent, ThinkingEncodingV1, ToolCallV1, ToolChoiceMode,
     ToolChoiceV1, UsageV2,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -329,11 +343,14 @@ pub(crate) fn encode_anthropic_request_base(
             .tools
             .iter()
             .map(|tool| {
-                json!({
-                    "name":tool.name,
-                    "description":tool.description,
-                    "input_schema":tool.parameters,
-                })
+                // Map-built: unset optionals are OMITTED, never null (the
+                // json! macro serializes Option::None as an unconditional
+                // null, violating the ToolDefinitionV1 wire contract).
+                let mut definition = Map::new();
+                definition.insert("name".into(), Value::String(tool.name.clone()));
+                insert_optional(&mut definition, "description", tool.description.clone());
+                definition.insert("input_schema".into(), tool.parameters.clone());
+                Value::Object(definition)
             })
             .collect();
         if let Some(native_tools) = native_tools {
@@ -845,6 +862,23 @@ mod tests {
             "empty bucket = explicit no-caching opt-out"
         );
         assert!(body["tools"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn unset_tool_description_is_omitted_not_null() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"claude-test", "max_output_tokens":16,
+            "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"name":"lookup","parameters":{"type":"object"}}]
+        }))
+        .unwrap();
+        let body = encode_anthropic_request(&request).unwrap();
+        assert_eq!(body["tools"][0]["name"], "lookup");
+        assert!(
+            body["tools"][0].get("description").is_none(),
+            "description must be absent when unset, got {:?}",
+            body["tools"][0].get("description")
+        );
     }
 
     #[test]
