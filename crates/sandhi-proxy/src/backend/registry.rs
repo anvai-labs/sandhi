@@ -14,7 +14,7 @@ use axum::{
 };
 use sandhi_providers::{BackendBinding, ProviderFamily, ProviderHandle, ProviderRuntime};
 use sandhi_store::{
-    BackendRecord, BackendStore, BackendStoreError, VaultEntry, VaultError, VaultStore,
+    BackendRecord, BackendStoreError, VaultEntry, VaultError,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -119,8 +119,8 @@ fn bind(handle: ProviderHandle, record: &BackendRecord, entry: &VaultEntry) -> P
 /// Reconstruct exact configured routes. Missing/locked/expired credentials stay
 /// dormant; metadata read failures are errors, not an empty successful inventory.
 pub fn rehydrate_backends(
-    vault: &VaultStore,
-    store: &BackendStore,
+    vault: &dyn sandhi_store::DynVaultStore,
+    store: &dyn sandhi_store::DynBackendStore,
     runtime: &ProviderRuntime,
     providers: &mut HashMap<String, ProviderHandle>,
 ) -> Result<(), BackendStoreError> {

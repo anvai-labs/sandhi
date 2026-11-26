@@ -43,13 +43,11 @@ pub fn enable(state: &Arc<ProxyState>, config: Config) -> Result<(), &'static st
         config.accounting_wait,
         config.transport_timeout,
     )?;
-    let native_references=super::with_durable_ledger(&state.ledger, |ledger| {
-        ledger.open_native_reference_store().map_err(|_|sandhi_store::ledger::evidence::EvidenceError::UnsupportedTrackedLedger)
-    }).map_err(|_|"durable execution requires native reference storage on its original single file-backed ledger")?;
+    let native_references = open_reference_store(state)?;
     state
         .buffered_accounting
         .set(Arc::new(Buffered {
-            native_references: Arc::new(native_references),
+            native_references,
             native_reference_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             jobs: Jobs::for_proxy(state, config.capacity, config.accounting_wait),
             config,
@@ -72,6 +70,7 @@ use axum::{body::Bytes, http::StatusCode, response::Response};
 use sandhi_core::ChatRequestV1;
 use sandhi_providers::ProviderHandle;
 use sandhi_store::ledger::evidence::{RecoveryCursor, RecoveryState, ScopeCursor};
+use sandhi_store::DynReferenceStore;
 use std::sync::Mutex;
 
 pub(crate) struct Accounting {
@@ -91,7 +90,7 @@ struct Recovery {
     unresolved: usize,
 }
 pub(crate) struct Buffered {
-    native_references: Arc<sandhi_store::references::ReferenceStore>,
+    native_references: Arc<dyn DynReferenceStore>,
     native_reference_slots: Arc<tokio::sync::Semaphore>,
     config: Config,
     jobs: Jobs,
@@ -111,7 +110,7 @@ pub(crate) fn recovery_degraded(state: &ProxyState) -> bool {
 pub(crate) fn reference_authority(
     state: &ProxyState,
 ) -> Option<(
-    Arc<sandhi_store::references::ReferenceStore>,
+    Arc<dyn DynReferenceStore>,
     Arc<tokio::sync::Semaphore>,
 )> {
     state.buffered_accounting.get().map(|owner| {
@@ -165,6 +164,38 @@ pub(crate) fn accounting_error(dialect: IngressDialect, request_id: &str) -> Res
         request_id.parse().expect("generated identity"),
     );
     no_automatic_retry(response)
+}
+
+/// Open the native-reference registry on the enforcement ledger's backend: the original
+/// single file-backed ledger opens its file-backed store; the Postgres whole-store ledger
+/// (ADR-0049) uses the PG reference registry wired at startup. No caller-selected second
+/// database on either arm.
+fn open_reference_store(state: &ProxyState) -> Result<Arc<dyn DynReferenceStore>, &'static str> {
+    #[cfg(feature = "postgres")]
+    if matches!(
+        &*state.ledger.lock().expect("ledger poisoned"),
+        crate::ledger::ProxyLedger::Postgres(_)
+    ) {
+        return state
+            .postgres_native_references
+            .clone()
+            .ok_or("durable execution requires native reference storage on its ledger backend");
+    }
+    let guard = state.ledger.lock().expect("ledger poisoned");
+    let store = match &*guard {
+        crate::ledger::ProxyLedger::Durable(ledger) => ledger
+            .open_native_reference_store()
+            .map_err(|_| {
+                "durable execution requires native reference storage on its original single file-backed ledger"
+            })?,
+        _ => {
+            return Err(
+                "durable execution requires native reference storage on its original single file-backed ledger",
+            )
+        }
+    };
+    drop(guard);
+    Ok(Arc::new(store))
 }
 
 /// OpenAI/Anthropic SDKs consult this header before their status-based retry

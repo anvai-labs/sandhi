@@ -11,7 +11,7 @@ use sandhi_store::ledger::evidence::{
     ClosureOutcome, DispatchOutcome, DispatchPermit, EvidenceError, ExecutionIntent,
     PreDispatchClosure, SettlementOutcome,
 };
-use sandhi_store::ShardedLedger;
+use sandhi_store::DurableExecutionLedger;
 use std::sync::Mutex;
 
 mod diagnostics;
@@ -330,25 +330,33 @@ impl PendingSettlement {
 // shard locks can still wait. This does not promise an end-to-end deadline.
 fn with_durable_ledger<T>(
     ledger: &Mutex<ProxyLedger>,
-    operation: impl FnOnce(&ShardedLedger) -> Result<T, EvidenceError>,
+    operation: impl FnOnce(&dyn DurableExecutionLedger) -> Result<T, EvidenceError>,
 ) -> Result<T, Failure> {
     with_durable_ledger_observed(ledger, None, operation)
 }
 fn with_durable_ledger_observed<T>(
     ledger: &Mutex<ProxyLedger>,
     progress: Option<&Progress>,
-    operation: impl FnOnce(&ShardedLedger) -> Result<T, EvidenceError>,
+    operation: impl FnOnce(&dyn DurableExecutionLedger) -> Result<T, EvidenceError>,
 ) -> Result<T, Failure> {
     mark(progress, Stage::OuterTryLock);
     let guard = ledger.try_lock().map_err(|error| match error {
         std::sync::TryLockError::WouldBlock => Failure::LedgerBusy,
         std::sync::TryLockError::Poisoned(_) => Failure::LedgerPoisoned,
     })?;
-    let ProxyLedger::Durable(durable) = &*guard else {
-        return Err(Failure::NonDurableLedger);
+    // The SQLite (default) and Postgres (SANDHI_STORE_DSN, ADR-0049) backends expose the
+    // identical paired-execution surface; the volatile arm is not an HTTP execution surface.
+    let outcome = match &*guard {
+        ProxyLedger::Durable(durable) => Some(operation(durable)),
+        #[cfg(feature = "postgres")]
+        ProxyLedger::Postgres(durable) => Some(operation(durable)),
+        ProxyLedger::Memory(_) => None,
     };
     mark(progress, Stage::LedgerReady);
-    operation(durable).map_err(Failure::Evidence)
+    match outcome {
+        Some(result) => result.map_err(Failure::Evidence),
+        None => Err(Failure::NonDurableLedger),
+    }
 }
 
 /// Own an admitted execution until explicit dispatch authorization or closure.

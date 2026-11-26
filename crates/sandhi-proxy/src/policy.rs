@@ -1,6 +1,6 @@
 //! Bounded trusted built-in policy evaluation + mandatory durable admission receipt.
 use sandhi_core::policy::{Decision, Disposition, Engine, Identity, InputFormat};
-use sandhi_store::policy::PolicyAuditStore;
+use sandhi_store::DynPolicyAuditStore;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 
 pub struct PolicyGate {
     engine: Arc<Engine>,
-    audit: Arc<PolicyAuditStore>,
+    audit: Arc<dyn DynPolicyAuditStore>,
     slots: Arc<Semaphore>,
     /// Test seam: raises the wall-clock budget to at least this duration.
     /// [`PolicyGate::new`] keeps the document deadline authoritative; tests on
@@ -28,7 +28,7 @@ impl PolicyGate {
     pub(crate) fn revision(&self) -> u64 {
         self.engine.configuration().revision
     }
-    pub fn new(engine: Engine, audit: Arc<PolicyAuditStore>) -> Self {
+    pub fn new(engine: Engine, audit: Arc<dyn DynPolicyAuditStore>) -> Self {
         Self::with_deadline_floor(engine, audit, Duration::ZERO)
     }
     /// Builds a gate whose evaluation budget is at least `floor` (the document
@@ -36,7 +36,7 @@ impl PolicyGate {
     /// production always constructs through [`PolicyGate::new`].
     pub fn with_deadline_floor(
         engine: Engine,
-        audit: Arc<PolicyAuditStore>,
+        audit: Arc<dyn DynPolicyAuditStore>,
         floor: Duration,
     ) -> Self {
         Self {
@@ -166,7 +166,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let gate = PolicyGate::new(
             Engine::from_slice_with_registry(&bytes, &registry).unwrap(),
-            Arc::new(PolicyAuditStore::open(&temp.path().join("audit.db"), 10).unwrap()),
+            Arc::new(sandhi_store::policy::PolicyAuditStore::open(&temp.path().join("audit.db"), 10).unwrap()) as _,
         );
         let body = bytes::Bytes::from_static(br#"{"model":"test","messages":[]}"#);
         let all_slots = gate.slots.clone().try_acquire_many_owned(4).unwrap();
@@ -230,7 +230,7 @@ mod tests {
         let tight_dir = tempfile::tempdir().unwrap();
         let stretched_dir = tempfile::tempdir().unwrap();
         let audit = |dir: &std::path::Path| {
-            Arc::new(PolicyAuditStore::open(&dir.join("audit.db"), 10).unwrap())
+            Arc::new(sandhi_store::policy::PolicyAuditStore::open(&dir.join("audit.db"), 10).unwrap()) as _
         };
         // Without the floor the 1 ms document deadline is always missed.
         let tight = PolicyGate::new(

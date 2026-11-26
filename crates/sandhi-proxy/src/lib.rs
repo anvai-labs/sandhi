@@ -83,7 +83,9 @@ use sandhi_providers::{
     token_estimate::baseline_estimate, ProviderError, ProviderFamily, ProviderHandle,
     ProviderRuntime, TokenEstimateCalibrator,
 };
-use sandhi_store::{hash_secret, AlertStore, SqliteStore, VaultStore, VirtualKeyStore};
+#[cfg(feature = "postgres")]
+use sandhi_store::PostgresLedger as PgLedger;
+use sandhi_store::{hash_secret, SqliteStore};
 
 use codec::{
     encode_response_with_emission, DialectCredentials, HttpIngressError, IngressDialect,
@@ -295,12 +297,14 @@ pub struct ProxyState {
     pub usage_store: Option<Arc<dyn sandhi_store::UsageStore>>,
 
     // --- TD-0003 P1 operator surface ---
-    /// Durable provider-credential vault (metadata in SQLite, secret in the active backend).
-    pub vault: Option<Arc<VaultStore>>,
+    /// Durable provider-credential vault (metadata in SQLite by default, secret in the
+    /// active backend; PG metadata index under `SANDHI_STORE_DSN`). Object-safe seam so
+    /// the startup wiring selects the backend without branching at every consumer.
+    pub vault: Option<Arc<dyn sandhi_store::DynVaultStore>>,
     /// Revisioned non-secret backend definitions, separate from vault references.
-    pub backends: Option<Arc<sandhi_store::BackendStore>>,
+    pub backends: Option<Arc<dyn sandhi_store::DynBackendStore>>,
     /// Durable logical routes and compatible session bindings, separate from credentials.
-    pub routes: Option<Arc<sandhi_store::routes::RouteStore>>,
+    pub routes: Option<Arc<dyn sandhi_store::DynRouteStore>>,
     pub routing_slots: Arc<tokio::sync::Semaphore>,
     /// One admitted credential mutation (no waiting queue). Held through persistence/publication,
     /// even if its HTTP caller disconnects. Keeps blocking vault work off async workers and bounded.
@@ -308,7 +312,7 @@ pub struct ProxyState {
     /// One bounded persisted-usage diagnostic operation, with no waiting queue.
     pub diagnostics_reader: Arc<tokio::sync::Semaphore>,
     /// Durable virtual-key store (hashes + scope), rehydrates `keys` on startup.
-    pub vkeys: Option<Arc<VirtualKeyStore>>,
+    pub vkeys: Option<Arc<dyn sandhi_store::DynVirtualKeyStore>>,
     /// Builds typed upstream handles from vault-resolved credentials.
     pub runtime: ProviderRuntime,
     /// Optional operator bearer (distinct from inference credentials). Without one,
@@ -334,7 +338,7 @@ pub struct ProxyState {
     /// Live alert-rule registry + dedup (the evaluation engine). `None` when alerts are off.
     pub alerts: Option<Arc<Mutex<AlertRegistry>>>,
     /// Durable alert-rule store (rules + last_fired_at + ack), backs `/admin/alerts`.
-    pub alert_store: Option<Arc<AlertStore>>,
+    pub alert_store: Option<Arc<dyn sandhi_store::DynAlertStore>>,
     /// Bounded background mirror for alert `last_fired_at` updates. The live registry remains the
     /// request-time dedup authority; only its SQLite persistence leaves the async task.
     pub alert_writer: Option<Arc<BufferedAlertStore>>,
@@ -396,7 +400,12 @@ pub struct ProxyState {
     /// Gateway-profiles store (Phase 5): the applied per-group `profiles` table + the
     /// `profile_tokens` bearer credentials for `GET /auth/profile`. Opened against the same
     /// SQLite file when `SANDHI_STORE` is set; absent otherwise.
-    pub profiles: Option<Arc<sandhi_store::ProfileStore>>,
+    pub profiles: Option<Arc<dyn sandhi_store::DynProfileStore>>,
+    /// The native-reference registry backing the whole-store Postgres mode
+    /// (`SANDHI_STORE_DSN`, ADR-0049): the PG reference registry opened at startup, used
+    /// by `settlement::buffered::enable` instead of the file-backed ledger's own store.
+    /// `None` in the default SQLite mode (the ledger opens its own registry).
+    pub postgres_native_references: Option<Arc<dyn sandhi_store::DynReferenceStore>>,
 }
 
 impl ProxyState {
@@ -476,6 +485,7 @@ impl ProxyState {
             oidc: None,
             budgets: Mutex::new(HashMap::new()),
             public_url: "http://localhost:8787".into(),
+            postgres_native_references: None,
             alerts: None,
             alert_store: None,
             alert_writer: None,
@@ -1584,6 +1594,8 @@ mod drain_contract_tests {
                     };
                     intent.execution_id
                 }
+                #[cfg(feature = "postgres")]
+                ProxyLedger::Postgres(_) => panic!("durable ledger required"),
                 ProxyLedger::Memory(_) => panic!("durable ledger required"),
             }
         };
@@ -2020,7 +2032,7 @@ async fn dashboard_keys(State(state): State<Arc<ProxyState>>, headers: HeaderMap
                 entries
                     .iter()
                     .map(|entry| {
-                        let reference = operator::inventory_reference_plan(store, entry)
+                        let reference = operator::inventory_reference_plan(store.as_ref(), entry)
                             .map_err(|e| e.to_string())?;
                         operator::vault_entry_response(entry, Some(&reference))
                             .map_err(|e| e.to_string())

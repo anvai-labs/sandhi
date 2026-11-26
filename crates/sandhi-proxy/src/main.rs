@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use sandhi_core::{BufferedSink, KeyStore, Sink, VirtualKey};
+use sandhi_core::{AlertRegistry, BufferedSink, KeyStore, Sink, VirtualKey};
 use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
@@ -26,7 +26,9 @@ use sandhi_proxy::{
     DEFAULT_MAX_IN_FLIGHT_AI_REQUESTS, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_SHUTDOWN_GRACE,
 };
 use sandhi_store::{
-    AlertStore, BackendStore, ProfileStore, SqliteStore, UsageStore, VaultStore, VirtualKeyStore,
+    AlertStore, BackendStore, DynAlertStore, DynBackendStore, DynPolicyAuditStore, DynProfileStore,
+    DynReferenceStore, DynRouteStore, DynVaultStore, DynVirtualKeyStore, ProfileStore, SqliteStore,
+    UsageStore, VaultStore, VirtualKeyStore,
 };
 
 #[derive(clap::Parser)]
@@ -239,9 +241,23 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // declared multi-replica topology rather than silently multiplying rate limits or allowing
     // separate processes to make independent hard-budget decisions.
     validate_replica_topology();
-    // The original ordinary durable path is mandatory. Startup failures must
-    // never replace persistent caps or holds with a volatile ledger.
-    let store_path = Some(configured_store_path());
+    // Whole-store backend selection (ADR-0049): `SANDHI_STORE_DSN` moves every store —
+    // enforcement ledger, evidence, the operator tables, the native-reference registry
+    // and usage history — onto ONE Postgres database (pure replace, no mirror window;
+    // the SQLite `SANDHI_STORE` file is not opened for store purposes in this mode).
+    // Unset keeps today's byte-identical SQLite behavior, where the original ordinary
+    // durable path is mandatory: startup failures must never replace persistent caps or
+    // holds with a volatile ledger.
+    let pg_mode = match store_mode_dsn() {
+        StoreModeDsn::Postgres(dsn) => Some(dsn),
+        StoreModeDsn::Refuse => return 1,
+        StoreModeDsn::None => None,
+    };
+    let store_path = if pg_mode.is_some() {
+        None
+    } else {
+        Some(configured_store_path())
+    };
     // Validate the execution topology before usage/vault/ledger initialization:
     // opening a legacy ledger with multiple shards can move historical rows.
     if std::env::var_os("SANDHI_BUFFERED_ACCOUNTING").is_some() {
@@ -399,100 +415,44 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         }
     }
 
-    // Required same-file durable usage store and dashboard.
-    let store = store_path.as_deref().map(|p| {
-        let store = SqliteStore::open(p).unwrap_or_else(|_| startup_store_fatal("usage"));
-        eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
-        Arc::new(store)
-    });
-
-    // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
-    let vault = store_path.as_deref().map(|p| {
-        // The library reports backend misconfiguration as Err; the binary owns
-        // the exit — a bad SANDHI_CREDENTIALS_DIR is fatal at startup.
-        let backend = VaultStore::backend_from_env().unwrap_or_else(|error| {
-            eprintln!("sandhi-proxy: {error}");
-            std::process::exit(1);
-        });
-        let vault =
-            VaultStore::with_backend(p, backend).unwrap_or_else(|_| startup_store_fatal("vault"));
-        eprintln!(
-            "sandhi-proxy: credential vault (backend: {}) at {p}",
-            vault.backend_name()
-        );
-        // Metadata must open, but unavailable external secret authority only disables
-        // the affected provider handle; locked-broker recovery must remain possible.
-        rehydrate_providers_from_vault(&vault, &runtime, &mut providers);
-        Arc::new(vault)
-    });
-    let backends = store_path.as_deref().map(|path| {
-        let store = BackendStore::open(path).unwrap_or_else(|_| startup_store_fatal("backends"));
-        if let Some(vault) = vault.as_deref() {
-            sandhi_proxy::backend::rehydrate_backends(vault, &store, &runtime, &mut providers)
-                .unwrap_or_else(|_| startup_store_fatal("backends"));
-        }
-        Arc::new(store)
-    });
-    let routes = store_path.as_deref().map(|path| {
-        let routes = sandhi_store::routes::RouteStore::open(path)
-            .unwrap_or_else(|_| startup_store_fatal("routes"));
-        routes
-            .list()
-            .unwrap_or_else(|_| startup_store_fatal("routes"));
-        Arc::new(routes)
-    });
-    let vkeys = store_path.as_deref().map(|p| {
-        let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
-        sandhi_proxy::rehydrate_live_keys(&keys, &vkeys);
-        eprintln!("sandhi-proxy: virtual-key store at {p}");
-        Arc::new(vkeys)
-    });
-
-    // Gateway-profiles (Phase 5): per-group `profiles` rows (applied via POST /admin/config/apply)
-    // + the `skp_…` profile tokens that authenticate GET /auth/profile. Same file, disjoint tables.
-    let profiles = store_path.as_deref().map(|p| {
-        let profiles = ProfileStore::open(p).unwrap_or_else(|_| startup_store_fatal("profiles"));
-        eprintln!("sandhi-proxy: profile store at {p}");
-        Arc::new(profiles)
-    });
-
-    // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
-    // transport injected from this tokio runtime).
-    let (alert_store, alerts) = store_path
-        .as_deref()
-        .map(|p| {
-            let store = AlertStore::open(p).unwrap_or_else(|_| startup_store_fatal("alerts"));
-            eprintln!("sandhi-proxy: alert-rule store at {p}");
-            let registry = rehydrate_alerts(&store);
-            (Arc::new(store), Arc::new(std::sync::Mutex::new(registry)))
-        })
-        .unzip();
+    // The whole-store Postgres mode opens EVERY durable surface on the one DSN: usage
+    // history, enforcement ledger + evidence, the eight operator tables, the policy
+    // receipts and the native-reference registry (ADR-0049). Pure replace: no SQLite
+    // mirror window, single writer. A configured backend that cannot open is fatal
+    // (exit 1) — never a silent downgrade. The DSN itself is never logged.
+    // Whole-store wiring: the single open path for every durable surface, SQLite
+    // (default) or Postgres (`SANDHI_STORE_DSN`, ADR-0049).
+    let stores = open_store_set(
+        pg_mode.clone(),
+        store_path.as_deref(),
+        &runtime,
+        &keys,
+        &mut providers,
+    )
+    .await;
+    let StoreSet {
+        store,
+        usage_store,
+        usage_sink,
+        ledger,
+        vault,
+        backends,
+        routes,
+        vkeys,
+        profiles,
+        alerts,
+        alert_store,
+        references,
+        policy_audit,
+        ..
+    } = stores;
     let buffered_alert_store = alert_store.as_ref().map(|store| {
-        Arc::new(BufferedAlertStore::new(
+        Arc::new(BufferedAlertStore::from_store(
             Arc::clone(store),
             positive_usize_env("SANDHI_ALERT_BUFFER_CAPACITY", 256),
         ))
     });
 
-    // Usage sink + usage reads: PostgreSQL when SANDHI_USAGE_DSN is configured, the original
-    // SQLite usage store otherwise. The Postgres usage store REPLACES SQLite as the
-    // usage-event sink + dashboard/usage read path cleanly (the SQLite usage_events table
-    // simply stops receiving writes) — `SANDHI_STORE` stays mandatory and open because the
-    // enforcement ledger, vault, virtual keys and the other operator tables live there and
-    // never read usage_events (ADR-0043).
-    let (usage_store, usage_sink): (Option<Arc<dyn UsageStore>>, Arc<dyn Sink>) =
-        match configured_usage_dsn() {
-            // Diverges (exit 1) when the DSN is set without the `postgres` feature.
-            Some(dsn) => open_postgres_usage_store(&dsn).await,
-            None => {
-                let sqlite = store
-                    .as_ref()
-                    .expect("validated durable usage store")
-                    .clone();
-                let reader = Arc::clone(&sqlite) as Arc<dyn UsageStore>;
-                (Some(reader), sqlite)
-            }
-        };
     let buffered = Arc::new(BufferedSink::new(
         usage_sink,
         positive_usize_env("SANDHI_USAGE_BUFFER_CAPACITY", 1024),
@@ -500,10 +460,22 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     let buffered_sink = Some(Arc::clone(&buffered));
     let sink: Arc<dyn Sink> = buffered;
 
-    // Enforcement shares the original usage-store file and fixed single-file
-    // topology. No startup path substitutes volatile caps or leases.
-    let ledger = ProxyLedger::durable(store_path.as_deref().expect("validated durable path"), 1)
-        .unwrap_or_else(|_| startup_store_fatal("ledger"));
+    // ADR-0049 no-downgrade visibility: name the owning backend per subsystem, never the DSN.
+    eprintln!(
+        "sandhi-proxy: store backend: {} — enforcement ledger + evidence, usage history, operator tables{}",
+        ledger.backend_label(),
+        if references.is_some() {
+            ", native-reference registry"
+        } else {
+            ""
+        }
+    );
+    tracing::info!(
+        target: "sandhi.proxy.store_backend",
+        ledger = ledger.backend_label(),
+        operator_stores = ledger.backend_label(),
+        "store backend selected (ADR-0049)"
+    );
 
     let public_url = std::env::var("SANDHI_PUBLIC_URL").unwrap_or_else(|_| {
         format!(
@@ -564,6 +536,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             std::process::exit(1);
         }
     }
+    state.postgres_native_references = references;
     state.vault = vault;
     state.backends = backends;
     state.routes = routes;
@@ -614,14 +587,19 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
             .map_err(|_| ())?;
             let engine = sandhi_core::policy::Engine::from_slice_with_registry(&bytes, &registry)
                 .map_err(|_| ())?;
-            let store = std::env::var_os("SANDHI_STORE").ok_or(())?;
-            let audit =
-                sandhi_store::policy::PolicyAuditStore::open(std::path::Path::new(&store), 100_000)
-                    .map_err(|_| ())?;
-            Ok(sandhi_proxy::policy::PolicyGate::new(
-                engine,
-                Arc::new(audit),
-            ))
+            let audit: Arc<dyn sandhi_store::DynPolicyAuditStore> = if pg_mode.is_some() {
+                policy_audit.ok_or(())?
+            } else {
+                let store = std::env::var_os("SANDHI_STORE").ok_or(())?;
+                Arc::new(
+                    sandhi_store::policy::PolicyAuditStore::open(
+                        std::path::Path::new(&store),
+                        100_000,
+                    )
+                    .map_err(|_| ())?,
+                )
+            };
+            Ok(sandhi_proxy::policy::PolicyGate::new(engine, audit))
         })();
         match loaded {
             Ok(policy) => state.policy = Some(Arc::new(policy)),
@@ -1177,15 +1155,58 @@ fn positive_u64_env(name: &str, default: u64) -> u64 {
         .unwrap_or_else(|| panic!("{name} must be a positive integer, got {raw:?}"))
 }
 
-/// The configured usage-store DSN, if any. A whitespace-only value counts as unset — some
-/// process managers can only set variables, not unset them.
-fn normalize_usage_dsn(raw: Option<String>) -> Option<String> {
+/// A configured DSN, if any. A whitespace-only value counts as unset — some process
+/// managers can only set variables, not unset them.
+fn normalize_dsn(raw: Option<String>) -> Option<String> {
     raw.map(|dsn| dsn.trim().to_string())
         .filter(|dsn| !dsn.is_empty())
 }
 
+/// The legacy (#518) usage-only DSN. Superseded whenever the whole-store
+/// `SANDHI_STORE_DSN` (ADR-0049) is configured — that one wins.
 fn configured_usage_dsn() -> Option<String> {
-    normalize_usage_dsn(std::env::var("SANDHI_USAGE_DSN").ok())
+    normalize_dsn(std::env::var("SANDHI_USAGE_DSN").ok())
+}
+
+/// Whole-store backend selection (ADR-0049). `SANDHI_STORE_DSN` selects the one-Postgres-
+/// database mode for every store; when it wins over a also-configured `SANDHI_USAGE_DSN`
+/// the narrower legacy variable is simply superseded (reported, never logged).
+#[allow(dead_code)] // the Postgres arm exists only in `postgres` builds
+enum StoreModeDsn {
+    Postgres(String),
+    /// DSN configured but unusable: refuse startup rather than downgrade.
+    Refuse,
+    None,
+}
+
+#[cfg(feature = "postgres")]
+fn store_mode_dsn() -> StoreModeDsn {
+    match normalize_dsn(std::env::var("SANDHI_STORE_DSN").ok()) {
+        Some(dsn) => {
+            if configured_usage_dsn().is_some() {
+                eprintln!(
+                    "sandhi-proxy: SANDHI_STORE_DSN supersedes SANDHI_USAGE_DSN — all stores use the one whole-store database"
+                );
+            }
+            StoreModeDsn::Postgres(dsn)
+        }
+        None => StoreModeDsn::None,
+    }
+}
+
+/// Compiled without the `postgres` feature but configured with a whole-store DSN: refuse
+/// to start rather than silently running the SQLite topology the operator did not ask for.
+#[cfg(not(feature = "postgres"))]
+fn store_mode_dsn() -> StoreModeDsn {
+    if normalize_dsn(std::env::var("SANDHI_STORE_DSN").ok()).is_some() {
+        eprintln!(
+            "sandhi-proxy: startup failed: SANDHI_STORE_DSN is set but this binary was built \
+             without the `postgres` feature; rebuild with `--features postgres` (a configured \
+             store never downgrades to SQLite)"
+        );
+        return StoreModeDsn::Refuse;
+    }
+    StoreModeDsn::None
 }
 
 /// Open the Postgres usage store when `SANDHI_USAGE_DSN` is configured. House posture: a
@@ -1224,6 +1245,318 @@ async fn open_postgres_usage_store(dsn: &str) -> ! {
          usage store never downgrades to SQLite)"
     );
     std::process::exit(1);
+}
+
+/// The whole-store Postgres backend set (ADR-0049): one DSN, every durable surface.
+#[cfg(feature = "postgres")]
+struct PgStores {
+    usage: Arc<sandhi_store::PostgresStore>,
+    ledger: ProxyLedger,
+    vault: Option<Arc<dyn DynVaultStore>>,
+    backends: Option<Arc<dyn DynBackendStore>>,
+    routes: Option<Arc<dyn DynRouteStore>>,
+    vkeys: Option<Arc<dyn DynVirtualKeyStore>>,
+    profiles: Option<Arc<dyn DynProfileStore>>,
+    alert_store: Option<Arc<dyn DynAlertStore>>,
+    policy_audit: Option<Arc<dyn DynPolicyAuditStore>>,
+    references: Arc<dyn DynReferenceStore>,
+}
+
+#[cfg(feature = "postgres")]
+impl PgStores {
+    fn usage_store(&self) -> Option<Arc<dyn UsageStore>> {
+        Some(Arc::clone(&self.usage) as Arc<dyn UsageStore>)
+    }
+    fn usage_sink(&self) -> Arc<dyn Sink> {
+        Arc::clone(&self.usage) as Arc<dyn Sink>
+    }
+}
+
+/// Open every store on the one whole-store DSN (ADR-0049). Connect failure is fatal
+/// (exit 1) — never a downgrade; the DSN is never logged. Provider handles and the live
+/// key store rehydrate exactly as the SQLite mode does.
+#[cfg(feature = "postgres")]
+async fn open_postgres_stores(
+    dsn: &str,
+    runtime: &ProviderRuntime,
+    keys: &KeyStore,
+    providers: &mut HashMap<String, ProviderHandle>,
+) -> PgStores {
+    // The DSN carries its own connect parameters (e.g. `?application_name=sandhi-proxy`);
+    // every Postgres constructor parses them from the DSN, keeping this binary sqlx-free.
+    let mut open = async || -> Result<PgStores, String> {
+        let usage = Arc::new(
+            sandhi_store::PostgresStore::connect(dsn)
+                .await
+                .map_err(|error| format!("usage store: {error}"))?,
+        );
+        let ledger = ProxyLedger::postgres_durable(dsn)
+            .await
+            .map_err(|error| format!("enforcement ledger: {error}"))?;
+        // Secrets stay in the OS keyring / SentinelPass backend (SANDHI_VAULT_BACKEND);
+        // only the metadata index moves to Postgres.
+        let backend = VaultStore::backend_from_env().map_err(|error| error)?;
+        let vault = sandhi_store::PostgresVaultStore::connect(dsn, backend)
+        .await
+        .map_err(|error| format!("vault metadata: {error}"))?;
+        let vault: Arc<dyn DynVaultStore> = Arc::new(vault);
+        rehydrate_providers_from_dyn_vault(vault.as_ref(), runtime, providers);
+        let backends = sandhi_store::PostgresBackendStore::connect(dsn)
+            .await
+            .map_err(|error| format!("backends: {error}"))?;
+        let backends: Arc<dyn DynBackendStore> = Arc::new(backends);
+        sandhi_proxy::backend::rehydrate_backends(vault.as_ref(), backends.as_ref(), runtime, providers)
+            .map_err(|_| "backends: rehydration failed".to_string())?;
+        let routes = sandhi_store::PostgresRouteStore::connect(dsn)
+            .await
+            .map_err(|error| format!("routes: {error}"))?;
+        let routes: Arc<dyn DynRouteStore> = Arc::new(routes);
+        routes.list().map_err(|_| "routes: inventory failed".to_string())?;
+        let vkeys = sandhi_store::PostgresVirtualKeyStore::connect(dsn)
+            .await
+            .map_err(|error| format!("virtual keys: {error}"))?;
+        let vkeys: Arc<dyn DynVirtualKeyStore> = Arc::new(vkeys);
+        sandhi_proxy::rehydrate_live_keys(keys, vkeys.as_ref());
+        let profiles = sandhi_store::PostgresProfileStore::connect(dsn)
+            .await
+            .map_err(|error| format!("profiles: {error}"))?;
+        let profiles: Arc<dyn DynProfileStore> = Arc::new(profiles);
+        let alert_store = sandhi_store::PostgresAlertStore::connect(dsn)
+            .await
+            .map_err(|error| format!("alerts: {error}"))?;
+        let alert_store: Arc<dyn DynAlertStore> = Arc::new(alert_store);
+        let references = sandhi_store::PostgresReferenceStore::connect(dsn)
+            .await
+            .map_err(|error| format!("native references: {error}"))?;
+        let references: Arc<dyn DynReferenceStore> = Arc::new(references);
+        Ok(PgStores {
+            usage,
+            ledger,
+            vault: Some(vault),
+            backends: Some(backends),
+            routes: Some(routes),
+            vkeys: Some(vkeys),
+            profiles: Some(profiles),
+            alert_store: Some(alert_store),
+            policy_audit: None, // opened with the policy configuration, if any
+            references,
+        })
+    };
+    match open().await {
+        Ok(stores) => {
+            eprintln!("sandhi-proxy: credential vault metadata (backend: postgres)");
+            eprintln!("sandhi-proxy: operator stores on the whole-store database");
+            stores
+        }
+        Err(error) => {
+            eprintln!("sandhi-proxy: startup failed: postgres store unavailable: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// [`rehydrate_providers_from_vault`] over the object-safe vault seam.
+#[cfg(feature = "postgres")]
+fn rehydrate_providers_from_dyn_vault(
+    vault: &dyn DynVaultStore,
+    runtime: &ProviderRuntime,
+    providers: &mut HashMap<String, ProviderHandle>,
+) {
+    let Ok(entries) = vault.list() else {
+        tracing::warn!("vault inventory unavailable; provider rehydration incomplete");
+        return;
+    };
+    for entry in entries.into_iter().filter(|e| e.status == "active") {
+        let secret = match vault.get(&entry.provider, &entry.label) {
+            Ok(Some(secret)) => secret,
+            result => {
+                let reason = match result {
+                    Ok(None) => "missing",
+                    Err(sandhi_store::VaultError::Locked) => "locked",
+                    Err(sandhi_store::VaultError::Denied) => "denied",
+                    Err(sandhi_store::VaultError::Timeout) => "timeout",
+                    Err(sandhi_store::VaultError::Configuration) => "configuration",
+                    _ => "unavailable",
+                };
+                tracing::warn!(provider = %entry.provider, label = %entry.label, reason,
+                    "credential not activated; recover via explicit reference registration");
+                continue;
+            }
+        };
+        if let Some(handle) = sandhi_proxy::build_provider_handle(
+            runtime,
+            &entry.provider,
+            entry.base_url.as_deref(),
+            &secret,
+            entry.scheme,
+            entry.user_agent.as_deref(),
+        ) {
+            providers.insert(entry.credential_id(), handle);
+        }
+    }
+}
+
+/// The selected store backend set, whatever `SANDHI_STORE_DSN` selected (ADR-0049).
+/// `pg: true` marks the whole-store Postgres mode: no SQLite file is opened, the
+/// usage store is the PG sink+reader, and the native-reference registry came from PG.
+struct StoreSet {
+    store: Option<Arc<SqliteStore>>,
+    usage_store: Option<Arc<dyn UsageStore>>,
+    usage_sink: Arc<dyn Sink>,
+    ledger: ProxyLedger,
+    vault: Option<Arc<dyn DynVaultStore>>,
+    backends: Option<Arc<dyn DynBackendStore>>,
+    routes: Option<Arc<dyn DynRouteStore>>,
+    vkeys: Option<Arc<dyn DynVirtualKeyStore>>,
+    profiles: Option<Arc<dyn DynProfileStore>>,
+    alerts: Option<Arc<std::sync::Mutex<AlertRegistry>>>,
+    alert_store: Option<Arc<dyn DynAlertStore>>,
+    references: Option<Arc<dyn DynReferenceStore>>,
+    policy_audit: Option<Arc<dyn DynPolicyAuditStore>>,
+}
+
+/// Open every durable surface on the selected backend. Postgres whole-store mode is a
+/// pure replace (no mirror window): either every store opens on the one DSN or startup
+/// fails (exit 1). The SQLite default keeps today's same-file topology unchanged.
+async fn open_store_set(
+    pg_mode: Option<String>,
+    store_path: Option<&str>,
+    runtime: &ProviderRuntime,
+    keys: &KeyStore,
+    providers: &mut HashMap<String, ProviderHandle>,
+) -> StoreSet {
+    #[cfg(feature = "postgres")]
+    if let Some(dsn) = pg_mode.as_deref() {
+        let mut pg = open_postgres_stores(dsn, runtime, keys, providers).await;
+        let alerts = pg.alert_store.as_ref().map(|store| {
+            Arc::new(std::sync::Mutex::new(rehydrate_alerts(store.as_ref())))
+        });
+        return StoreSet {
+            store: None,
+            usage_store: pg.usage_store(),
+            usage_sink: pg.usage_sink(),
+            ledger: pg.ledger,
+            vault: pg.vault,
+            backends: pg.backends,
+            routes: pg.routes,
+            vkeys: pg.vkeys,
+            profiles: pg.profiles,
+            alerts,
+            alert_store: pg.alert_store,
+            references: Some(pg.references),
+            policy_audit: pg.policy_audit.take(),
+        };
+    }
+    let _ = pg_mode;
+
+    // Required same-file durable usage store and dashboard.
+    let store = store_path.map(|p| {
+        let store = SqliteStore::open(p).unwrap_or_else(|_| startup_store_fatal("usage"));
+        eprintln!("sandhi-proxy: usage store at {p} — dashboard on /dashboard");
+        Arc::new(store)
+    });
+
+    // TD-0003 P1 operator surface: vault + virtual-key store (same path as the usage store).
+    let vault: Option<Arc<dyn DynVaultStore>> = store_path.map(|p| {
+        // The library reports backend misconfiguration as Err; the binary owns
+        // the exit — a bad SANDHI_CREDENTIALS_DIR is fatal at startup.
+        let backend = VaultStore::backend_from_env().unwrap_or_else(|error| {
+            eprintln!("sandhi-proxy: {error}");
+            std::process::exit(1);
+        });
+        let vault =
+            VaultStore::with_backend(p, backend).unwrap_or_else(|_| startup_store_fatal("vault"));
+        eprintln!(
+            "sandhi-proxy: credential vault (backend: {}) at {p}",
+            vault.backend_name()
+        );
+        // Metadata must open, but unavailable external secret authority only disables
+        // the affected provider handle; locked-broker recovery must remain possible.
+        rehydrate_providers_from_vault(&vault, runtime, providers);
+        Arc::new(vault) as Arc<dyn DynVaultStore>
+    });
+    let backends: Option<Arc<dyn DynBackendStore>> = store_path.map(|path| {
+        let store = BackendStore::open(path).unwrap_or_else(|_| startup_store_fatal("backends"));
+        if let Some(vault) = vault.as_deref() {
+            sandhi_proxy::backend::rehydrate_backends(vault, &store, runtime, providers)
+                .unwrap_or_else(|_| startup_store_fatal("backends"));
+        }
+        Arc::new(store) as Arc<dyn DynBackendStore>
+    });
+    let routes: Option<Arc<dyn DynRouteStore>> = store_path.map(|path| {
+        let routes = sandhi_store::routes::RouteStore::open(path)
+            .unwrap_or_else(|_| startup_store_fatal("routes"));
+        routes
+            .list()
+            .unwrap_or_else(|_| startup_store_fatal("routes"));
+        Arc::new(routes) as Arc<dyn DynRouteStore>
+    });
+    let vkeys: Option<Arc<dyn DynVirtualKeyStore>> = store_path.map(|p| {
+        let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
+        sandhi_proxy::rehydrate_live_keys(keys, &vkeys);
+        eprintln!("sandhi-proxy: virtual-key store at {p}");
+        Arc::new(vkeys) as Arc<dyn DynVirtualKeyStore>
+    });
+
+    // Gateway-profiles (Phase 5): per-group `profiles` rows (applied via POST /admin/config/apply)
+    // + the `skp_…` profile tokens that authenticate GET /auth/profile. Same file, disjoint tables.
+    let profiles: Option<Arc<dyn DynProfileStore>> = store_path.map(|p| {
+        let profiles = ProfileStore::open(p).unwrap_or_else(|_| startup_store_fatal("profiles"));
+        eprintln!("sandhi-proxy: profile store at {p}");
+        Arc::new(profiles) as Arc<dyn DynProfileStore>
+    });
+
+    // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
+    // transport injected from this tokio runtime).
+    let (alert_store, alerts): (Option<Arc<dyn DynAlertStore>>, Option<Arc<std::sync::Mutex<AlertRegistry>>>) =
+        store_path
+            .map(|p| {
+                let store = AlertStore::open(p).unwrap_or_else(|_| startup_store_fatal("alerts"));
+                eprintln!("sandhi-proxy: alert-rule store at {p}");
+                let registry = rehydrate_alerts(&store);
+                let store: Arc<dyn DynAlertStore> = Arc::new(store);
+                (Some(store), Some(Arc::new(std::sync::Mutex::new(registry))))
+            })
+            .unwrap_or((None, None));
+
+    // Usage sink + usage reads: PostgreSQL when the legacy narrower `SANDHI_USAGE_DSN` is
+    // configured (#518 — usage-only; the `SANDHI_STORE` file stays mandatory because the
+    // enforcement ledger, vault, virtual keys and the other operator tables live there and
+    // never read usage_events, ADR-0043). Default: the same-file SQLite usage store.
+    let (usage_store, usage_sink): (Option<Arc<dyn UsageStore>>, Arc<dyn Sink>) =
+        match configured_usage_dsn() {
+            // Diverges (exit 1) when the DSN is set without the `postgres` feature.
+            Some(dsn) => open_postgres_usage_store(&dsn).await,
+            None => {
+                let sqlite = store
+                    .as_ref()
+                    .expect("validated durable usage store")
+                    .clone();
+                let reader = Arc::clone(&sqlite) as Arc<dyn UsageStore>;
+                (Some(reader), sqlite)
+            }
+        };
+
+    // Enforcement shares the original usage-store file and fixed single-file
+    // topology. No startup path substitutes volatile caps or leases.
+    let ledger = ProxyLedger::durable(store_path.expect("validated durable path"), 1)
+        .unwrap_or_else(|_| startup_store_fatal("ledger"));
+
+    StoreSet {
+        store,
+        usage_store,
+        usage_sink,
+        ledger,
+        vault,
+        backends,
+        routes,
+        vkeys,
+        profiles,
+        alerts,
+        alert_store,
+        references: None,
+        policy_audit: None,
+    }
 }
 
 fn validate_replica_topology() {
@@ -1333,23 +1666,23 @@ fn control_origins(addr: SocketAddr, tls: bool, http_addr: Option<SocketAddr>) -
 
 #[cfg(test)]
 mod tests {
-    use super::{listener_tls_entry_from_json, normalize_usage_dsn, parse_http_bind};
+    use super::{listener_tls_entry_from_json, normalize_dsn, parse_http_bind};
     use std::path::Path;
 
     #[test]
     fn usage_dsn_treats_missing_and_whitespace_only_as_unset() {
         // The store-selection posture: unset and blank both mean "use the SQLite usage store";
         // anything non-blank selects the Postgres backend verbatim (validated by connect()).
-        assert_eq!(normalize_usage_dsn(None), None);
-        assert_eq!(normalize_usage_dsn(Some(String::new())), None);
-        assert_eq!(normalize_usage_dsn(Some("   ".into())), None);
-        assert_eq!(normalize_usage_dsn(Some("\t\n ".into())), None);
+        assert_eq!(normalize_dsn(None), None);
+        assert_eq!(normalize_dsn(Some(String::new())), None);
+        assert_eq!(normalize_dsn(Some("   ".into())), None);
+        assert_eq!(normalize_dsn(Some("\t\n ".into())), None);
         let dsn = "postgres://user:secret@db:5432/sandhi";
-        assert_eq!(normalize_usage_dsn(Some(dsn.into())), Some(dsn.into()));
+        assert_eq!(normalize_dsn(Some(dsn.into())), Some(dsn.into()));
         // Surrounding whitespace is trimmed, not rejected — but the credential-carrying body
         // is preserved byte-exact.
         assert_eq!(
-            normalize_usage_dsn(Some(format!("  {dsn}  "))),
+            normalize_dsn(Some(format!("  {dsn}  "))),
             Some(dsn.into())
         );
     }
