@@ -1977,12 +1977,18 @@ pub(crate) fn encode_openai_request_base(request: &ChatRequestV1) -> Result<Valu
                     .tools
                     .iter()
                     .map(|tool| {
-                        json!({"type":"function", "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                            "strict": tool.strict,
-                        }})
+                        // Build the function object as a Map so `strict` can be
+                        // OMITTED when unset: the json! macro serializes
+                        // Option::None to an unconditional null, which strict
+                        // OpenAI-compatible servers (e.g. lmstudio) reject with
+                        // a 400 schema error. Matches ToolDefinitionV1's own
+                        // skip_serializing_if and insert_optional's semantics.
+                        let mut function = Map::new();
+                        function.insert("name".into(), Value::String(tool.name.clone()));
+                        insert_optional(&mut function, "description", tool.description.clone());
+                        function.insert("parameters".into(), tool.parameters.clone());
+                        insert_optional(&mut function, "strict", tool.strict);
+                        json!({"type": "function", "function": function})
                     })
                     .collect(),
             ),
@@ -2910,6 +2916,38 @@ mod tests {
         assert_eq!(body["messages"][3]["tool_call_id"], "c1");
         assert_eq!(body["max_tokens"], 42);
         assert_eq!(body["top_p"], 0.8);
+    }
+
+    #[test]
+    fn unset_tool_strict_and_description_are_omitted_not_null() {
+        // Strict OpenAI-compatible servers (lmstudio) reject a null `strict`
+        // with a 400 schema error; unset means OMITTED, matching
+        // ToolDefinitionV1's own skip_serializing_if contract.
+        let body = encode_openai_request(&request()).unwrap();
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["name"], "lookup");
+        assert_eq!(function["parameters"]["type"], "object");
+        assert!(
+            function.get("strict").is_none(),
+            "strict must be absent when unset, got {:?}",
+            function.get("strict")
+        );
+        assert!(
+            function.get("description").is_none(),
+            "description must be absent when unset, got {:?}",
+            function.get("description")
+        );
+    }
+
+    #[test]
+    fn set_tool_strict_encodes_as_boolean() {
+        let mut req = request();
+        req.tools[0].strict = Some(true);
+        req.tools[0].description = Some("look things up".into());
+        let body = encode_openai_request(&req).unwrap();
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["strict"], true);
+        assert_eq!(function["description"], "look things up");
     }
 
     // v2 semantic thinking tests. Unit codecs verify qualified restoration only;

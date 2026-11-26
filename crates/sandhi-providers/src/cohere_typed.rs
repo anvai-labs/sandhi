@@ -7,7 +7,7 @@ use sandhi_core::{
     AssistantOutputV1, ChatMessageV1, ChatRequestV1, ChatResponseV1, ContentPart, FinishReasonV1,
     MessageContent, ToolCallV1, ToolChoiceMode, ToolChoiceV1,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -201,10 +201,15 @@ pub fn encode_cohere_request(request: &ChatRequestV1) -> Result<Value, ProviderE
                     .tools
                     .iter()
                     .map(|tool| {
-                        json!({"type":"function", "function":{
-                            "name":tool.name, "description":tool.description,
-                            "parameters":tool.parameters, "strict":tool.strict
-                        }})
+                        // Map-built so optional fields are OMITTED when unset;
+                        // json! serializes Option::None as an unconditional
+                        // null, which strict servers reject with a 400.
+                        let mut function = Map::new();
+                        function.insert("name".into(), Value::String(tool.name.clone()));
+                        insert_optional(&mut function, "description", tool.description.clone());
+                        function.insert("parameters".into(), tool.parameters.clone());
+                        insert_optional(&mut function, "strict", tool.strict);
+                        json!({"type": "function", "function": function})
                     })
                     .collect(),
             ),
@@ -386,6 +391,20 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
     }
 }
 
+/// Insert `value` only when `Some` — the wire contract for optional fields:
+/// unset means OMITTED, never a JSON null (strict servers reject nulls).
+fn insert_optional<T: serde::Serialize>(
+    body: &mut Map<String, Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        if let Ok(value) = serde_json::to_value(value) {
+            body.insert(key.into(), value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +429,29 @@ mod tests {
         }))
         .unwrap();
         assert!(encode_cohere_request(&request).is_err());
+    }
+
+    #[test]
+    fn unset_tool_strict_and_description_are_omitted_not_null() {
+        let request: ChatRequestV1 = serde_json::from_value(json!({
+            "model":"command-r",
+            "messages":[{"role":"user","content":"hello"}],
+            "tools":[{"name":"lookup","parameters":{"type":"object"}}]
+        }))
+        .unwrap();
+        let body = encode_cohere_request(&request).unwrap();
+        let function = &body["tools"][0]["function"];
+        assert_eq!(function["name"], "lookup");
+        assert!(
+            function.get("strict").is_none(),
+            "strict must be absent when unset, got {:?}",
+            function.get("strict")
+        );
+        assert!(
+            function.get("description").is_none(),
+            "description must be absent when unset, got {:?}",
+            function.get("description")
+        );
     }
 
     #[test]

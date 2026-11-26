@@ -312,11 +312,16 @@ pub(crate) fn encode_responses_request_base(
                     .tools
                     .iter()
                     .map(|tool| {
-                        json!({
-                            "type":"function", "name":tool.name,
-                            "description":tool.description, "parameters":tool.parameters,
-                            "strict":tool.strict,
-                        })
+                        // Map-built so optional fields are OMITTED when unset;
+                        // json! serializes Option::None as an unconditional
+                        // null, which strict servers reject with a 400.
+                        let mut function = Map::new();
+                        function.insert("type".into(), Value::String("function".into()));
+                        function.insert("name".into(), Value::String(tool.name.clone()));
+                        insert_optional(&mut function, "description", tool.description.clone());
+                        function.insert("parameters".into(), tool.parameters.clone());
+                        insert_optional(&mut function, "strict", tool.strict);
+                        Value::Object(function)
                     })
                     .collect(),
             ),
@@ -1617,6 +1622,33 @@ mod tests {
             "tools":[{"name":"weather","parameters":{"type":"object"}}],
             "tool_choice":{"name":"weather"}
         })).unwrap()
+    }
+
+    #[test]
+    fn unset_tool_strict_and_description_are_omitted_not_null() {
+        // Unset optionals are OMITTED on the Responses wire too: json!-built
+        // nulls are rejected by strict servers and violate the struct contract.
+        let body = encode_responses_request(&request()).unwrap();
+        let function = &body["tools"][0];
+        assert_eq!(function["name"], "weather");
+        assert!(
+            function.get("strict").is_none(),
+            "strict must be absent when unset, got {:?}",
+            function.get("strict")
+        );
+        assert!(
+            function.get("description").is_none(),
+            "description must be absent when unset, got {:?}",
+            function.get("description")
+        );
+    }
+
+    #[test]
+    fn set_tool_strict_encodes_as_boolean_responses_wire() {
+        let mut req = request();
+        req.tools[0].strict = Some(false);
+        let body = encode_responses_request(&req).unwrap();
+        assert_eq!(body["tools"][0]["strict"], false);
     }
 
     #[test]
