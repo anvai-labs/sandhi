@@ -27,6 +27,14 @@ impl DispatchPermit {
     pub fn attempt_id(&self) -> Option<&str> {
         self.attempt_id.as_deref()
     }
+    /// Shared by both ledger backends' authorization transitions; fields stay private
+    /// so a permit can only be minted inside the fence module family.
+    pub(crate) fn new(execution_id: String, attempt_id: Option<String>) -> Self {
+        Self {
+            execution_id,
+            attempt_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -238,10 +246,10 @@ impl SqliteLedger {
         let attempt_id = attempts::read(&tx, execution_id)?.map(|a| a.attempt_id);
         tx.commit()?;
         match fence {
-            Fence::Authorized if changed => Ok(DispatchOutcome::Authorized(DispatchPermit {
-                execution_id: execution_id.to_string(),
+            Fence::Authorized if changed => Ok(DispatchOutcome::Authorized(DispatchPermit::new(
+                execution_id.to_string(),
                 attempt_id,
-            })),
+            ))),
             Fence::Authorized => Ok(DispatchOutcome::MayHaveDispatched),
             Fence::Closed(value) => Ok(DispatchOutcome::ClosedBeforeDispatch(value)),
             Fence::Prepared => Err(EvidenceError::InconsistentDispatch),

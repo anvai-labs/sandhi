@@ -24,6 +24,8 @@ use time::{Duration, OffsetDateTime};
 
 use sandhi_core::{Denied, EnforcementLedger, LedgerView, Policy, Reservation, Window};
 
+use crate::{window_start_ts, LedgerStoreError};
+
 pub mod evidence;
 
 /// Result of an atomic reserve: admitted (with the lease) or denied (over cap).
@@ -165,18 +167,6 @@ impl SqliteLedger {
              ALTER TABLE budget_limit_windows RENAME TO budget_limit;",
         )?;
         tx.commit()
-    }
-
-    /// The exclusive lower bound (unix seconds) of a fixed trailing window. `Total` returns -1 so
-    /// every durable timestamp is included. Old consumption leaves continuously as time advances.
-    fn window_start_ts(now: OffsetDateTime, window: Window) -> i64 {
-        match window {
-            Window::Total => -1,
-            Window::Hourly => now.unix_timestamp().saturating_sub(3_600),
-            Window::Daily => now.unix_timestamp().saturating_sub(86_400),
-            Window::Weekly => now.unix_timestamp().saturating_sub(86_400 * 7),
-            Window::Monthly => now.unix_timestamp().saturating_sub(86_400 * 30),
-        }
     }
 
     fn window_order_sql() -> &'static str {
@@ -340,7 +330,7 @@ impl SqliteLedger {
             )?;
             for (limit, window, policy) in budgets {
                 let Some(limit) = limit else { continue };
-                let start = Self::window_start_ts(now, Window::parse(&window));
+                let start = window_start_ts(now, Window::parse(&window));
                 let spent: i64 = tx.query_row(
                     "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
                      WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) > ?2",
@@ -383,17 +373,19 @@ impl SqliteLedger {
 
     /// Idempotently settle a reservation to its actual billable usage. Guarded by `settled = 0`, so
     /// a retried or replayed settle updates zero rows and changes nothing (ADR-0005 D2/C2).
-    /// Opt-in tracked reservations require `settle_terminal_durable`; this API returns a
-    /// SQLite constraint error without changing their charge or releasing liability.
-    pub fn settle_durable(&mut self, reservation_id: u64, actual: u64) -> rusqlite::Result<()> {
+    /// Opt-in tracked reservations require `settle_terminal_durable`; this API returns the
+    /// explicit [`LedgerStoreError::TrackedSettlementRequired`] without changing their charge or
+    /// releasing liability (formerly a synthesized SQLITE_CONSTRAINT).
+    pub fn settle_durable(
+        &mut self,
+        reservation_id: u64,
+        actual: u64,
+    ) -> Result<(), LedgerStoreError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if evidence::is_tracked(&tx, reservation_id as i64)? {
-            return Err(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
-                Some("tracked reservation requires terminal settlement".into()),
-            ));
+            return Err(LedgerStoreError::TrackedSettlementRequired);
         }
         tx.execute(
             "UPDATE budget_reservation
@@ -557,7 +549,7 @@ impl SqliteLedger {
 
     /// Settled spend in one configured trailing window. Uses the store as the clock authority.
     pub fn spent_for_window_durable(&self, scope: &str, window: Window) -> rusqlite::Result<u64> {
-        let start = Self::window_start_ts(OffsetDateTime::now_utc(), window);
+        let start = window_start_ts(OffsetDateTime::now_utc(), window);
         let spent: i64 = self.conn.query_row(
             "SELECT COALESCE(SUM(actual), 0) FROM budget_reservation
              WHERE scope = ?1 AND settled = 1 AND COALESCE(settled_at, 0) > ?2",
@@ -1163,7 +1155,7 @@ mod tests {
             ledger.reserve_durable("group:h", 1, later, ttl()).unwrap(),
             ReserveOutcome::Admitted(_)
         ));
-        let daily_start = SqliteLedger::window_start_ts(later, Window::Daily);
+        let daily_start = window_start_ts(later, Window::Daily);
         let daily_spent: i64 = ledger
             .conn
             .query_row(

@@ -268,6 +268,7 @@ fn provider(profile: &str, uri: String) -> ProviderHandle {
             } else {
                 sandhi_core::usage::OpenAiStreamUsageProfile::Standard
             },
+            Default::default(),
         ),
         "responses" => runtime.openai_responses(
             "models",

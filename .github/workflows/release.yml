@@ -325,7 +325,33 @@ jobs:
             if jq -e --arg name "$name" '.assets[] | select(.name == $name)' <<< "$assets" >/dev/null; then
               mkdir -p existing
               gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir existing
-              cmp "$archive" "existing/$name"
+              # Compare extracted CONTENT, not archive bytes: gzip headers embed
+              # build timestamps, so a rebuilt-but-equivalent archive differs at
+              # byte 5 and made every later re-run of a partially-published
+              # release fail here forever. Content, file set AND modes (the
+              # binaries' executable bit is archive content) must match; assets
+              # are never replaced either way. Each extraction is a separate
+              # simple command so a failed extraction aborts the step — an `&&`
+              # chain would exempt the first failure under errexit and compare
+              # two empty trees. GNU tar (pinned ubuntu-24.04 image) refuses
+              # `..` members, absolute paths and symlink traversal in the
+              # downloaded archive.
+              new_tree=$(mktemp -d)
+              old_tree=$(mktemp -d)
+              tar -xzf "$archive" -C "$new_tree"
+              tar -xzf "existing/$name" -C "$old_tree"
+              if ! diff -r "$new_tree" "$old_tree"; then
+                echo "::error::Release asset $name content differs from the already-published asset; refusing to continue"
+                rm -rf "$new_tree" "$old_tree"
+                exit 1
+              fi
+              if ! diff <(cd "$new_tree" && find . -printf '%m %p' | sort) \
+                        <(cd "$old_tree" && find . -printf '%m %p' | sort); then
+                echo "::error::Release asset $name file modes differ from the already-published asset; refusing to continue"
+                rm -rf "$new_tree" "$old_tree"
+                exit 1
+              fi
+              rm -rf "$new_tree" "$old_tree"
             else
               gh release upload "$RELEASE_TAG" "$archive" --repo "$GITHUB_REPOSITORY"
             fi

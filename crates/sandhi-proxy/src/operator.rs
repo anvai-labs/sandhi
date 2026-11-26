@@ -34,9 +34,8 @@ use sandhi_providers::{
     AnthropicAuthScheme, GeminiAuthScheme, ProviderFamily, ProviderHandle, ProviderRuntime,
 };
 use sandhi_store::{
-    AlertRuleRecord, AlertStore, CreateAlertRequest, CredentialScheme, SentinelPassExactBinding,
+    AlertRuleRecord, CreateAlertRequest, CredentialScheme, SentinelPassExactBinding,
     SentinelPassGrantAcl, VaultEntry, VaultError, VaultReferencePlan, VirtualKeyRecord,
-    VirtualKeyStore,
 };
 
 use crate::access::{admit_mutation, constant_time_eq, err};
@@ -574,6 +573,7 @@ fn build_provider_handle_with_endpoint(
             None,
             None,
             endpoint.profile.openai_stream_usage_profile(),
+            endpoint.profile,
         )),
         ProviderFamily::OpenAiResponses => Some(runtime.openai_responses(
             provider,
@@ -630,7 +630,7 @@ pub(crate) fn vault_entry_response(
 }
 
 pub(crate) fn inventory_reference_plan(
-    vault: &sandhi_store::VaultStore,
+    vault: &dyn sandhi_store::DynVaultStore,
     entry: &VaultEntry,
 ) -> Result<VaultReferencePlan, VaultError> {
     match vault.reference_plan(&entry.provider, &entry.label) {
@@ -993,7 +993,7 @@ pub(crate) async fn list_keys(
         let keys = entries
             .iter()
             .map(|entry| {
-                let reference = inventory_reference_plan(&vault, entry)?;
+                let reference = inventory_reference_plan(vault.as_ref(), entry)?;
                 vault_entry_response(entry, Some(&reference))
             })
             .collect::<Result<Vec<_>, VaultError>>()?;
@@ -2148,7 +2148,7 @@ impl WebhookSender for TokioWebhookSender {
 }
 
 /// Rehydrate the live [`KeyStore`] from a durable [`VirtualKeyStore`] (called on startup).
-pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &VirtualKeyStore) {
+pub fn rehydrate_live_keys(keys: &KeyStore, vkeys: &dyn sandhi_store::DynVirtualKeyStore) {
     let Ok(records) = vkeys.list() else {
         return;
     };
@@ -2195,7 +2195,7 @@ pub fn rehydrate_budgets(ledger: &ProxyLedger, budgets: &Mutex<HashMap<String, B
 /// Build the live [`AlertRegistry`] from a durable [`AlertStore`] (called on startup). Loads every
 /// persisted rule + its `last_fired_at` so dedup survives restarts, and injects the tokio-backed
 /// webhook transport when a runtime is active.
-pub fn rehydrate_alerts(store: &AlertStore) -> AlertRegistry {
+pub fn rehydrate_alerts(store: &dyn sandhi_store::DynAlertStore) -> AlertRegistry {
     use sandhi_core::{NoopWebhookSender, DEFAULT_COOLDOWN_SECS};
     let sender: Box<dyn WebhookSender> = match TokioWebhookSender::new() {
         Some(s) => Box::new(s),
@@ -2856,8 +2856,8 @@ mod mutation_lifecycle_tests {
         );
         state.admin_token = Some("synthetic-admin".into());
         state.vault = Some(Arc::new(sandhi_store::VaultStore::in_memory().unwrap()));
-        state.vkeys = Some(Arc::new(VirtualKeyStore::in_memory().unwrap()));
-        state.alert_store = Some(Arc::new(AlertStore::in_memory().unwrap()));
+        state.vkeys = Some(Arc::new(sandhi_store::VirtualKeyStore::in_memory().unwrap()) as _);
+        state.alert_store = Some(Arc::new(sandhi_store::AlertStore::in_memory().unwrap()) as _);
         state
     }
 

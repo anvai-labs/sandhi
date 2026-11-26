@@ -13,7 +13,7 @@ pub use attempts::{
 mod dispatch;
 mod paired;
 mod progress;
-use progress::mark as mark_admission;
+pub(crate) use progress::mark as mark_admission;
 pub(crate) use progress::AdmissionStage;
 pub use progress::{AdmissionProgress, AdmissionSnapshot};
 #[cfg(test)]
@@ -21,6 +21,7 @@ mod tests;
 pub use dispatch::{ClosureOutcome, DispatchOutcome, DispatchPermit, PreDispatchClosure};
 
 use super::*;
+use crate::LedgerStoreError;
 use sandhi_core::{UsageBasis, UsageCompleteness, UsageV2};
 
 /// Immutable execution-level usage snapshot, not proof of a physical send or settlement.
@@ -37,11 +38,12 @@ pub struct TerminalObservation {
 
 /// In-process cursor for one scope on the original ledger and fixed topology.
 /// Not portable across database replacement/restore; not an authorization credential.
+/// Fields are crate-visible so both ledger backends construct and validate cursors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryCursor {
-    scope: String,
-    after_id: u64,
-    through_id: u64,
+    pub(crate) scope: String,
+    pub(crate) after_id: u64,
+    pub(crate) through_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +138,11 @@ pub enum EvidenceError {
     UnsupportedTrackedLedger,
     ShardPoisoned,
     EntropyUnavailable,
-    Storage(rusqlite::Error),
+    /// The storage layer failed. Wraps [`crate::LedgerStoreError`] so both backends share one
+    /// evidence error: the SQLite backend maps `rusqlite::Error` into
+    /// [`LedgerStoreError::Backend`], the Postgres ledger (`postgres` feature) maps
+    /// `sqlx::Error` the same way — consumers never see a driver type.
+    Storage(crate::LedgerStoreError),
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -188,7 +194,14 @@ impl std::error::Error for EvidenceError {
 
 impl From<rusqlite::Error> for EvidenceError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Storage(error)
+        Self::Storage(LedgerStoreError::Backend(error.to_string()))
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for EvidenceError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage(error.into())
     }
 }
 
@@ -250,7 +263,7 @@ pub(super) fn init(conn: &Connection) -> rusqlite::Result<()> {
     attempts::init(conn)
 }
 
-fn opaque_id() -> Result<String, EvidenceError> {
+pub(crate) fn opaque_id() -> Result<String, EvidenceError> {
     use std::fmt::Write;
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|_| EvidenceError::EntropyUnavailable)?;
@@ -284,21 +297,21 @@ pub enum IntentAdmission {
     Denied(Denied),
 }
 
-fn validate_execution_id(execution_id: &str) -> Result<(), EvidenceError> {
+pub(crate) fn validate_execution_id(execution_id: &str) -> Result<(), EvidenceError> {
     if execution_id.len() != 64 || !execution_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(EvidenceError::InvalidInput);
     }
     Ok(())
 }
 
-fn validate_scope(scope: &str) -> Result<(), EvidenceError> {
+pub(crate) fn validate_scope(scope: &str) -> Result<(), EvidenceError> {
     if scope.is_empty() || scope.len() > 4096 {
         return Err(EvidenceError::InvalidInput);
     }
     Ok(())
 }
 
-fn encode_usage(usage: &UsageV2) -> Result<String, EvidenceError> {
+pub(crate) fn encode_usage(usage: &UsageV2) -> Result<String, EvidenceError> {
     if usage.outcome.as_ref().is_some_and(|v| v.len() > 256)
         || usage
             .upstream_request_id
@@ -512,7 +525,9 @@ fn settle_receipt(
         params![id, charge, receipt.settled_at],
     )?;
     if updated != 1 {
-        return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+        return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+            "statement affected no rows".into(),
+        )));
     }
     let inserted = tx.execute(
         "INSERT INTO budget_settlement_outbox
@@ -521,7 +536,9 @@ fn settle_receipt(
         params![receipt.receipt_id, id, scope, charge, receipt.settled_at],
     )?;
     if inserted != 1 {
-        return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+        return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+            "statement affected no rows".into(),
+        )));
     }
     Ok(SettlementOutcome::Committed(receipt))
 }
@@ -539,8 +556,8 @@ pub(super) fn is_tracked(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
 /// Opaque scope inventory cursor on the original ledger; not an authorization token.
 #[derive(Debug, Clone)]
 pub struct ScopeCursor {
-    after: String,
-    through_id: u64,
+    pub(crate) after: String,
+    pub(crate) through_id: u64,
 }
 #[derive(Debug)]
 pub struct ScopePage {
@@ -575,7 +592,7 @@ impl SqliteLedger {
                 r.get::<_, Option<String>>(0)
             })?
             .map(|r| {
-                r.map_err(EvidenceError::Storage)
+                r.map_err(EvidenceError::from)
                     .and_then(|s| s.ok_or(EvidenceError::MissingReservation))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1086,7 +1103,9 @@ impl SqliteLedger {
             params![execution_id, encoded, charge, observed_at],
         )?;
         if inserted != 1 {
-            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+            return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                "statement affected no rows".into(),
+            )));
         }
         tx.commit()?;
         Ok(ObservationOutcome::Recorded(TerminalObservation {
@@ -1233,7 +1252,9 @@ impl SqliteLedger {
             params![execution_id, reservation.id as i64, now.unix_timestamp()],
         )?;
         if inserted != 1 {
-            return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+            return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                "statement affected no rows".into(),
+            )));
         }
         if prepared {
             mark_admission(progress, AdmissionStage::WriteFence);
@@ -1242,7 +1263,9 @@ impl SqliteLedger {
                 [&execution_id],
             )?;
             if inserted != 1 {
-                return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+                return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                    "statement affected no rows".into(),
+                )));
             }
         }
         if let Some(request_id) = request_id {
@@ -1375,7 +1398,9 @@ impl SqliteLedger {
                 params![receipt.receipt_id, claim_token, until],
             )?;
             if updated != 1 {
-                return Err(EvidenceError::Storage(rusqlite::Error::QueryReturnedNoRows));
+                return Err(EvidenceError::Storage(LedgerStoreError::Backend(
+                    "statement affected no rows".into(),
+                )));
             }
             claims.push(ClaimedSettlement {
                 receipt,

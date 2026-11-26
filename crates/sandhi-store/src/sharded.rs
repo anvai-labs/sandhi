@@ -34,6 +34,7 @@ use crate::ledger::evidence::{
     IntentAdmission, ObservationOutcome, SettlementOutcome,
 };
 use crate::ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
+use crate::{fnv1a, LedgerStoreError};
 use sandhi_core::{Policy, Window};
 
 /// One legacy ledger row in flight during the TD-0016 P1 migration.
@@ -46,17 +47,6 @@ pub struct MigratedReservation {
     pub settled: i64,
     pub expires_at: i64,
     pub settled_at: Option<i64>,
-}
-
-/// FNV-1a 64-bit — explicit and stable forever, unlike `DefaultHasher`
-/// (SipHash, algorithm may change between std releases).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 /// The durable ledger, sharded by scope: N independent SQLite files, each a
@@ -152,7 +142,7 @@ impl ShardedLedger {
         scope: &str,
         reservation_id: u64,
         actual: u64,
-    ) -> rusqlite::Result<()> {
+    ) -> Result<(), LedgerStoreError> {
         self.with_shard(scope, |ledger| {
             ledger.settle_durable(reservation_id, actual)
         })

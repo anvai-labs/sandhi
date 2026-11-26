@@ -38,7 +38,8 @@ pub enum CredentialScheme {
 }
 
 impl CredentialScheme {
-    fn as_db(&self) -> &'static str {
+    // Wire spellings shared verbatim with the Postgres vault twin (`operator_pg::vault`).
+    pub(crate) fn as_db(&self) -> &'static str {
         match self {
             Self::ApiKey => "api_key",
             Self::Bearer => "bearer",
@@ -46,7 +47,7 @@ impl CredentialScheme {
         }
     }
 
-    fn from_db(s: &str) -> Self {
+    pub(crate) fn from_db(s: &str) -> Self {
         match s {
             "bearer" => Self::Bearer,
             "oauth" => Self::Oauth,
@@ -104,7 +105,8 @@ pub struct SentinelPassGrantAcl {
 }
 
 impl SentinelPassGrantAcl {
-    fn to_db(self) -> (i64, i64, Option<i64>) {
+    // DB spelling shared verbatim with the Postgres vault twin (`operator_pg::vault`).
+    pub(crate) fn to_db(self) -> (i64, i64, Option<i64>) {
         (
             i64::from(self.exe_pinned),
             i64::from(self.fingerprint_enrolled),

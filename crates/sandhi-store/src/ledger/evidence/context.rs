@@ -195,6 +195,7 @@ impl ExecutionContext {
                         "standard"
                             | "chatgpt_codex"
                             | "anthropic_implicit_cache"
+                            | "openai_chat_completions"
                             | "openai_terminal_chunk_usage"
                             | "zai_final_choice_usage"
                             | "deepseek_final_choice_usage"
@@ -207,6 +208,8 @@ impl ExecutionContext {
                         || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
                     && (b.endpoint_profile != "chatgpt_codex"
                         || self.endpoint_family == EndpointFamilyV1::OpenaiResponses)
+                    && (b.endpoint_profile != "openai_chat_completions"
+                        || self.endpoint_family == EndpointFamilyV1::OpenaiChatCompletions)
             })
             && self.cache.as_ref().is_none_or(|c| {
                 digest(&c.plan_sha256) && digest(&c.binding_sha256) && c.intent.validate().is_ok()
@@ -216,7 +219,7 @@ impl ExecutionContext {
         }
         Ok(())
     }
-    pub(super) fn encode(&self) -> Result<String, EvidenceError> {
+    pub(crate) fn encode(&self) -> Result<String, EvidenceError> {
         self.validate()?;
         let encoded = serde_json::to_string(self).map_err(|_| EvidenceError::InvalidInput)?;
         if encoded.len() > MAX_CONTEXT_BYTES {
@@ -225,7 +228,7 @@ impl ExecutionContext {
         Ok(encoded)
     }
 
-    fn validate_historical(&self) -> Result<(), EvidenceError> {
+    pub(crate) fn validate_historical(&self) -> Result<(), EvidenceError> {
         if self.transport.upstream_host.is_some()
             || self.transport.policy
                 != match self.delivery {
