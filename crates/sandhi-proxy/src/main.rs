@@ -422,12 +422,12 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // (exit 1) — never a silent downgrade. The DSN itself is never logged.
     // Whole-store wiring: the single open path for every durable surface, SQLite
     // (default) or Postgres (`SANDHI_STORE_DSN`, ADR-0049).
-    let stores = open_store_set(
+    let (stores, _runtime, keys, providers) = open_store_set(
         pg_mode.clone(),
         store_path.as_deref(),
-        &runtime,
-        &keys,
-        &mut providers,
+        runtime,
+        keys,
+        providers,
     )
     .await;
     let StoreSet {
@@ -507,7 +507,21 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
         }
         _ => None,
     };
+    // Recover the operator budget metadata (policy / window / limit) persisted in the durable
+    // ledger, so caps set before a restart keep their policy lookup + dashboard + alert
+    // thresholds. Blocking statement: the Postgres ledger arm blocks on its retained runtime
+    // handle, so run it on a worker thread regardless of the selected backend.
+    let (ledger, budgets) = {
+        let budgets = std::sync::Mutex::new(HashMap::new());
+        tokio::task::spawn_blocking(move || {
+            rehydrate_budgets(&ledger, &budgets);
+            (ledger, budgets)
+        })
+        .await
+        .expect("budget rehydration worker")
+    };
     let mut state = ProxyState::new(keys, ledger, sink, providers, store);
+    state.budgets = budgets;
     // Selected above: the SQLite store (default) or the Postgres usage store (SANDHI_USAGE_DSN).
     state.usage_store = usage_store;
     if oidc.is_some() && client_credentials.is_some() {
@@ -704,12 +718,6 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
              to any caller. Set SANDHI_ADMIN_TOKEN to gate them, or SANDHI_DASHBOARD_PUBLIC=1 to \
              acknowledge the open single-node posture."
         );
-    }
-    // Recover the operator budget metadata (policy / window / limit) persisted in the durable
-    // ledger, so caps set before a restart keep their policy lookup + dashboard + alert thresholds.
-    {
-        let ledger = state.ledger.lock().expect("ledger poisoned");
-        rehydrate_budgets(&ledger, &state.budgets);
     }
     // Scope 5: attach the OTLP recorder (None unless feature-on + configured). Its guard is
     // explicitly dropped below while the process-wide shutdown deadline still applies.
@@ -1268,6 +1276,7 @@ struct PgStores {
     routes: Option<Arc<dyn DynRouteStore>>,
     vkeys: Option<Arc<dyn DynVirtualKeyStore>>,
     profiles: Option<Arc<dyn DynProfileStore>>,
+    alerts: Option<AlertRegistryHandle>,
     alert_store: Option<Arc<dyn DynAlertStore>>,
     policy_audit: Option<Arc<dyn DynPolicyAuditStore>>,
     references: Arc<dyn DynReferenceStore>,
@@ -1287,90 +1296,100 @@ impl PgStores {
 /// (exit 1) — never a downgrade; the DSN is never logged. Provider handles and the live
 /// key store rehydrate exactly as the SQLite mode does.
 #[cfg(feature = "postgres")]
-async fn open_postgres_stores(
-    dsn: &str,
+/// Connect every whole-store store on `dsn` (phase 1: async connects only). The blocking
+/// rehydration runs separately in [`rehydrate_postgres_stores`] — the PG stores block on
+/// their retained runtime handle, which must never execute inside an async context.
+#[cfg(feature = "postgres")]
+async fn connect_postgres_stores(dsn: &str) -> Result<PgStores, String> {
+    // The DSN carries its own connect parameters (e.g. `?application_name=sandhi-proxy`);
+    // every Postgres constructor parses them from the DSN, keeping this binary sqlx-free.
+    let usage = Arc::new(
+        sandhi_store::PostgresStore::connect(dsn)
+            .await
+            .map_err(|error| format!("usage store: {error}"))?,
+    );
+    let ledger = ProxyLedger::postgres_durable(dsn)
+        .await
+        .map_err(|error| format!("enforcement ledger: {error}"))?;
+    // Secrets stay in the OS keyring / SentinelPass backend (SANDHI_VAULT_BACKEND);
+    // only the metadata index moves to Postgres.
+    let backend = VaultStore::backend_from_env()?;
+    let vault = sandhi_store::PostgresVaultStore::connect(dsn, backend)
+        .await
+        .map_err(|error| format!("vault metadata: {error}"))?;
+    let vault: Arc<dyn DynVaultStore> = Arc::new(vault);
+    let backends = sandhi_store::PostgresBackendStore::connect(dsn)
+        .await
+        .map_err(|error| format!("backends: {error}"))?;
+    let backends: Arc<dyn DynBackendStore> = Arc::new(backends);
+    let routes = sandhi_store::PostgresRouteStore::connect(dsn)
+        .await
+        .map_err(|error| format!("routes: {error}"))?;
+    let routes: Arc<dyn DynRouteStore> = Arc::new(routes);
+    let vkeys = sandhi_store::PostgresVirtualKeyStore::connect(dsn)
+        .await
+        .map_err(|error| format!("virtual keys: {error}"))?;
+    let vkeys: Arc<dyn DynVirtualKeyStore> = Arc::new(vkeys);
+    let profiles = sandhi_store::PostgresProfileStore::connect(dsn)
+        .await
+        .map_err(|error| format!("profiles: {error}"))?;
+    let profiles: Arc<dyn DynProfileStore> = Arc::new(profiles);
+    let alert_store = sandhi_store::PostgresAlertStore::connect(dsn)
+        .await
+        .map_err(|error| format!("alerts: {error}"))?;
+    let alert_store: Arc<dyn DynAlertStore> = Arc::new(alert_store);
+    let references = sandhi_store::PostgresReferenceStore::connect(dsn)
+        .await
+        .map_err(|error| format!("native references: {error}"))?;
+    let references: Arc<dyn DynReferenceStore> = Arc::new(references);
+    Ok(PgStores {
+        usage,
+        ledger,
+        vault: Some(vault),
+        backends: Some(backends),
+        routes: Some(routes),
+        vkeys: Some(vkeys),
+        profiles: Some(profiles),
+        alerts: None,
+        alert_store: Some(alert_store),
+        policy_audit: None, // opened with the policy configuration, if any
+        references,
+    })
+}
+
+/// Phase 2: the blocking startup rehydration (plain statements on an ordinary thread —
+/// every PG store call here blocks on its retained runtime handle). Fatal failures keep
+/// the exit-1 posture.
+#[cfg(feature = "postgres")]
+fn rehydrate_postgres_stores(
+    pg: &mut PgStores,
     runtime: &ProviderRuntime,
     keys: &KeyStore,
     providers: &mut HashMap<String, ProviderHandle>,
-) -> PgStores {
-    // The DSN carries its own connect parameters (e.g. `?application_name=sandhi-proxy`);
-    // every Postgres constructor parses them from the DSN, keeping this binary sqlx-free.
-    let mut open = async || -> Result<PgStores, String> {
-        let usage = Arc::new(
-            sandhi_store::PostgresStore::connect(dsn)
-                .await
-                .map_err(|error| format!("usage store: {error}"))?,
-        );
-        let ledger = ProxyLedger::postgres_durable(dsn)
-            .await
-            .map_err(|error| format!("enforcement ledger: {error}"))?;
-        // Secrets stay in the OS keyring / SentinelPass backend (SANDHI_VAULT_BACKEND);
-        // only the metadata index moves to Postgres.
-        let backend = VaultStore::backend_from_env()?;
-        let vault = sandhi_store::PostgresVaultStore::connect(dsn, backend)
-            .await
-            .map_err(|error| format!("vault metadata: {error}"))?;
-        let vault: Arc<dyn DynVaultStore> = Arc::new(vault);
-        rehydrate_providers_from_dyn_vault(vault.as_ref(), runtime, providers);
-        let backends = sandhi_store::PostgresBackendStore::connect(dsn)
-            .await
-            .map_err(|error| format!("backends: {error}"))?;
-        let backends: Arc<dyn DynBackendStore> = Arc::new(backends);
-        sandhi_proxy::backend::rehydrate_backends(
-            vault.as_ref(),
-            backends.as_ref(),
-            runtime,
-            providers,
-        )
-        .map_err(|_| "backends: rehydration failed".to_string())?;
-        let routes = sandhi_store::PostgresRouteStore::connect(dsn)
-            .await
-            .map_err(|error| format!("routes: {error}"))?;
-        let routes: Arc<dyn DynRouteStore> = Arc::new(routes);
-        routes
-            .list()
-            .map_err(|_| "routes: inventory failed".to_string())?;
-        let vkeys = sandhi_store::PostgresVirtualKeyStore::connect(dsn)
-            .await
-            .map_err(|error| format!("virtual keys: {error}"))?;
-        let vkeys: Arc<dyn DynVirtualKeyStore> = Arc::new(vkeys);
-        sandhi_proxy::rehydrate_live_keys(keys, vkeys.as_ref());
-        let profiles = sandhi_store::PostgresProfileStore::connect(dsn)
-            .await
-            .map_err(|error| format!("profiles: {error}"))?;
-        let profiles: Arc<dyn DynProfileStore> = Arc::new(profiles);
-        let alert_store = sandhi_store::PostgresAlertStore::connect(dsn)
-            .await
-            .map_err(|error| format!("alerts: {error}"))?;
-        let alert_store: Arc<dyn DynAlertStore> = Arc::new(alert_store);
-        let references = sandhi_store::PostgresReferenceStore::connect(dsn)
-            .await
-            .map_err(|error| format!("native references: {error}"))?;
-        let references: Arc<dyn DynReferenceStore> = Arc::new(references);
-        Ok(PgStores {
-            usage,
-            ledger,
-            vault: Some(vault),
-            backends: Some(backends),
-            routes: Some(routes),
-            vkeys: Some(vkeys),
-            profiles: Some(profiles),
-            alert_store: Some(alert_store),
-            policy_audit: None, // opened with the policy configuration, if any
-            references,
-        })
-    };
-    match open().await {
-        Ok(stores) => {
-            eprintln!("sandhi-proxy: credential vault metadata (backend: postgres)");
-            eprintln!("sandhi-proxy: operator stores on the whole-store database");
-            stores
-        }
-        Err(error) => {
-            eprintln!("sandhi-proxy: startup failed: postgres store unavailable: {error}");
-            std::process::exit(1);
-        }
-    }
+) -> Result<(), String> {
+    let vault = pg.vault.as_ref().expect("vault connected");
+    let backends = pg.backends.as_ref().expect("backends connected");
+    let routes = pg.routes.as_ref().expect("routes connected");
+    let vkeys = pg.vkeys.as_ref().expect("vkeys connected");
+    rehydrate_providers_from_dyn_vault(vault.as_ref(), runtime, providers);
+    sandhi_proxy::backend::rehydrate_backends(
+        vault.as_ref(),
+        backends.as_ref(),
+        runtime,
+        providers,
+    )
+    .map_err(|_| "backends: rehydration failed".to_string())?;
+    routes
+        .list()
+        .map_err(|_| "routes: inventory failed".to_string())?;
+    sandhi_proxy::rehydrate_live_keys(keys, vkeys.as_ref());
+    pg.alerts = pg
+        .alert_store
+        .as_ref()
+        .map(|store| Arc::new(std::sync::Mutex::new(rehydrate_alerts(store.as_ref()))));
+    eprintln!("sandhi-proxy: credential vault metadata (backend: postgres)");
+    eprintln!("sandhi-proxy: operator stores on the whole-store database");
+    Ok(())
 }
 
 /// [`rehydrate_providers_from_vault`] over the object-safe vault seam.
@@ -1439,21 +1458,47 @@ struct StoreSet {
 /// Open every durable surface on the selected backend. Postgres whole-store mode is a
 /// pure replace (no mirror window): either every store opens on the one DSN or startup
 /// fails (exit 1). The SQLite default keeps today's same-file topology unchanged.
+#[allow(clippy::type_complexity)] // one startup shape: (stores, seed state handed back)
 async fn open_store_set(
     pg_mode: Option<String>,
     store_path: Option<&str>,
-    runtime: &ProviderRuntime,
-    keys: &KeyStore,
-    providers: &mut HashMap<String, ProviderHandle>,
-) -> StoreSet {
+    runtime: ProviderRuntime,
+    keys: KeyStore,
+    mut providers: HashMap<String, ProviderHandle>,
+) -> (
+    StoreSet,
+    ProviderRuntime,
+    KeyStore,
+    HashMap<String, ProviderHandle>,
+) {
     #[cfg(feature = "postgres")]
     if let Some(dsn) = pg_mode.as_deref() {
-        let mut pg = open_postgres_stores(dsn, runtime, keys, providers).await;
-        let alerts = pg
-            .alert_store
-            .as_ref()
-            .map(|store| Arc::new(std::sync::Mutex::new(rehydrate_alerts(store.as_ref()))));
-        return StoreSet {
+        let dsn = dsn.to_string();
+        // Every PG store blocks on its retained runtime handle — the exact opposite of an
+        // async task. Phase 1 (async connects) is driven on a blocking worker via
+        // `Handle::block_on`; phase 2 (the blocking rehydration) runs on the same worker
+        // AFTER block_on has returned, when the thread again carries no async context.
+        // Ownership of the seed state moves through the worker and back.
+        let (mut pg, runtime, keys, providers) = tokio::task::spawn_blocking(move || {
+            let mut pg = match tokio::runtime::Handle::current()
+                .block_on(connect_postgres_stores(&dsn))
+            {
+                Ok(pg) => pg,
+                Err(error) => {
+                    eprintln!("sandhi-proxy: startup failed: postgres store unavailable: {error}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(error) = rehydrate_postgres_stores(&mut pg, &runtime, &keys, &mut providers)
+            {
+                eprintln!("sandhi-proxy: startup failed: postgres store unavailable: {error}");
+                std::process::exit(1);
+            }
+            (pg, runtime, keys, providers)
+        })
+        .await
+        .expect("whole-store startup worker");
+        let set = StoreSet {
             store: None,
             usage_store: pg.usage_store(),
             usage_sink: pg.usage_sink(),
@@ -1463,11 +1508,12 @@ async fn open_store_set(
             routes: pg.routes,
             vkeys: pg.vkeys,
             profiles: pg.profiles,
-            alerts,
+            alerts: pg.alerts,
             alert_store: pg.alert_store,
             references: Some(pg.references),
             policy_audit: pg.policy_audit.take(),
         };
+        return (set, runtime, keys, providers);
     }
     let _ = pg_mode;
 
@@ -1494,13 +1540,13 @@ async fn open_store_set(
         );
         // Metadata must open, but unavailable external secret authority only disables
         // the affected provider handle; locked-broker recovery must remain possible.
-        rehydrate_providers_from_vault(&vault, runtime, providers);
+        rehydrate_providers_from_vault(&vault, &runtime, &mut providers);
         Arc::new(vault) as Arc<dyn DynVaultStore>
     });
     let backends: Option<Arc<dyn DynBackendStore>> = store_path.map(|path| {
         let store = BackendStore::open(path).unwrap_or_else(|_| startup_store_fatal("backends"));
         if let Some(vault) = vault.as_deref() {
-            sandhi_proxy::backend::rehydrate_backends(vault, &store, runtime, providers)
+            sandhi_proxy::backend::rehydrate_backends(vault, &store, &runtime, &mut providers)
                 .unwrap_or_else(|_| startup_store_fatal("backends"));
         }
         Arc::new(store) as Arc<dyn DynBackendStore>
@@ -1515,7 +1561,7 @@ async fn open_store_set(
     });
     let vkeys: Option<Arc<dyn DynVirtualKeyStore>> = store_path.map(|p| {
         let vkeys = VirtualKeyStore::open(p).unwrap_or_else(|_| startup_store_fatal("vkeys"));
-        sandhi_proxy::rehydrate_live_keys(keys, &vkeys);
+        sandhi_proxy::rehydrate_live_keys(&keys, &vkeys);
         eprintln!("sandhi-proxy: virtual-key store at {p}");
         Arc::new(vkeys) as Arc<dyn DynVirtualKeyStore>
     });
@@ -1564,21 +1610,26 @@ async fn open_store_set(
     let ledger = ProxyLedger::durable(store_path.expect("validated durable path"), 1)
         .unwrap_or_else(|_| startup_store_fatal("ledger"));
 
-    StoreSet {
-        store,
-        usage_store,
-        usage_sink,
-        ledger,
-        vault,
-        backends,
-        routes,
-        vkeys,
-        profiles,
-        alerts,
-        alert_store,
-        references: None,
-        policy_audit: None,
-    }
+    (
+        StoreSet {
+            store,
+            usage_store,
+            usage_sink,
+            ledger,
+            vault,
+            backends,
+            routes,
+            vkeys,
+            profiles,
+            alerts,
+            alert_store,
+            references: None,
+            policy_audit: None,
+        },
+        runtime,
+        keys,
+        providers,
+    )
 }
 
 fn validate_replica_topology() {
