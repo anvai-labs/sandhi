@@ -16,13 +16,13 @@ use sandhi_core::UsageV2;
 
 use crate::ledger::evidence::context::ExecutionContext;
 use crate::ledger::evidence::{
-    AdmissionProgress, AttemptEvidence, ClosureOutcome, DispatchOutcome,
-    EvidenceError, IntentAdmission, ObservationOutcome, RecoveryCursor, RecoveryPage, ScopeCursor,
-    ScopePage, SettlementOutcome,
+    AdmissionProgress, AttemptEvidence, ClosureOutcome, DispatchOutcome, EvidenceError,
+    IntentAdmission, ObservationOutcome, RecoveryCursor, RecoveryPage, ScopeCursor, ScopePage,
+    SettlementOutcome,
 };
-use crate::{LedgerStoreError, ShardedLedger};
 #[cfg(feature = "postgres")]
 use crate::PostgresLedger;
+use crate::{LedgerStoreError, ShardedLedger};
 
 /// The durable paired-execution ledger seam (see the module docs).
 pub trait DurableExecutionLedger: Send + Sync {
@@ -37,6 +37,7 @@ pub trait DurableExecutionLedger: Send + Sync {
     ) -> Result<IntentAdmission, EvidenceError>;
     /// Commit the original paired admission with its immutable gateway correlation,
     /// reporting internal stages through `progress`.
+    #[allow(clippy::too_many_arguments)] // mirrors the inherent store method shape-for-shape
     fn reserve_paired_contextual_durable_observed(
         &self,
         scope: &str,
@@ -176,7 +177,11 @@ impl DurableExecutionLedger for ShardedLedger {
         attempt: &AttemptEvidence,
     ) -> Result<ObservationOutcome, EvidenceError> {
         ShardedLedger::record_terminal_with_attempt_for_intent_durable(
-            self, intent, usage, cache_read_bp, attempt,
+            self,
+            intent,
+            usage,
+            cache_read_bp,
+            attempt,
         )
     }
     fn settle_terminal_durable(
@@ -289,7 +294,11 @@ impl DurableExecutionLedger for PostgresLedger {
         attempt: &AttemptEvidence,
     ) -> Result<ObservationOutcome, EvidenceError> {
         PostgresLedger::record_terminal_with_attempt_for_intent_durable(
-            self, intent, usage, cache_read_bp, attempt,
+            self,
+            intent,
+            usage,
+            cache_read_bp,
+            attempt,
         )
     }
     fn settle_terminal_durable(

@@ -738,8 +738,12 @@ mod tests {
     #[tokio::test]
     async fn fragmented_signature_proof_precedes_its_first_exposed_fragment() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(sandhi_store::references::ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap());
+        let store = Arc::new(
+            sandhi_store::references::ReferenceStore::open(
+                dir.path().join("refs.db").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
         let ctx = Context {
             store: store.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1013,8 +1017,12 @@ mod binding_tests {
     #[tokio::test]
     async fn canonical_rendered_ids_are_never_treated_as_native_issuer_proofs() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(sandhi_store::references::ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap());
+        let store = Arc::new(
+            sandhi_store::references::ReferenceStore::open(
+                dir.path().join("refs.db").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
         let ctx = Context {
             store: store.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1048,7 +1056,10 @@ mod delivery_failure_tests {
         for streaming in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let store = Arc::new(
-                sandhi_store::references::ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap(),
+                sandhi_store::references::ReferenceStore::open(
+                    dir.path().join("refs.db").to_str().unwrap(),
+                )
+                .unwrap(),
             );
             let context = Context {
                 store: store.clone(),
@@ -1096,7 +1107,9 @@ mod delivery_failure_tests {
         for blocked in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("refs.db");
-            let store = Arc::new(sandhi_store::references::ReferenceStore::open(path.to_str().unwrap()).unwrap());
+            let store = Arc::new(
+                sandhi_store::references::ReferenceStore::open(path.to_str().unwrap()).unwrap(),
+            );
             if blocked {
                 rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER fail_issue BEFORE INSERT ON issued_native_references BEGIN SELECT RAISE(ABORT,'synthetic proof failure'); END").unwrap();
             }

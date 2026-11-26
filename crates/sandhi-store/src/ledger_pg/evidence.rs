@@ -1580,10 +1580,7 @@ impl PostgresLedger {
     /// the PG twin of [`crate::ShardedLedger::checked_intent`]. A caller-supplied intent
     /// is never authorization: the persisted original must match scope, reservation
     /// identity and the binding at the persisted expiry precision.
-    fn checked_intent(
-        &self,
-        intent: &ExecutionIntent,
-    ) -> Result<ExecutionIntent, EvidenceError> {
+    fn checked_intent(&self, intent: &ExecutionIntent) -> Result<ExecutionIntent, EvidenceError> {
         let original = self
             .intent_durable(&intent.execution_id)?
             .ok_or(EvidenceError::MissingIntent)?;

@@ -137,7 +137,9 @@ impl PostgresStore {
 
     /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
     /// `application_name` (and the test suite may point `search_path` at a per-test schema).
-    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
         let pool = PgPoolOptions::new()
             .max_connections(4)
             .acquire_timeout(Duration::from_secs(5))

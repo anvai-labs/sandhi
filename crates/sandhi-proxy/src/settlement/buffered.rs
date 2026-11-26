@@ -109,10 +109,7 @@ pub(crate) fn recovery_degraded(state: &ProxyState) -> bool {
 
 pub(crate) fn reference_authority(
     state: &ProxyState,
-) -> Option<(
-    Arc<dyn DynReferenceStore>,
-    Arc<tokio::sync::Semaphore>,
-)> {
+) -> Option<(Arc<dyn DynReferenceStore>, Arc<tokio::sync::Semaphore>)> {
     state.buffered_accounting.get().map(|owner| {
         (
             owner.native_references.clone(),

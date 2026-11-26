@@ -77,7 +77,9 @@ impl PostgresRouteStore {
     /// later blocking statement.
     /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
     /// `application_name` (and the test suite points `search_path` at a per-test schema).
-    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
         let pool = super::OperatorPool::connect_with(options, 2).await?;
         super::init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })

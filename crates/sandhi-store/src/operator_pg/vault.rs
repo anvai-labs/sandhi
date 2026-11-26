@@ -604,15 +604,9 @@ mod tests {
             2
         );
 
-        let reopened = super::super::pg_test::connect_in_schema(
-            "vault-generation",
-            |options| {
-                PostgresVaultStore::connect_with(
-                    options,
-                    Box::new(crate::vault::InMemoryVault::new()),
-                )
-            },
-        )
+        let reopened = super::super::pg_test::connect_in_schema("vault-generation", |options| {
+            PostgresVaultStore::connect_with(options, Box::new(crate::vault::InMemoryVault::new()))
+        })
         .1;
         assert_eq!(
             reopened

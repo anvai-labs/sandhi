@@ -29,11 +29,11 @@ use crate::policy::PolicyAuditStore;
 use crate::profiles::{ProfileRecord, ProfileStore};
 use crate::references::{Reference, ReferenceStore};
 use crate::routes::{Pin, RouteDefinition, RouteRecord, RouteStore};
-use crate::vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 use crate::vault::{
     CredentialScheme, SecretDeletion, SentinelPassExactBinding, VaultCapabilities, VaultEntry,
     VaultError, VaultReferencePlan, VaultStore,
 };
+use crate::vkeys::{MintRequest, MintedKey, VirtualKeyRecord, VirtualKeyStore};
 use crate::OperatorStoreError;
 
 // ── TD-0003 P1: provider-credential vault (metadata index) ──────────────────────────
@@ -80,7 +80,8 @@ pub trait DynVaultStore: Send + Sync {
         label: &str,
     ) -> Result<(bool, SecretDeletion), VaultError>;
     fn backend_name(&self) -> &'static str;
-    fn reference_plan(&self, provider: &str, label: &str) -> Result<VaultReferencePlan, VaultError>;
+    fn reference_plan(&self, provider: &str, label: &str)
+        -> Result<VaultReferencePlan, VaultError>;
     fn reference_plan_for_exact(
         &self,
         provider: &str,
@@ -113,14 +114,7 @@ impl DynVaultStore for VaultStore {
         grant_acl: Option<crate::vault::SentinelPassGrantAcl>,
     ) -> Result<String, VaultError> {
         VaultStore::register_metadata(
-            self,
-            provider,
-            label,
-            scheme,
-            base_url,
-            user_agent,
-            exact,
-            grant_acl,
+            self, provider, label, scheme, base_url, user_agent, exact, grant_acl,
         )
     }
     fn get(&self, provider: &str, label: &str) -> Result<Option<String>, VaultError> {
@@ -160,7 +154,11 @@ impl DynVaultStore for VaultStore {
     fn backend_name(&self) -> &'static str {
         VaultStore::backend_name(self)
     }
-    fn reference_plan(&self, provider: &str, label: &str) -> Result<VaultReferencePlan, VaultError> {
+    fn reference_plan(
+        &self,
+        provider: &str,
+        label: &str,
+    ) -> Result<VaultReferencePlan, VaultError> {
         VaultStore::reference_plan(self, provider, label)
     }
     fn reference_plan_for_exact(
@@ -239,14 +237,9 @@ impl DynVirtualKeyStore for VirtualKeyStore {
 /// [`crate::operator_pg::PostgresProfileStore`].
 pub trait DynProfileStore: Send + Sync {
     fn upsert_profile(&self, record: &ProfileRecord) -> Result<(), OperatorStoreError>;
-    fn profile_for_group(&self, group: &str)
-        -> Result<Option<ProfileRecord>, OperatorStoreError>;
+    fn profile_for_group(&self, group: &str) -> Result<Option<ProfileRecord>, OperatorStoreError>;
     fn list_profiles(&self) -> Result<Vec<ProfileRecord>, OperatorStoreError>;
-    fn mint_profile_token(
-        &self,
-        subject: &str,
-        group: &str,
-    ) -> Result<String, OperatorStoreError>;
+    fn mint_profile_token(&self, subject: &str, group: &str) -> Result<String, OperatorStoreError>;
     fn lookup_active_profile_token(
         &self,
         presented: &str,
@@ -262,28 +255,20 @@ impl DynProfileStore for ProfileStore {
     fn upsert_profile(&self, record: &ProfileRecord) -> Result<(), OperatorStoreError> {
         ProfileStore::upsert_profile(self, record).map_err(OperatorStoreError::from)
     }
-    fn profile_for_group(
-        &self,
-        group: &str,
-    ) -> Result<Option<ProfileRecord>, OperatorStoreError> {
+    fn profile_for_group(&self, group: &str) -> Result<Option<ProfileRecord>, OperatorStoreError> {
         ProfileStore::profile_for_group(self, group).map_err(OperatorStoreError::from)
     }
     fn list_profiles(&self) -> Result<Vec<ProfileRecord>, OperatorStoreError> {
         ProfileStore::list_profiles(self).map_err(OperatorStoreError::from)
     }
-    fn mint_profile_token(
-        &self,
-        subject: &str,
-        group: &str,
-    ) -> Result<String, OperatorStoreError> {
+    fn mint_profile_token(&self, subject: &str, group: &str) -> Result<String, OperatorStoreError> {
         ProfileStore::mint_profile_token(self, subject, group).map_err(OperatorStoreError::from)
     }
     fn lookup_active_profile_token(
         &self,
         presented: &str,
     ) -> Result<Option<(String, String)>, OperatorStoreError> {
-        ProfileStore::lookup_active_profile_token(self, presented)
-            .map_err(OperatorStoreError::from)
+        ProfileStore::lookup_active_profile_token(self, presented).map_err(OperatorStoreError::from)
     }
     fn revoke_profile_tokens(
         &self,
@@ -346,8 +331,7 @@ pub trait DynBackendStore: Send + Sync {
         definition: &BackendDefinition,
         expected_revision: Option<u64>,
     ) -> Result<BackendRecord, BackendStoreError>;
-    fn revoke(&self, id: &str, expected_revision: u64)
-        -> Result<BackendRecord, BackendStoreError>;
+    fn revoke(&self, id: &str, expected_revision: u64) -> Result<BackendRecord, BackendStoreError>;
 }
 
 impl DynBackendStore for BackendStore {
@@ -364,11 +348,7 @@ impl DynBackendStore for BackendStore {
     ) -> Result<BackendRecord, BackendStoreError> {
         BackendStore::put(self, definition, expected_revision)
     }
-    fn revoke(
-        &self,
-        id: &str,
-        expected_revision: u64,
-    ) -> Result<BackendRecord, BackendStoreError> {
+    fn revoke(&self, id: &str, expected_revision: u64) -> Result<BackendRecord, BackendStoreError> {
         BackendStore::revoke(self, id, expected_revision)
     }
 }
@@ -387,8 +367,12 @@ pub trait DynRouteStore: Send + Sync {
         expected: Option<u64>,
     ) -> Result<RouteRecord, crate::routes::Error>;
     fn revoke(&self, id: &str, expected: u64) -> Result<RouteRecord, crate::routes::Error>;
-    fn pin(&self, namespace: &str, route_id: &str, now: i64)
-        -> Result<Option<Pin>, crate::routes::Error>;
+    fn pin(
+        &self,
+        namespace: &str,
+        route_id: &str,
+        now: i64,
+    ) -> Result<Option<Pin>, crate::routes::Error>;
     fn confirm(
         &self,
         route: &RouteRecord,
@@ -438,7 +422,12 @@ impl DynRouteStore for RouteStore {
 /// original ledger) or [`crate::operator_pg::PostgresReferenceStore`] (the PG ledger's
 /// registry). Both arms share [`crate::references::Error`] verbatim.
 pub trait DynReferenceStore: Send + Sync {
-    fn authorize(&self, binding: &str, owner: &str, refs: &[Reference]) -> Result<(), crate::references::Error>;
+    fn authorize(
+        &self,
+        binding: &str,
+        owner: &str,
+        refs: &[Reference],
+    ) -> Result<(), crate::references::Error>;
     fn authorize_until(
         &self,
         binding: &str,
@@ -479,7 +468,7 @@ impl DynReferenceStore for ReferenceStore {
         refs: &[Reference],
         deadline: &dyn Fn() -> Instant,
     ) -> Result<(), crate::references::Error> {
-        ReferenceStore::authorize_until(self, binding, owner, refs, || deadline())
+        ReferenceStore::authorize_until(self, binding, owner, refs, deadline)
     }
     fn issue(
         &self,
@@ -498,7 +487,7 @@ impl DynReferenceStore for ReferenceStore {
         expires_at: i64,
         deadline: &dyn Fn() -> Instant,
     ) -> Result<(), crate::references::Error> {
-        ReferenceStore::issue_until(self, binding, owner, refs, expires_at, || deadline())
+        ReferenceStore::issue_until(self, binding, owner, refs, expires_at, deadline)
     }
 }
 
@@ -549,13 +538,13 @@ mod pg_impls {
     };
     use crate::profiles::ProfileRecord;
     use crate::references::Reference;
+    use crate::routes::Error as RouteError;
     use crate::routes::{Pin, RouteDefinition, RouteRecord};
-    use crate::vkeys::{MintRequest, MintedKey, VirtualKeyRecord};
     use crate::vault::{
         CredentialScheme, SecretDeletion, SentinelPassExactBinding, VaultCapabilities, VaultEntry,
         VaultError, VaultReferencePlan,
     };
-    use crate::routes::Error as RouteError;
+    use crate::vkeys::{MintRequest, MintedKey, VirtualKeyRecord};
     use crate::OperatorStoreError;
 
     /// The PG backend twin's mirrored enum converts back onto the SQLite module's enum —
@@ -847,7 +836,7 @@ mod pg_impls {
             refs: &[Reference],
             deadline: &dyn Fn() -> Instant,
         ) -> Result<(), crate::references::Error> {
-            PostgresReferenceStore::authorize_until(self, binding, owner, refs, || deadline())
+            PostgresReferenceStore::authorize_until(self, binding, owner, refs, deadline)
         }
         fn issue(
             &self,
@@ -866,7 +855,7 @@ mod pg_impls {
             expires_at: i64,
             deadline: &dyn Fn() -> Instant,
         ) -> Result<(), crate::references::Error> {
-            PostgresReferenceStore::issue_until(self, binding, owner, refs, expires_at, || deadline())
+            PostgresReferenceStore::issue_until(self, binding, owner, refs, expires_at, deadline)
         }
     }
 

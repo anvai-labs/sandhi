@@ -13,9 +13,7 @@ use axum::{
     Json,
 };
 use sandhi_providers::{BackendBinding, ProviderFamily, ProviderHandle, ProviderRuntime};
-use sandhi_store::{
-    BackendRecord, BackendStoreError, VaultEntry, VaultError,
-};
+use sandhi_store::{BackendRecord, BackendStoreError, VaultEntry, VaultError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};

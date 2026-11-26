@@ -87,7 +87,13 @@ fn state(db: &Path, vault: Arc<VaultStore>) -> Arc<ProxyState> {
     let keys = KeyStore::new();
     rehydrate_live_keys(&keys, vkeys.as_ref());
     let mut providers = HashMap::new();
-    rehydrate_backends(vault.as_ref(), backends.as_ref(), &ProviderRuntime::new(), &mut providers).unwrap();
+    rehydrate_backends(
+        vault.as_ref(),
+        backends.as_ref(),
+        &ProviderRuntime::new(),
+        &mut providers,
+    )
+    .unwrap();
     let mut state = support::state(
         keys,
         support::Ledger::new(),

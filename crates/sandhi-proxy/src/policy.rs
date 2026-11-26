@@ -166,7 +166,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let gate = PolicyGate::new(
             Engine::from_slice_with_registry(&bytes, &registry).unwrap(),
-            Arc::new(sandhi_store::policy::PolicyAuditStore::open(&temp.path().join("audit.db"), 10).unwrap()) as _,
+            Arc::new(
+                sandhi_store::policy::PolicyAuditStore::open(&temp.path().join("audit.db"), 10)
+                    .unwrap(),
+            ) as _,
         );
         let body = bytes::Bytes::from_static(br#"{"model":"test","messages":[]}"#);
         let all_slots = gate.slots.clone().try_acquire_many_owned(4).unwrap();
@@ -230,7 +233,9 @@ mod tests {
         let tight_dir = tempfile::tempdir().unwrap();
         let stretched_dir = tempfile::tempdir().unwrap();
         let audit = |dir: &std::path::Path| {
-            Arc::new(sandhi_store::policy::PolicyAuditStore::open(&dir.join("audit.db"), 10).unwrap()) as _
+            Arc::new(
+                sandhi_store::policy::PolicyAuditStore::open(&dir.join("audit.db"), 10).unwrap(),
+            ) as _
         };
         // Without the floor the 1 ms document deadline is always missed.
         let tight = PolicyGate::new(

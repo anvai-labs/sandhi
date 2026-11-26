@@ -53,7 +53,9 @@ impl PostgresVirtualKeyStore {
     /// later blocking statement.
     /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
     /// `application_name` (and the test suite points `search_path` at a per-test schema).
-    pub async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
         let pool = OperatorPool::connect_with(options, 2).await?;
         init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })

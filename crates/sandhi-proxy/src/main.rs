@@ -1181,9 +1181,10 @@ enum StoreModeDsn {
 
 #[cfg(feature = "postgres")]
 fn store_mode_dsn() -> StoreModeDsn {
-    match normalize_dsn(std::env::var("SANDHI_STORE_DSN").ok()) {
+    let store_raw = std::env::var("SANDHI_STORE_DSN").ok();
+    match whole_store_dsn(store_raw) {
         Some(dsn) => {
-            if configured_usage_dsn().is_some() {
+            if normalize_dsn(std::env::var("SANDHI_USAGE_DSN").ok()).is_some() {
                 eprintln!(
                     "sandhi-proxy: SANDHI_STORE_DSN supersedes SANDHI_USAGE_DSN — all stores use the one whole-store database"
                 );
@@ -1192,6 +1193,16 @@ fn store_mode_dsn() -> StoreModeDsn {
         }
         None => StoreModeDsn::None,
     }
+}
+
+/// The whole-store DSN selection: `SANDHI_STORE_DSN` when configured (trimmed; a
+/// whitespace-only value counts as unset — some process managers can only set
+/// variables, not unset them), otherwise no whole-store mode. The narrower legacy
+/// `SANDHI_USAGE_DSN` (#518) keeps running the usage-only topology when it is the only
+/// one set; when both are set, `SANDHI_STORE_DSN` wins (ADR-0049 precedence).
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))] // test-exercised selection logic
+fn whole_store_dsn(store_raw: Option<String>) -> Option<String> {
+    normalize_dsn(store_raw)
 }
 
 /// Compiled without the `postgres` feature but configured with a whole-store DSN: refuse
@@ -1295,23 +1306,30 @@ async fn open_postgres_stores(
             .map_err(|error| format!("enforcement ledger: {error}"))?;
         // Secrets stay in the OS keyring / SentinelPass backend (SANDHI_VAULT_BACKEND);
         // only the metadata index moves to Postgres.
-        let backend = VaultStore::backend_from_env().map_err(|error| error)?;
+        let backend = VaultStore::backend_from_env()?;
         let vault = sandhi_store::PostgresVaultStore::connect(dsn, backend)
-        .await
-        .map_err(|error| format!("vault metadata: {error}"))?;
+            .await
+            .map_err(|error| format!("vault metadata: {error}"))?;
         let vault: Arc<dyn DynVaultStore> = Arc::new(vault);
         rehydrate_providers_from_dyn_vault(vault.as_ref(), runtime, providers);
         let backends = sandhi_store::PostgresBackendStore::connect(dsn)
             .await
             .map_err(|error| format!("backends: {error}"))?;
         let backends: Arc<dyn DynBackendStore> = Arc::new(backends);
-        sandhi_proxy::backend::rehydrate_backends(vault.as_ref(), backends.as_ref(), runtime, providers)
-            .map_err(|_| "backends: rehydration failed".to_string())?;
+        sandhi_proxy::backend::rehydrate_backends(
+            vault.as_ref(),
+            backends.as_ref(),
+            runtime,
+            providers,
+        )
+        .map_err(|_| "backends: rehydration failed".to_string())?;
         let routes = sandhi_store::PostgresRouteStore::connect(dsn)
             .await
             .map_err(|error| format!("routes: {error}"))?;
         let routes: Arc<dyn DynRouteStore> = Arc::new(routes);
-        routes.list().map_err(|_| "routes: inventory failed".to_string())?;
+        routes
+            .list()
+            .map_err(|_| "routes: inventory failed".to_string())?;
         let vkeys = sandhi_store::PostgresVirtualKeyStore::connect(dsn)
             .await
             .map_err(|error| format!("virtual keys: {error}"))?;
@@ -1396,6 +1414,9 @@ fn rehydrate_providers_from_dyn_vault(
     }
 }
 
+/// The live alert registry handle (`Option<Arc<Mutex<AlertRegistry>>>`).
+type AlertRegistryHandle = Arc<std::sync::Mutex<AlertRegistry>>;
+
 /// The selected store backend set, whatever `SANDHI_STORE_DSN` selected (ADR-0049).
 /// `pg: true` marks the whole-store Postgres mode: no SQLite file is opened, the
 /// usage store is the PG sink+reader, and the native-reference registry came from PG.
@@ -1409,7 +1430,7 @@ struct StoreSet {
     routes: Option<Arc<dyn DynRouteStore>>,
     vkeys: Option<Arc<dyn DynVirtualKeyStore>>,
     profiles: Option<Arc<dyn DynProfileStore>>,
-    alerts: Option<Arc<std::sync::Mutex<AlertRegistry>>>,
+    alerts: Option<AlertRegistryHandle>,
     alert_store: Option<Arc<dyn DynAlertStore>>,
     references: Option<Arc<dyn DynReferenceStore>>,
     policy_audit: Option<Arc<dyn DynPolicyAuditStore>>,
@@ -1428,9 +1449,10 @@ async fn open_store_set(
     #[cfg(feature = "postgres")]
     if let Some(dsn) = pg_mode.as_deref() {
         let mut pg = open_postgres_stores(dsn, runtime, keys, providers).await;
-        let alerts = pg.alert_store.as_ref().map(|store| {
-            Arc::new(std::sync::Mutex::new(rehydrate_alerts(store.as_ref())))
-        });
+        let alerts = pg
+            .alert_store
+            .as_ref()
+            .map(|store| Arc::new(std::sync::Mutex::new(rehydrate_alerts(store.as_ref()))));
         return StoreSet {
             store: None,
             usage_store: pg.usage_store(),
@@ -1508,7 +1530,7 @@ async fn open_store_set(
 
     // TD-0003 P2 alert rules: durable store + live registry (rehydrated from the store; webhook
     // transport injected from this tokio runtime).
-    let (alert_store, alerts): (Option<Arc<dyn DynAlertStore>>, Option<Arc<std::sync::Mutex<AlertRegistry>>>) =
+    let (alert_store, alerts): (Option<Arc<dyn DynAlertStore>>, Option<AlertRegistryHandle>) =
         store_path
             .map(|p| {
                 let store = AlertStore::open(p).unwrap_or_else(|_| startup_store_fatal("alerts"));
@@ -1667,6 +1689,7 @@ fn control_origins(addr: SocketAddr, tls: bool, http_addr: Option<SocketAddr>) -
 #[cfg(test)]
 mod tests {
     use super::{listener_tls_entry_from_json, normalize_dsn, parse_http_bind};
+
     use std::path::Path;
 
     #[test]
@@ -1681,9 +1704,32 @@ mod tests {
         assert_eq!(normalize_dsn(Some(dsn.into())), Some(dsn.into()));
         // Surrounding whitespace is trimmed, not rejected — but the credential-carrying body
         // is preserved byte-exact.
+        assert_eq!(normalize_dsn(Some(format!("  {dsn}  "))), Some(dsn.into()));
+    }
+
+    #[test]
+    fn whole_store_dsn_selection_and_precedence() {
+        // The store-selection posture (ADR-0049): unset and blank both mean "the SQLite
+        // topology, unchanged"; anything non-blank selects the whole-store Postgres mode.
+        // (Feature-off refusal is compile-time: `store_mode_dsn` returns `Refuse` in a
+        // build without `postgres`, and that path exits before any store opens.)
+        let dsn = "postgres://user:secret@db:5432/sandhi";
+        assert_eq!(super::whole_store_dsn(None), None);
+        assert_eq!(super::whole_store_dsn(Some(String::new())), None);
+        assert_eq!(super::whole_store_dsn(Some("   ".into())), None);
+        // Surrounding whitespace is trimmed, not rejected — the credential-carrying body
+        // is preserved byte-exact and never logged.
         assert_eq!(
-            normalize_dsn(Some(format!("  {dsn}  "))),
+            super::whole_store_dsn(Some(format!("  {dsn}  "))),
             Some(dsn.into())
+        );
+        // Precedence is a pure selection: the whole-store variable wins whenever it is
+        // present; the legacy usage-only DSN alone never selects whole-store mode (that
+        // stays the #518 usage-only topology).
+        assert_eq!(
+            super::whole_store_dsn(Some(dsn.into())),
+            Some(dsn.into()),
+            "SANDHI_STORE_DSN alone selects whole-store mode"
         );
     }
 

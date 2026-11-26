@@ -249,7 +249,7 @@ impl ProxyLedger {
     /// Idempotently settle a lease to its actual billable usage (`actual = 0` releases it without
     /// recording spend — the failed/cancelled case). A no-op if the id is unknown (already settled
     /// or reclaimed), so the `Drop` finalizer firing after an explicit finalize is safe.
-        pub fn settle(&mut self, reservation: &Reservation, actual: u64) {
+    pub fn settle(&mut self, reservation: &Reservation, actual: u64) {
         match self {
             Self::Memory(l) => l.settle(reservation.id, actual),
             Self::Durable(l) => {

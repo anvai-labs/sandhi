@@ -60,7 +60,9 @@ impl PostgresPolicyAuditStore {
         let pool = OperatorPool::connect_with(options, 2)
             .await
             .map_err(|e| OperatorStoreError(e.to_string()))?;
-        init_ddl(pool.pool(), DDL).await.map_err(|e| OperatorStoreError(e.to_string()))?;
+        init_ddl(pool.pool(), DDL)
+            .await
+            .map_err(|e| OperatorStoreError(e.to_string()))?;
         Ok(Self { pool, max_rows })
     }
 
