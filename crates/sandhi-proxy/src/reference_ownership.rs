@@ -14,7 +14,8 @@ use sandhi_core::native_references::{
 use sandhi_core::native_references::{ITEM, RESPONSE};
 use sandhi_core::{cache_digest, ChatRequestV1, EndpointFamilyV1 as Family, VirtualKey};
 use sandhi_providers::ProviderHandle;
-use sandhi_store::references::{Reference, ReferenceStore, MAX_TTL_SECS};
+use sandhi_store::references::{Reference, MAX_TTL_SECS};
+use sandhi_store::DynReferenceStore;
 use serde_json::Value;
 #[cfg(test)]
 use std::time::Duration;
@@ -31,7 +32,7 @@ fn failure() -> &'static str {
 }
 #[derive(Clone)]
 pub(crate) struct Context {
-    store: Arc<ReferenceStore>,
+    store: Arc<dyn DynReferenceStore>,
     slots: Arc<tokio::sync::Semaphore>,
     binding: String,
     owner: String,
@@ -172,7 +173,7 @@ pub(crate) async fn prepare_effective(
     if !refs.is_empty() {
         ctx.storage(move |c| {
             c.store
-                .authorize_until(&c.binding, &c.owner, &refs, || c.budget.deadline())
+                .authorize_until(&c.binding, &c.owner, &refs, &|| c.budget.deadline())
         })
         .await?;
     }
@@ -227,7 +228,7 @@ async fn prepare(
 
 #[allow(clippy::too_many_arguments)]
 fn frozen_context(
-    store: Arc<ReferenceStore>,
+    store: Arc<dyn DynReferenceStore>,
     slots: Arc<tokio::sync::Semaphore>,
     vk: &VirtualKey,
     provider: &ProviderHandle,
@@ -337,7 +338,7 @@ impl Context {
         }
         self.storage(move |c| {
             c.store
-                .issue_until(&c.binding, &c.owner, &refs, c.expiry, || {
+                .issue_until(&c.binding, &c.owner, &refs, c.expiry, &|| {
                     c.budget.deadline()
                 })
         })
@@ -737,8 +738,12 @@ mod tests {
     #[tokio::test]
     async fn fragmented_signature_proof_precedes_its_first_exposed_fragment() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap());
+        let store = Arc::new(
+            sandhi_store::references::ReferenceStore::open(
+                dir.path().join("refs.db").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
         let ctx = Context {
             store: store.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1012,8 +1017,12 @@ mod binding_tests {
     #[tokio::test]
     async fn canonical_rendered_ids_are_never_treated_as_native_issuer_proofs() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap());
+        let store = Arc::new(
+            sandhi_store::references::ReferenceStore::open(
+                dir.path().join("refs.db").to_str().unwrap(),
+            )
+            .unwrap(),
+        );
         let ctx = Context {
             store: store.clone(),
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1047,7 +1056,10 @@ mod delivery_failure_tests {
         for streaming in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let store = Arc::new(
-                ReferenceStore::open(dir.path().join("refs.db").to_str().unwrap()).unwrap(),
+                sandhi_store::references::ReferenceStore::open(
+                    dir.path().join("refs.db").to_str().unwrap(),
+                )
+                .unwrap(),
             );
             let context = Context {
                 store: store.clone(),
@@ -1095,7 +1107,9 @@ mod delivery_failure_tests {
         for blocked in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("refs.db");
-            let store = Arc::new(ReferenceStore::open(path.to_str().unwrap()).unwrap());
+            let store = Arc::new(
+                sandhi_store::references::ReferenceStore::open(path.to_str().unwrap()).unwrap(),
+            );
             if blocked {
                 rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER fail_issue BEFORE INSERT ON issued_native_references BEGIN SELECT RAISE(ABORT,'synthetic proof failure'); END").unwrap();
             }

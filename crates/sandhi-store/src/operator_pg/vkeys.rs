@@ -2,69 +2,12 @@
 //! (TD-0003 P1, component 2). Only a **hash** of the presented secret is stored
 //! (lookup), never the plaintext, exactly like the SQLite twin. Errors render through
 //! [`crate::OperatorStoreError`].
-use serde::Serialize;
-
 use super::{init_ddl, now_rfc3339, random_hex, OperatorPool};
 use crate::{hash_secret, OperatorStoreError};
 
 /// A persisted virtual-key record (masked — the secret is never present, only its hash).
 /// The same record shape as [`crate::vkeys::VirtualKeyRecord`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct VirtualKeyRecord {
-    /// Stable public id (`key_<hex>`), used for attribution + listing/revoke.
-    pub id: String,
-    pub subject_id: Option<String>,
-    pub group_id: Option<String>,
-    /// Upstream credential id (`provider:label`) this key binds to.
-    pub upstream_ref: String,
-    pub models: Option<String>,
-    pub budget_scope: Option<String>,
-    pub model_budget_scope: Option<String>,
-    pub expires_at: Option<String>,
-    pub rate_limit_per_min: Option<u32>,
-    /// SHA-256 hex of the presented secret.
-    pub secret_hash: String,
-    pub created_at: String,
-    pub revoked_at: Option<String>,
-}
-
-impl VirtualKeyRecord {
-    /// Comma-joined model allowlist from the stored text column.
-    pub fn model_list(&self) -> Vec<String> {
-        self.models
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|m| !m.is_empty())
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-}
-
-/// A minted key: the secret is returned **once** to the caller; only the hash is persisted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MintedKey {
-    pub record: VirtualKeyRecord,
-    /// The plaintext `vk_…` secret. Print/store once; Sandhi never persists it.
-    pub secret: String,
-}
-
-/// Inputs to [`PostgresVirtualKeyStore::mint`] — the same request shape as the SQLite twin.
-#[derive(Debug, Clone)]
-pub struct MintRequest {
-    pub subject_id: Option<String>,
-    pub group_id: Option<String>,
-    pub upstream_ref: String,
-    pub models: Vec<String>,
-    pub budget_scope: Option<String>,
-    pub model_budget_scope: Option<String>,
-    pub expires_at: Option<String>,
-    pub rate_limit_per_min: Option<u32>,
-}
+pub use crate::vkeys::{MintRequest, MintedKey, VirtualKeyRecord};
 
 /// The one SELECT projection shared by every record read, so the column order cannot
 /// drift between `find_by_secret` / `find_by_id` / `list`.
@@ -108,17 +51,22 @@ impl PostgresVirtualKeyStore {
     ///
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
-    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect(dsn, 2).await?;
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
+        let pool = OperatorPool::connect_with(options, 2).await?;
         init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect_with(options, 2).await?;
-        init_ddl(pool.pool(), DDL).await?;
-        Ok(Self { pool })
+    /// Open the store on `dsn` and initialize the schema (idempotent).
+    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| sqlx::Error::Configuration(format!("invalid DSN: {e}").into()))?;
+        Self::connect_with(options).await
     }
 
     /// Mint a new virtual key. The plaintext secret is generated, returned once, and only

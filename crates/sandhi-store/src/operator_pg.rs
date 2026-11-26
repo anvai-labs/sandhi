@@ -256,10 +256,11 @@ pub(crate) mod pg_test {
     /// Connect a store into the per-test schema, leaking the owning runtime (the store
     /// retains its handle and the pool's background tasks must outlive every blocking
     /// statement below).
-    pub(crate) fn connect_in_schema<T, F, Fut>(tag: &str, connect: F) -> (String, T)
+    pub(crate) fn connect_in_schema<T, E, F, Fut>(tag: &str, connect: F) -> (String, T)
     where
         F: FnOnce(PgConnectOptions) -> Fut,
-        Fut: std::future::Future<Output = Result<T, sqlx::Error>>,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
     {
         let (schema, options) = scoped_options(tag);
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -268,7 +269,7 @@ pub(crate) mod pg_test {
             .expect("test runtime");
         let store = rt
             .block_on(connect(options))
-            .expect("connect operator store");
+            .unwrap_or_else(|error| panic!("connect operator store: {error}"));
         std::mem::forget(rt);
         (schema, store)
     }

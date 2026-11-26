@@ -211,3 +211,29 @@ fn diagnostic_cli_argument_transport_and_validation_errors_are_private_and_nonze
         .unwrap();
     assert_private_failure(&output);
 }
+
+/// ADR-0049 posture: the whole-store DSN is set but this binary was built without the
+/// `postgres` feature (the default test build). Startup must refuse (exit 1) before any
+/// store opens or listener binds — never silently run the SQLite topology — and the
+/// credential-carrying DSN must not be echoed.
+#[test]
+#[cfg(not(feature = "postgres"))]
+fn sandhi_proxy_refuses_whole_store_dsn_without_the_postgres_feature() {
+    let dsn = "postgres://user:CREDENTIAL_CANARY@db:5432/sandhi";
+    let output = Command::new(env!("CARGO_BIN_EXE_sandhi-proxy"))
+        .env("SANDHI_STORE_DSN", dsn)
+        .env_remove("SANDHI_STORE")
+        .env_remove("SANDHI_OIDC_CONFIG")
+        .env_remove("SANDHI_CLIENT_CREDENTIALS_FILE")
+        .output()
+        .expect("spawn sandhi-proxy");
+    assert_eq!(output.status.code(), Some(1), "must refuse with exit 1");
+    assert!(output.stdout.is_empty(), "refusal goes to stderr only");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SANDHI_STORE_DSN is set but this binary was built"),
+        "unexpected refusal text: {stderr}"
+    );
+    assert!(!stderr.contains(dsn), "the DSN must never be logged");
+    assert!(!stderr.contains("CREDENTIAL_CANARY"), "credential leaked");
+}

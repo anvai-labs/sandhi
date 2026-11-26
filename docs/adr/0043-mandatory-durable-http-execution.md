@@ -3,6 +3,12 @@
 Status: implementation candidate; exact-tip review, paired qualification, public
 CI, packaging and deployment acceptance remain separate gates.
 
+> **Amended by [ADR-0049](0049-whole-store-postgres-backend.md):** the
+> "original single-file ledger" requirement is scoped to the SQLite mode; the
+> whole-store `SANDHI_STORE_DSN` mode runs the same one-owner paired contract on the
+> validated single PostgreSQL database (ledger, evidence and reference registry), with
+> `SANDHI_LEDGER_SHARDS>1` still refused before any store opens.
+
 ## Decision
 
 HTTP generation uses one existing durable execution owner and the original

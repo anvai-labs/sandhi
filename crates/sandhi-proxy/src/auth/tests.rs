@@ -1411,7 +1411,9 @@ async fn group_grants_and_delegated_keys_share_budget_alerts_and_authority() {
         sandhi_store::VirtualKeyStore::in_memory().unwrap(),
     ));
     let alert_store = Arc::new(sandhi_store::AlertStore::in_memory().unwrap());
-    state.alerts = Some(Arc::new(Mutex::new(crate::rehydrate_alerts(&alert_store))));
+    state.alerts = Some(Arc::new(Mutex::new(crate::rehydrate_alerts(
+        alert_store.as_ref(),
+    ))));
     state.alert_store = Some(alert_store);
     let state = Arc::new(state);
     let app = crate::build_app(state.clone());

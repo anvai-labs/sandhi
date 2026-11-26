@@ -1575,6 +1575,88 @@ enum IntentReserve {
     Denied(sandhi_core::Denied),
 }
 
+impl PostgresLedger {
+    /// One full binding check shared by terminal evidence and dispatch transitions —
+    /// the PG twin of [`crate::ShardedLedger::checked_intent`]. A caller-supplied intent
+    /// is never authorization: the persisted original must match scope, reservation
+    /// identity and the binding at the persisted expiry precision.
+    fn checked_intent(&self, intent: &ExecutionIntent) -> Result<ExecutionIntent, EvidenceError> {
+        let original = self
+            .intent_durable(&intent.execution_id)?
+            .ok_or(EvidenceError::MissingIntent)?;
+        if original.reservation.scope != intent.reservation.scope {
+            return Err(EvidenceError::WrongScope);
+        }
+        // Admission returns the caller's timestamp precision; PG persists expiry as
+        // whole Unix seconds too. Compare the binding at that precision.
+        if original.reservation.id != intent.reservation.id
+            || original.reservation.ceiling != intent.reservation.ceiling
+            || original.reservation.expires_at.unix_timestamp()
+                != intent.reservation.expires_at.unix_timestamp()
+        {
+            return Err(EvidenceError::InvalidInput);
+        }
+        Ok(original)
+    }
+
+    /// Validate the original admission before requesting its one dispatch permit.
+    /// Scope matching is not caller authorization; a replay never gets another permit.
+    pub fn authorize_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<crate::ledger::evidence::DispatchOutcome, EvidenceError> {
+        let original = self.checked_intent(intent)?;
+        self.authorize_dispatch_durable(&original.reservation.scope, &original.execution_id)
+    }
+
+    /// Close only proven never-authorized admission, with full original binding checks.
+    pub fn close_before_dispatch_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+    ) -> Result<crate::ledger::evidence::ClosureOutcome, EvidenceError> {
+        let original = self.checked_intent(intent)?;
+        self.close_before_dispatch_durable(&original.reservation.scope, &original.execution_id)
+    }
+
+    /// Record immutable terminal usage for the exact original admission. Caller-supplied
+    /// reservation metadata must match the persisted intent; it confers no caller
+    /// authorization and does not enable tracked HTTP admission by itself.
+    /// `cache_read_bp` is server-admitted operator config (TD-0032).
+    pub fn record_terminal_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+        usage: &sandhi_core::UsageV2,
+        cache_read_bp: u32,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        let original = self.checked_intent(intent)?;
+        self.record_terminal_durable(
+            &original.reservation.scope,
+            &original.execution_id,
+            usage,
+            cache_read_bp,
+        )
+    }
+
+    /// Record terminal usage together with qualified source/attempt evidence, under the
+    /// same original-intent binding check.
+    pub fn record_terminal_with_attempt_for_intent_durable(
+        &self,
+        intent: &ExecutionIntent,
+        usage: &sandhi_core::UsageV2,
+        cache_read_bp: u32,
+        attempt: &crate::ledger::evidence::AttemptEvidence,
+    ) -> Result<ObservationOutcome, EvidenceError> {
+        let original = self.checked_intent(intent)?;
+        self.record_terminal_with_attempt_durable(
+            &original.reservation.scope,
+            &original.execution_id,
+            usage,
+            cache_read_bp,
+            attempt,
+        )
+    }
+}
+
 /// Initialize the evidence tables on a freshly connected ledger. Called from
 /// [`PostgresLedger::connect_with`] so every pool owns the complete schema.
 pub(super) async fn init(pool: &PgPool) -> Result<(), EvidenceError> {

@@ -4,30 +4,11 @@
 //! plaintext. Errors render through [`crate::OperatorStoreError`].
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use serde::Serialize;
 
 use super::{init_ddl, now_rfc3339, OperatorPool};
 use crate::{hash_secret, OperatorStoreError};
 
-/// A centrally-applied per-group profile (the assembled defaults, masked — carries no
-/// secrets: no credential, no token, no virtual key). The same record shape as
-/// [`crate::profiles::ProfileRecord`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProfileRecord {
-    /// Owning attribution group (`RequestMetadataV1.group_id` vocabulary).
-    pub group: String,
-    /// `gateway` (callers go through this gateway with a minted virtual key) or `local`
-    /// (callers run the models themselves; defaults + models only).
-    pub mode: String,
-    /// Upstream credential id (`provider:label`) a minted virtual key binds to. `None`
-    /// for `local` profiles.
-    pub upstream_ref: Option<String>,
-    /// Model allowlist exposed to the group.
-    pub models: Vec<String>,
-    pub timeout_seconds: Option<u64>,
-    pub max_tokens: Option<u32>,
-    pub updated_at: String,
-}
+pub use crate::profiles::ProfileRecord;
 
 /// Idempotent schema init, mirroring the SQLite DDL column-for-column. `group` is a SQL
 /// keyword — every statement quotes the column name (the SQLite twin's own rule).
@@ -73,17 +54,22 @@ impl PostgresProfileStore {
     ///
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
-    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect(dsn, 2).await?;
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
+        let pool = OperatorPool::connect_with(options, 2).await?;
         init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
-    async fn connect_with(options: sqlx::postgres::PgConnectOptions) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect_with(options, 2).await?;
-        init_ddl(pool.pool(), DDL).await?;
-        Ok(Self { pool })
+    /// Open the store on `dsn` and initialize the schema (idempotent).
+    pub async fn connect(dsn: &str) -> Result<Self, sqlx::Error> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| sqlx::Error::Configuration(format!("invalid DSN: {e}").into()))?;
+        Self::connect_with(options).await
     }
 
     /// Insert or update the profile for a group (additive-only upsert: this never deletes

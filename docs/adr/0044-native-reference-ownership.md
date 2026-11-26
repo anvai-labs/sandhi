@@ -2,6 +2,11 @@
 
 Status: implementation checkpoint; integration and independent review required.
 
+> **Amended by [ADR-0049](0049-whole-store-postgres-backend.md):** "same-ledger" reads
+> "same-database" in the whole-store `SANDHI_STORE_DSN` mode — the registry is the PG
+> reference store on the enforcement ledger's database; no external-resource adoption or
+> caller-ID provenance is introduced.
+
 A virtual key authorizes its declared model/backend, not every object held by the backend's shared provider credential. A compatible route pin proves transport affinity. It does not prove that a response ID, saved item, encrypted reasoning, file, cache or container belongs to that key. Two callers with independent compatible pins previously could name the same provider object.
 
 The HTTP gateway now requires a durable issuer proof before admitting a native reference. The proof associates a reference-kind/digest with the authenticated virtual-key ID, subject, group and upstream binding, and with the frozen backend ID/revision, credential reference and applicable generation, actual credential/account/endpoint fingerprint, model, endpoint family/profile and source convention. Caller session hints, metadata and headers provide no ownership authority. A live proof cannot transfer to a different owner. A resource ID has one owner per binding; an ambiguous duplicate ID refuses delivery. Self-contained encrypted reasoning, thinking signatures and redacted blocks can be independently returned to multiple owners: each gets its own proof only after its own source issuance. Knowing or submitting another owner's opaque value never creates that proof.

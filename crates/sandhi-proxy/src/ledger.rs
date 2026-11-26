@@ -41,6 +41,11 @@ pub enum ProxyLedger {
     /// files, so different tenants never serialize their durable commits.
     /// `shards == 1` (the default) is the single legacy file.
     Durable(ShardedLedger),
+    /// The whole-store Postgres backend (`SANDHI_STORE_DSN`, ADR-0049): the same
+    /// durable paired-execution contract as [`ProxyLedger::Durable`], one database,
+    /// no shards. Compiled only with the `postgres` feature.
+    #[cfg(feature = "postgres")]
+    Postgres(crate::PgLedger),
 }
 
 impl ProxyLedger {
@@ -56,6 +61,27 @@ impl ProxyLedger {
         ShardedLedger::open_sharded(path, shards)
             .map(Self::Durable)
             .map_err(|e| e.to_string())
+    }
+
+    /// Connect the whole-store Postgres ledger on `dsn` (ADR-0049). Must be called on a
+    /// `tokio` runtime. The DSN is never logged; callers surface only a refusal.
+    #[cfg(feature = "postgres")]
+    pub async fn postgres_durable(dsn: &str) -> Result<Self, String> {
+        crate::PgLedger::connect(dsn)
+            .await
+            .map(Self::Postgres)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The configured single-database enforcement backend name, for startup logging
+    /// (never credentials — a backend label only).
+    pub fn backend_label(&self) -> &'static str {
+        match self {
+            Self::Memory(_) => "memory",
+            Self::Durable(_) => "sqlite",
+            #[cfg(feature = "postgres")]
+            Self::Postgres(_) => "postgres",
+        }
     }
 
     fn ttl() -> Duration {
@@ -78,6 +104,8 @@ impl ProxyLedger {
         match self {
             Self::Memory(_) => None, // no dedup in the volatile arm — count (D3)
             Self::Durable(l) => l.seen_durable(vkey, idem_key, now).ok().flatten(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.seen_durable(vkey, idem_key, now).ok().flatten(),
         }
     }
 
@@ -88,6 +116,17 @@ impl ProxyLedger {
         match self {
             Self::Memory(_) => {} // volatile arm: nothing durable to protect
             Self::Durable(l) => {
+                if let Err(e) =
+                    l.record_durable(vkey, idem_key, reservation, actual, now, Self::ttl())
+                {
+                    tracing::warn!(
+                        %e,
+                        "idempotency record failed — a retry of this call will be metered again (D3 fail-toward-counting)"
+                    );
+                }
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => {
                 if let Err(e) =
                     l.record_durable(vkey, idem_key, reservation, actual, now, Self::ttl())
                 {
@@ -125,6 +164,10 @@ impl ProxyLedger {
             Self::Durable(l) => l
                 .set_limit_durable(scope, limit, window, policy)
                 .map_err(|e| e.to_string()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l
+                .set_limit_durable(scope, limit, window, policy)
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -152,6 +195,10 @@ impl ProxyLedger {
                 Ok(())
             }
             Self::Durable(l) => l
+                .set_limits_durable(scope, limits, replace)
+                .map_err(|e| e.to_string()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l
                 .set_limits_durable(scope, limits, replace)
                 .map_err(|e| e.to_string()),
         }
@@ -184,6 +231,18 @@ impl ProxyLedger {
                     }
                 }
             },
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => match l.reserve_durable(scope, ceiling, now, Self::ttl()) {
+                Ok(ReserveOutcome::Admitted(r)) => Admission::Leased(r),
+                Ok(ReserveOutcome::Denied(_)) => Admission::Denied,
+                Err(e) => {
+                    eprintln!("sandhi-proxy: durable reserve failed for {scope}: {e}");
+                    match policy {
+                        Policy::Warn => Admission::Unmetered,
+                        Policy::Block => Admission::Denied,
+                    }
+                }
+            },
         }
     }
 
@@ -205,6 +264,17 @@ impl ProxyLedger {
                     );
                 }
             }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => {
+                if let Err(e) = l.settle_durable(reservation.id, actual) {
+                    tracing::error!(
+                        lease = reservation.id,
+                        actual,
+                        error = %e,
+                        "durable settle FAILED — capacity stays reserved until the lease expires"
+                    );
+                }
+            }
         }
     }
 
@@ -214,6 +284,8 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => l.limit(scope),
             Self::Durable(l) => l.limit_durable(scope).unwrap_or(None),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.limit_durable(scope).unwrap_or(None),
         }
     }
 
@@ -227,6 +299,8 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => Ok(l.spent(scope)),
             Self::Durable(l) => l.spent_durable(scope).map_err(|e| e.to_string()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.spent_durable(scope).map_err(|e| e.to_string()),
         }
     }
 
@@ -239,6 +313,10 @@ impl ProxyLedger {
             Self::Durable(l) => l
                 .spent_for_window_durable(scope, window)
                 .map_err(|e| e.to_string()),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l
+                .spent_for_window_durable(scope, window)
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -247,6 +325,8 @@ impl ProxyLedger {
         match self {
             Self::Memory(l) => l.reserved(scope),
             Self::Durable(l) => l.reserved_durable(scope).unwrap_or(0),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.reserved_durable(scope).unwrap_or(0),
         }
     }
 
@@ -257,6 +337,8 @@ impl ProxyLedger {
         match self {
             Self::Memory(_) => Vec::new(),
             Self::Durable(l) => l.list_budgets_durable().unwrap_or_default(),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.list_budgets_durable().unwrap_or_default(),
         }
     }
 
@@ -265,6 +347,8 @@ impl ProxyLedger {
         let reclaimed = match self {
             Self::Memory(l) => l.reclaim_expired(now),
             Self::Durable(l) => l.reclaim_expired_durable(now).unwrap_or(0),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l.reclaim_expired_durable(now).unwrap_or(0),
         };
         // TD-0011 D6: reclaims are the crash-recovery signal. Zero is the steady state, so only a
         // non-zero count is worth an operator's attention — a sustained trickle means leases are
@@ -287,6 +371,13 @@ impl ProxyLedger {
         let released = match self {
             Self::Memory(_) => 0,
             Self::Durable(l) => l
+                .release_aged_unresolved_liabilities_durable(now, cutoff)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "aged liability release sweep failed");
+                    0
+                }),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(l) => l
                 .release_aged_unresolved_liabilities_durable(now, cutoff)
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error, "aged liability release sweep failed");

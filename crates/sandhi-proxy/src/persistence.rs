@@ -49,6 +49,17 @@ impl BufferedAlertStore {
         })
     }
 
+    /// The object-safe seam (`sandhi_store::DynAlertStore`) used by the whole-store
+    /// Postgres wiring (ADR-0049); identical buffered-write semantics.
+    #[must_use]
+    pub fn from_store(store: Arc<dyn sandhi_store::DynAlertStore>, capacity: usize) -> Self {
+        Self::with_writer(capacity, move |rule_id| {
+            if let Err(error) = store.mark_fired(rule_id) {
+                tracing::warn!(%error, %rule_id, "could not persist alert fire");
+            }
+        })
+    }
+
     fn with_writer(capacity: usize, write: impl Fn(&str) + Send + 'static) -> Self {
         let capacity = capacity.max(1);
         let (sender, receiver) = mpsc::sync_channel(capacity);

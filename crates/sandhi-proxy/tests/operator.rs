@@ -51,7 +51,7 @@ fn admin_state() -> Arc<ProxyState> {
     // P2: wire the alert store + a live registry (rehydrated; the tokio test runtime backs the
     // webhook transport so best-effort webhook rules can be exercised end-to-end).
     let alert_store = Arc::new(AlertStore::in_memory().unwrap());
-    let registry = rehydrate_alerts(&alert_store);
+    let registry = rehydrate_alerts(alert_store.as_ref());
     state.alert_store = Some(alert_store);
     state.alerts = Some(Arc::new(std::sync::Mutex::new(registry)));
     state.admin_token = Some(TOKEN.into());

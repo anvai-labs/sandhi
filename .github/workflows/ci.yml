@@ -214,6 +214,9 @@ jobs:
         run: |
           cargo test -p sandhi-store --features postgres
           cargo test -p sandhi-store --features postgres -- --ignored
+          # PR-D (ADR-0049): the whole-store wiring — every store opened on ONE DSN and
+          # round-tripped through the proxy seams (rows tagged with the test pid).
+          cargo test -p sandhi-proxy --features postgres --test pg_store_wiring
       - name: Optional embedded evaluator feature compiles and passes portable tests
         run: |
           cargo clippy --workspace --all-targets --features policy-onnx -- -D warnings

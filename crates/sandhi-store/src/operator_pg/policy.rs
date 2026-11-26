@@ -40,27 +40,29 @@ impl PostgresPolicyAuditStore {
     /// Must be called on a `tokio` runtime; that runtime's handle is retained for every
     /// later blocking statement.
     pub async fn connect(dsn: &str, max_rows: u64) -> Result<Self, OperatorStoreError> {
+        let options: sqlx::postgres::PgConnectOptions = dsn
+            .parse()
+            .map_err(|e| OperatorStoreError(format!("invalid DSN: {e}")))?;
+        Self::connect_with(options, max_rows).await
+    }
+
+    /// Like [`Self::connect`] from pre-parsed connect options: the startup wiring sets
+    /// `application_name` (and the test suite points `search_path` at a per-test schema).
+    pub async fn connect_with(
+        options: sqlx::postgres::PgConnectOptions,
+        max_rows: u64,
+    ) -> Result<Self, OperatorStoreError> {
         if max_rows == 0 || max_rows > 100_000 {
             return Err(OperatorStoreError(
                 "policy receipt capacity must be between 1 and 100000".into(),
             ));
         }
-        let pool = OperatorPool::connect(dsn, 2)
+        let pool = OperatorPool::connect_with(options, 2)
             .await
             .map_err(|e| OperatorStoreError(e.to_string()))?;
         init_ddl(pool.pool(), DDL)
             .await
             .map_err(|e| OperatorStoreError(e.to_string()))?;
-        Ok(Self { pool, max_rows })
-    }
-
-    #[cfg(test)]
-    async fn connect_with(
-        options: sqlx::postgres::PgConnectOptions,
-        max_rows: u64,
-    ) -> Result<Self, sqlx::Error> {
-        let pool = OperatorPool::connect_with(options, 2).await?;
-        init_ddl(pool.pool(), DDL).await?;
         Ok(Self { pool, max_rows })
     }
 
@@ -164,7 +166,9 @@ mod tests {
 
     fn pg_policy(tag: &str, max_rows: u64) -> (String, PostgresPolicyAuditStore) {
         super::super::pg_test::connect_in_schema(tag, |options| async move {
-            PostgresPolicyAuditStore::connect_with(options, max_rows).await
+            PostgresPolicyAuditStore::connect_with(options, max_rows)
+                .await
+                .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))
         })
     }
 
@@ -217,7 +221,9 @@ mod tests {
 
         let reopened =
             super::super::pg_test::connect_in_schema("policy-restart", |options| async move {
-                PostgresPolicyAuditStore::connect_with(options, 10).await
+                PostgresPolicyAuditStore::connect_with(options, 10)
+                    .await
+                    .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))
             })
             .1;
         let summary = reopened.summary().unwrap();
