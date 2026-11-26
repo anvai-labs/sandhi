@@ -356,7 +356,10 @@ impl BackendStore {
 
 /// Preserve the exact pre-migration effective scope. This is compatibility authority,
 /// not an assertion that a family name identifies the vendor. Never recompute on update.
-fn legacy_budget_scope(definition: &BackendDefinition) -> Result<String, BackendStoreError> {
+// Shared verbatim with the Postgres backend twin (`operator_pg::backends`).
+pub(crate) fn legacy_budget_scope(
+    definition: &BackendDefinition,
+) -> Result<String, BackendStoreError> {
     let name = match definition.endpoint.endpoint_family {
         EndpointFamilyV1::AnthropicMessages => "anthropic",
         EndpointFamilyV1::GeminiGenerateContent => "gemini",

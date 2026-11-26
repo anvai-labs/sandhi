@@ -10,6 +10,8 @@ pub mod ledger;
 #[cfg(feature = "postgres")]
 pub mod ledger_pg;
 #[cfg(feature = "postgres")]
+pub mod operator_pg;
+#[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod profiles;
 pub mod references;
@@ -36,6 +38,11 @@ pub use backends::{BackendDefinition, BackendRecord, BackendStore, BackendStoreE
 pub use ledger::{BudgetRow, ReserveOutcome, SqliteLedger};
 #[cfg(feature = "postgres")]
 pub use ledger_pg::PostgresLedger;
+#[cfg(feature = "postgres")]
+pub use operator_pg::{
+    PostgresAlertStore, PostgresBackendStore, PostgresPolicyAuditStore, PostgresProfileStore,
+    PostgresReferenceStore, PostgresRouteStore, PostgresVaultStore, PostgresVirtualKeyStore,
+};
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
 pub use profiles::{ProfileRecord, ProfileStore};
@@ -134,6 +141,36 @@ impl From<rusqlite::Error> for UsageStoreError {
 
 #[cfg(feature = "postgres")]
 impl From<sqlx::Error> for UsageStoreError {
+    fn from(error: sqlx::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+/// Backend-agnostic error for the operator stores whose SQLite twins return
+/// `rusqlite::Result` (virtual keys, alerts, profiles, policy receipts). The message only
+/// ever reaches an operator surface or a log (never a client body with SQL in it); each
+/// backend maps its native errors into this so store consumers never see a driver type.
+/// The vault, backend, route and reference stores keep their own richer error enums
+/// (mirrored per backend); this is the seam for the simple-`Result` stores.
+#[derive(Debug)]
+pub struct OperatorStoreError(String);
+
+impl std::fmt::Display for OperatorStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OperatorStoreError {}
+
+impl From<rusqlite::Error> for OperatorStoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self(error.to_string())
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl From<sqlx::Error> for OperatorStoreError {
     fn from(error: sqlx::Error) -> Self {
         Self(error.to_string())
     }
