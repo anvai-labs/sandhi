@@ -708,7 +708,7 @@ async fn run(shutdown: Arc<ShutdownWatchdog>) -> i32 {
     // rather than fail-closed (which would break every dev who sets SANDHI_STORE without a token).
     if state.auth_mode == sandhi_proxy::auth::AuthMode::Tokens
         && state.oidc.is_none()
-        && state.store.is_some()
+        && (state.store.is_some() || state.usage_store.is_some())
         && state.admin_token.is_none()
         && !state.dashboard_public
     {
@@ -1190,7 +1190,8 @@ enum StoreModeDsn {
 #[cfg(feature = "postgres")]
 fn store_mode_dsn() -> StoreModeDsn {
     let store_raw = std::env::var("SANDHI_STORE_DSN").ok();
-    match whole_store_dsn(store_raw) {
+    let usage_raw = std::env::var("SANDHI_USAGE_DSN").ok();
+    match whole_store_dsn(store_raw, usage_raw) {
         Some(dsn) => {
             if normalize_dsn(std::env::var("SANDHI_USAGE_DSN").ok()).is_some() {
                 eprintln!(
@@ -1209,7 +1210,12 @@ fn store_mode_dsn() -> StoreModeDsn {
 /// `SANDHI_USAGE_DSN` (#518) keeps running the usage-only topology when it is the only
 /// one set; when both are set, `SANDHI_STORE_DSN` wins (ADR-0049 precedence).
 #[cfg_attr(not(feature = "postgres"), allow(dead_code))] // test-exercised selection logic
-fn whole_store_dsn(store_raw: Option<String>) -> Option<String> {
+fn whole_store_dsn(store_raw: Option<String>, _usage_raw: Option<String>) -> Option<String> {
+    // ADR-0049 precedence: whole-store mode requires the whole-store DSN. The legacy
+    // usage-only DSN is deliberately ignored here — it never selects whole-store mode
+    // by itself (it feeds the #518 usage-only topology via `configured_usage_dsn`);
+    // when both are set, `store_mode_dsn` logs the supersession. Present in the
+    // signature so the precedence contract is type-visible and test-pinned.
     normalize_dsn(store_raw)
 }
 
@@ -1322,6 +1328,14 @@ async fn connect_postgres_stores(dsn: &str) -> Result<PgStores, String> {
         .await
         .map_err(|error| format!("backends: {error}"))?;
     let backends: Arc<dyn DynBackendStore> = Arc::new(backends);
+    // The policy-receipt audit store is opened eagerly in whole-store mode so a
+    // policy-configured startup always has it (ADR-0049 Decision); it is created
+    // even when no policy is configured — the table is the bounded-receipt sink.
+    let policy_audit: Arc<dyn DynPolicyAuditStore> = Arc::new(
+        sandhi_store::PostgresPolicyAuditStore::connect(dsn, 100_000)
+            .await
+            .map_err(|error| format!("policy receipts: {error}"))?,
+    );
     let routes = sandhi_store::PostgresRouteStore::connect(dsn)
         .await
         .map_err(|error| format!("routes: {error}"))?;
@@ -1352,7 +1366,7 @@ async fn connect_postgres_stores(dsn: &str) -> Result<PgStores, String> {
         profiles: Some(profiles),
         alerts: None,
         alert_store: Some(alert_store),
-        policy_audit: None, // opened with the policy configuration, if any
+        policy_audit: Some(policy_audit),
         references,
     })
 }
@@ -1765,22 +1779,31 @@ mod tests {
         // (Feature-off refusal is compile-time: `store_mode_dsn` returns `Refuse` in a
         // build without `postgres`, and that path exits before any store opens.)
         let dsn = "postgres://user:secret@db:5432/sandhi";
-        assert_eq!(super::whole_store_dsn(None), None);
-        assert_eq!(super::whole_store_dsn(Some(String::new())), None);
-        assert_eq!(super::whole_store_dsn(Some("   ".into())), None);
+        assert_eq!(super::whole_store_dsn(None, None), None);
+        assert_eq!(super::whole_store_dsn(Some(String::new()), None), None);
+        assert_eq!(super::whole_store_dsn(Some("   ".into()), None), None);
         // Surrounding whitespace is trimmed, not rejected — the credential-carrying body
         // is preserved byte-exact and never logged.
         assert_eq!(
-            super::whole_store_dsn(Some(format!("  {dsn}  "))),
+            super::whole_store_dsn(Some(format!("  {dsn}  ")), None),
             Some(dsn.into())
         );
         // Precedence is a pure selection: the whole-store variable wins whenever it is
-        // present; the legacy usage-only DSN alone never selects whole-store mode (that
-        // stays the #518 usage-only topology).
+        // present (even when the legacy usage-only DSN is also set); the legacy
+        // usage-only DSN alone never selects whole-store mode (that stays the #518
+        // usage-only topology).
         assert_eq!(
-            super::whole_store_dsn(Some(dsn.into())),
+            super::whole_store_dsn(
+                Some(dsn.into()),
+                Some("postgres://legacy:usage@db/old".into())
+            ),
             Some(dsn.into()),
-            "SANDHI_STORE_DSN alone selects whole-store mode"
+            "SANDHI_STORE_DSN wins over SANDHI_USAGE_DSN"
+        );
+        assert_eq!(
+            super::whole_store_dsn(None, Some("postgres://usage-only@db/old".into())),
+            None,
+            "SANDHI_USAGE_DSN alone does not select whole-store mode"
         );
     }
 
