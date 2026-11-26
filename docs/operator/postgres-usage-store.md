@@ -1,5 +1,11 @@
 # Postgres usage store (`SANDHI_USAGE_DSN`)
 
+> **Scope note (ADR-0049).** This is the *usage-only* mode, retained for compatibility.
+> The whole-store mode — `SANDHI_STORE_DSN` moves the enforcement ledger, evidence, all
+> eight operator stores, the native-reference registry **and** the usage history onto one
+> PostgreSQL database — is documented in [postgres-store](postgres-store.md). When both
+> variables are set, `SANDHI_STORE_DSN` wins.
+
 Phase 2 of the Postgres program: the **usage history** (the `usage_events` table behind the
 dashboard, `/admin/usage*` and bounded diagnostics) can live in PostgreSQL instead of the
 SQLite store. Everything else stays exactly where it was:
