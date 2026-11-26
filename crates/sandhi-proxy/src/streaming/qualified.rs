@@ -21,11 +21,30 @@ pub(crate) struct OwnedObservation {
     upstream_request_id: Option<String>,
 }
 
+/// An origin terminal or failure already owns the wire ending. Never append a
+/// second terminal frame, even when the origin holds its connection open.
+pub(super) fn source_terminal_seen(accounting: &RequestAccounting) -> bool {
+    let evidence = if let Some(raw) = &accounting.stream_observation {
+        Some(raw.observation.evidence())
+    } else {
+        accounting
+            .owned
+            .as_ref()
+            .and_then(|owned| owned.attempts.context.qualified_stream_evidence())
+    };
+    evidence.is_some_and(|evidence| {
+        evidence.snapshot.protocol_done
+            || evidence.snapshot.qualification_error.is_some()
+            || evidence.snapshot.outcome == Some(AttemptOutcome::ProviderRejected)
+            || evidence.gateway_failure.is_some()
+    })
+}
+
 /// Called after the source drops and before freezing the immutable terminal record.
 /// Qualification failure retains the first counts as unresolved evidence, never zero.
-pub(crate) fn capture_terminal(accounting: &mut RequestAccounting) {
+pub(crate) fn capture_terminal(accounting: &mut RequestAccounting, owner_deadline: bool) -> bool {
     let Some(observed) = accounting.stream_observation.take() else {
-        return;
+        return false;
     };
     let evidence = observed.observation.evidence();
     let snapshot = evidence.snapshot;
@@ -34,7 +53,8 @@ pub(crate) fn capture_terminal(accounting: &mut RequestAccounting) {
     usage.upstream_request_id = observed.upstream_request_id;
     reconcile_boundary_duration(&mut usage, elapsed_ms(observed.started));
     reconcile_boundary_ttft(&mut usage, observed.ttft_ms);
-    capture_usage(accounting, usage, has_usage, snapshot);
+    capture_usage(accounting, usage, has_usage, snapshot, owner_deadline);
+    true
 }
 
 /// SSE-only buffered transports retain source evidence even when output
@@ -42,6 +62,7 @@ pub(crate) fn capture_terminal(accounting: &mut RequestAccounting) {
 pub(crate) fn capture_provider_terminal(
     accounting: &mut RequestAccounting,
     evidence: QualifiedStreamEvidence,
+    owner_deadline: bool,
 ) {
     let has_usage = evidence.usage.is_some();
     let mut usage = evidence.usage.unwrap_or_else(|| UsageV2 {
@@ -58,7 +79,13 @@ pub(crate) fn capture_provider_terminal(
             usage.time_to_first_token_source = previous.time_to_first_token_source;
         }
     }
-    capture_usage(accounting, usage, has_usage, evidence.snapshot);
+    capture_usage(
+        accounting,
+        usage,
+        has_usage,
+        evidence.snapshot,
+        owner_deadline,
+    );
 }
 
 fn capture_usage(
@@ -66,6 +93,7 @@ fn capture_usage(
     mut usage: UsageV2,
     has_usage: bool,
     snapshot: QualifiedStreamSnapshot,
+    owner_deadline: bool,
 ) {
     if let Some(error) = snapshot.qualification_error {
         if has_usage {
@@ -83,13 +111,20 @@ fn capture_usage(
             "stream_usage_unavailable;delivery:{}",
             accounting.outcome
         ));
-        accounting.set_outcome("error");
+        if !owner_deadline {
+            accounting.set_outcome("error");
+        }
     } else {
         if snapshot.outcome == Some(AttemptOutcome::ProviderRejected) {
             accounting.set_outcome("error");
         }
         if accounting.outcome == "error" && snapshot.outcome == Some(AttemptOutcome::Timeout) {
             accounting.set_outcome("timeout");
+        }
+        // ADR-0050 retains provider progress as partial evidence. The ledger
+        // keeps both holds until qualified final evidence or retention release.
+        if owner_deadline && usage.completeness != UsageCompleteness::Final {
+            usage.completeness = UsageCompleteness::Partial;
         }
         usage.outcome = Some(accounting.outcome.into());
     }
@@ -151,7 +186,11 @@ pub(crate) async fn qualified_response(
         ttft_ms: None,
         upstream_request_id: raw.upstream_request_id,
     });
-    let body = super::body(accounting, permit, None, move |accounting| {
+    let timeout_frame = Some(super::deadline_renderer(
+        dialect,
+        provider.slug().to_owned(),
+    ));
+    let body = super::body(accounting, permit, None, timeout_frame, move |accounting| {
         Box::pin(async_stream::stream! {
             while let Some(bytes) = upstream.next().await {
                 match bytes {

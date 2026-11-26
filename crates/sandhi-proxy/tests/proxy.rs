@@ -5445,6 +5445,28 @@ async fn owned_stream_disconnect_deadline_and_shutdown_retain_qualified_usage() 
         }
         if case == "disconnect" {
             drop(body);
+        } else if case == "deadline" {
+            // ADR-0050: the owner-enforced body deadline delivers the structured
+            // timeout frame in-band (with the measured usage) and ends the stream
+            // cleanly — the frame is a transport terminator, not a success.
+            let mut frame = String::new();
+            let mut clean_end = false;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(chunk) = body.next().await {
+                    let Ok(bytes) = chunk else { continue };
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if text.contains("\"code\":\"timeout\"") {
+                        frame = text.clone();
+                    }
+                    if text.contains("[DONE]") {
+                        clean_end = true;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("deadline case must deliver the structured timeout frame"));
+            assert!(frame.contains("\"code\":\"timeout\""), "frame: {frame}");
+            assert!(clean_end, "stream must end cleanly after the frame");
         } else {
             // Leave the producer backpressured until its lifetime/shutdown expires.
             tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
