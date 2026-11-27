@@ -1,21 +1,9 @@
 //! Canonical chat v1 ↔ Anthropic Messages codec.
 
+use crate::insert_optional;
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ByteStream, ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
-/// Insert `value` only when `Some` — unset optional fields are OMITTED on
-/// the wire, never a JSON null.
-fn insert_optional<T: serde::Serialize>(
-    body: &mut Map<String, Value>,
-    key: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        if let Ok(value) = serde_json::to_value(value) {
-            body.insert(key.into(), value);
-        }
-    }
-}
 
 #[cfg(test)]
 use sandhi_core::UsageCompleteness;

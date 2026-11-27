@@ -1,5 +1,6 @@
 //! Canonical chat v1 ↔ Ollama native `/api/chat` codec.
 
+use crate::insert_optional;
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
@@ -458,20 +459,6 @@ fn decode_done_reason(reason: &str) -> FinishReasonV1 {
         "stop" => FinishReasonV1::Stop,
         "length" => FinishReasonV1::Length,
         _ => FinishReasonV1::Unknown,
-    }
-}
-
-/// Insert `value` only when `Some` — unset optional fields are OMITTED on
-/// the wire, never a JSON null.
-fn insert_optional<T: serde::Serialize>(
-    body: &mut Map<String, Value>,
-    key: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        if let Ok(value) = serde_json::to_value(value) {
-            body.insert(key.into(), value);
-        }
     }
 }
 

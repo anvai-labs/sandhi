@@ -1,5 +1,6 @@
 //! Canonical chat v1 ↔ Cohere v2 Chat codec.
 
+use crate::insert_optional;
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{ParsedUsage, Provider, ProviderError};
 use async_trait::async_trait;
@@ -388,20 +389,6 @@ fn decode_finish_reason(reason: &str) -> FinishReasonV1 {
         "MAX_TOKENS" => FinishReasonV1::Length,
         "TOOL_CALL" => FinishReasonV1::ToolCalls,
         _ => FinishReasonV1::Unknown,
-    }
-}
-
-/// Insert `value` only when `Some` — the wire contract for optional fields:
-/// unset means OMITTED, never a JSON null (strict servers reject nulls).
-fn insert_optional<T: serde::Serialize>(
-    body: &mut Map<String, Value>,
-    key: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        if let Ok(value) = serde_json::to_value(value) {
-            body.insert(key.into(), value);
-        }
     }
 }
 
