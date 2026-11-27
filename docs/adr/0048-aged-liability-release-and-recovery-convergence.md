@@ -42,6 +42,24 @@
    recovery cursor: `recover_inner` stops counting released rows as unresolved, so
    `/readyz` returns to 200 once every intent is terminal — settled, closed, or released —
    and a full sweep completes. Fresh unresolved intents still block readiness exactly as before.
+6. **Convergence isolation (post-incident hardening).** The sweep classifies only
+   unsettled reservations — a settled row is not a liability, so it is excluded from the
+   candidates rather than run through the receipt-consistency machinery (which can reject a
+   settled row whose stored receipt disagrees with it, e.g. across a store migration).
+   Each remaining candidate classifies and stamps in its own transaction/savepoint: one
+   poisoned row is skipped and retained in place (warn-logged) and can never block the
+   release of another aged liability. The recovery inventory applies the same rule from the
+   readiness side: a settled reservation is classified terminal before the observation-based
+   charge cross-check — as `Settled` when its stored receipt is fully consistent with the
+   reservation (including the settlement timestamp) and no observation charge contradicts it
+   (the unavailable observation charge), as the operator-visible `SettledReceiptUnverified`
+   when
+   the receipt is structurally sound but the timestamp drifts — so a single migrated row can
+   never hold `/readyz` down. An observation charge that PRESENTLY contradicts the stored
+   receipt stays fail-closed, as does every other settled-row disagreement (scope, charged
+   tokens, receipt identity, invalid flags) and any receipt/reservation contradiction on an
+   *unsettled* hold: convergence is for unavailable evidence, never against contradicted
+   evidence, and settlement itself is never relaxed.
 
 ## Consequences
 

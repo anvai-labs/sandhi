@@ -620,6 +620,7 @@ async fn recover_inner(state: Arc<ProxyState>, shutdown: bool) -> Result<usize, 
                         RecoveryState::Settled(_)
                             | RecoveryState::ClosedBeforeDispatch(_)
                             | RecoveryState::ReleasedAfterRetention
+                            | RecoveryState::SettledReceiptUnverified
                     ) {
                         cursor.unresolved += 1;
                     }
