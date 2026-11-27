@@ -1,5 +1,6 @@
 //! Typed provider runtime and OpenAI-compatible codec.
 
+use crate::insert_optional;
 use crate::{
     Anthropic, AnthropicAuthScheme, Attribution, ByteStream, Cohere, Gemini, GeminiAuthScheme,
     Ollama, OpenAiCompat, OpenAiResponses, OpenAiResponsesProfile, ParsedUsage, Provider,
@@ -2125,18 +2126,6 @@ pub(crate) fn encode_openai_thinking(thinking: &sandhi_core::chat::ThinkingReque
         obj.insert("budget_tokens".into(), json!(budget));
     }
     Value::Object(obj)
-}
-
-fn insert_optional<T: serde::Serialize>(
-    body: &mut Map<String, Value>,
-    key: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        if let Ok(value) = serde_json::to_value(value) {
-            body.insert(key.into(), value);
-        }
-    }
 }
 
 fn encode_message(message: &ChatMessageV1) -> Value {

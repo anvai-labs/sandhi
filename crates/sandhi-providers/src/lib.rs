@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::Stream;
+use serde_json::{Map, Value};
 use std::pin::Pin;
 
 // The usage parsers are metering primitives — they live in `sandhi-core` (no transport deps).
@@ -86,6 +87,21 @@ pub use typed::{
     BackendBinding, ChatEventStream, ChatProvider, FamilyFacts, ProviderFamily, ProviderHandle,
     ProviderRuntime, ProviderTransportConfig, UsageCadence,
 };
+
+/// Insert `value` only when `Some` — unset optional fields are OMITTED on the
+/// wire, never a JSON null (strict servers reject null `strict`/`description`;
+/// matches `ToolDefinitionV1`'s own `skip_serializing_if` contract).
+pub(crate) fn insert_optional<T: serde::Serialize>(
+    body: &mut Map<String, Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        if let Ok(value) = serde_json::to_value(value) {
+            body.insert(key.into(), value);
+        }
+    }
+}
 
 /// Shared HTTP client for the in-repo adapters: a 10s TCP/TLS connect bound as
 /// defense-in-depth under the decorator's per-attempt timeouts. Refuse redirects:
