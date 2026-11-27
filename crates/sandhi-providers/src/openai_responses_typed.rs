@@ -1,5 +1,6 @@
 //! Typed codec for the OpenAI Responses item/event protocol.
 
+use crate::insert_optional;
 use crate::typed::{provider_request_observed, ChatEventStream, ChatProvider};
 use crate::{
     parse_openai_responses_usage, ByteStream, OpenAiResponsesProfile, ParsedUsage, Provider,
@@ -571,16 +572,6 @@ fn responses_text_format(format: &Value) -> Value {
         })
     } else {
         format.clone()
-    }
-}
-
-fn insert_optional<T: serde::Serialize>(
-    body: &mut Map<String, Value>,
-    key: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value.and_then(|value| serde_json::to_value(value).ok()) {
-        body.insert(key.into(), value);
     }
 }
 
