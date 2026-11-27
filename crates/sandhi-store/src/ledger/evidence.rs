@@ -439,15 +439,29 @@ fn terminal_charge(
     .map_err(|_| EvidenceError::CorruptObservation)
 }
 
-/// ADR-0048 convergence isolation: true when a settled reservation's stored receipt
-/// is structurally sound (scope, charged tokens, receipt identity) but its settled
-/// timestamp disagrees with the reservation's — the store-migration drift shape.
-/// Every other disagreement is damage, not drift.
-fn settled_receipt_timestamp_drift_only(
+/// How a settled reservation's stored receipt stands against the reservation,
+/// checked independently of the terminal-observation charge (ADR-0048
+/// convergence isolation). A settled pair whose receipt fully agrees carries
+/// complete settlement evidence on its own; the caller still refuses it when an
+/// observation-derived charge PRESENTLY contradicts the receipt — convergence is
+/// for unavailable evidence, never against contradicted evidence.
+enum SettledReceiptStanding {
+    /// Fully consistent — including the settlement timestamp. A failed
+    /// `checked_terminal_receipt` against this shape means only the
+    /// observation-derived charge cross-check was unavailable or mismatched.
+    Verified(SettlementReceipt),
+    /// Structurally sound (scope, charged tokens, reservation id, receipt
+    /// identity) but the settlement timestamp drifts — the store-migration shape.
+    TimestampDrift,
+    /// Contradicts the reservation: damage, not drift — fail closed.
+    Unsound,
+}
+
+fn settled_receipt_standing(
     conn: &Connection,
     scope: &str,
     id: u64,
-) -> Result<bool, EvidenceError> {
+) -> Result<SettledReceiptStanding, EvidenceError> {
     let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
         .query_row(
             "SELECT (scope = ?2), settled, actual, settled_at \
@@ -456,7 +470,7 @@ fn settled_receipt_timestamp_drift_only(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
     if !scope_matches || settled != 1 {
-        return Ok(false);
+        return Ok(SettledReceiptStanding::Unsound);
     }
     let stored = conn
         .query_row(
@@ -468,13 +482,20 @@ fn settled_receipt_timestamp_drift_only(
         )
         .optional()?;
     let Some(receipt) = stored else {
-        return Ok(false);
+        return Ok(SettledReceiptStanding::Unsound);
     };
-    Ok(receipt.charged_tokens == actual as u64
+    if !(receipt.charged_tokens == actual as u64
         && receipt.scope == scope
         && receipt.reservation_id == id
-        && validate_execution_id(&receipt.receipt_id).is_ok()
-        && Some(receipt.settled_at) != settled_at)
+        && validate_execution_id(&receipt.receipt_id).is_ok())
+    {
+        return Ok(SettledReceiptStanding::Unsound);
+    }
+    if Some(receipt.settled_at) == settled_at {
+        Ok(SettledReceiptStanding::Verified(receipt))
+    } else {
+        Ok(SettledReceiptStanding::TimestampDrift)
+    }
 }
 
 fn checked_terminal_receipt(
@@ -863,11 +884,27 @@ impl SqliteLedger {
             let receipt = match checked_terminal_receipt(&tx, scope, reservation_id, charge) {
                 Ok(receipt) => receipt,
                 Err(EvidenceError::InconsistentSettlement) if settled == 1 => {
-                    if settled_receipt_timestamp_drift_only(&tx, scope, reservation_id)? {
-                        timestamp_drift = true;
-                        None
-                    } else {
-                        return Err(EvidenceError::InconsistentSettlement);
+                    match settled_receipt_standing(&tx, scope, reservation_id)? {
+                        // The receipt + reservation pair is complete settlement
+                        // evidence on its own — but only when nothing contradicts
+                        // it: an observation-derived charge that MISMATCHES the
+                        // stored receipt is present tampered evidence and stays
+                        // fail-closed; convergence is for the missing-observation
+                        // case (charge unavailable), never against contradicted
+                        // evidence.
+                        SettledReceiptStanding::Verified(receipt) if charge.is_none() => {
+                            Some(receipt)
+                        }
+                        SettledReceiptStanding::Verified(_) => {
+                            return Err(EvidenceError::InconsistentSettlement);
+                        }
+                        SettledReceiptStanding::TimestampDrift => {
+                            timestamp_drift = true;
+                            None
+                        }
+                        SettledReceiptStanding::Unsound => {
+                            return Err(EvidenceError::InconsistentSettlement);
+                        }
                     }
                 }
                 Err(error) => return Err(error),

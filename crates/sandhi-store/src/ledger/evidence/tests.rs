@@ -1638,11 +1638,39 @@ fn recovery_cursor_freezes_admission_range_but_rechecks_current_state() {
 }
 
 #[test]
+fn recovery_classifies_a_settled_row_without_observation_terminal() {
+    // ADR-0048 convergence isolation: settlement evidence lives in the
+    // receipt + reservation pair; a missing terminal observation must not hold
+    // readiness down on a settled row (the reviewer probe's residual class).
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    let intent = tracked(&mut ledger);
+    ledger
+        .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
+        .unwrap();
+    ledger
+        .settle_terminal_durable("team", &intent.execution_id)
+        .unwrap();
+    ledger
+        .conn
+        .execute("DELETE FROM budget_terminal_observation", [])
+        .unwrap();
+    let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+    assert!(matches!(page.entries[0].state, RecoveryState::Settled(_)));
+    // Settlement stays refused without the observation (strict settle path).
+    assert!(ledger
+        .settle_terminal_durable("team", &intent.execution_id)
+        .is_err());
+}
+
+#[test]
 fn recovery_rejects_damaged_bindings_observations_and_receipts_without_writes() {
     for fault in [
         "DELETE FROM budget_reservation",
         "PRAGMA foreign_keys = OFF; DELETE FROM budget_execution_intent",
-        "DELETE FROM budget_terminal_observation",
+        // Deleting the terminal observation of a SETTLED row no longer errors
+        // recovery (ADR-0048 convergence isolation: the receipt + reservation
+        // pair carries the settlement evidence) — covered explicitly by
+        // recovery_classifies_a_settled_row_without_observation_terminal below.
         "DELETE FROM budget_settlement_outbox",
         "UPDATE budget_terminal_observation SET usage_json = '{}'",
         "UPDATE budget_terminal_observation SET frozen_charge = 43",
@@ -2400,11 +2428,9 @@ fn aged_release_converges_around_a_poisoned_settled_row() {
     assert!(stamp.is_none());
     // Settlement stays refused on a drifted row: the drift tolerance is a
     // recovery-classification rule, never a license to fabricate a receipt.
-    assert!(
-        ledger
-            .settle_terminal_durable("team", &poison.execution_id)
-            .is_err()
-    );
+    assert!(ledger
+        .settle_terminal_durable("team", &poison.execution_id)
+        .is_err());
     // Readiness convergence (F1): recovery classifies BOTH poison scopes terminal —
     // the settled mismatched-receipt row as `SettledReceiptUnverified` — without
     // erroring, so one migrated row cannot hold /readyz down.

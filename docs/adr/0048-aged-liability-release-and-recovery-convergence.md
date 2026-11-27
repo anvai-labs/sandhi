@@ -49,11 +49,16 @@
    Each remaining candidate classifies and stamps in its own transaction/savepoint: one
    poisoned row is skipped and retained in place (warn-logged) and can never block the
    release of another aged liability. The recovery inventory applies the same rule from the
-   readiness side: a settled reservation classifies terminal before the receipt machinery —
-   as `Settled` when its receipt re-verifies, as the operator-visible
-   `SettledReceiptUnverified` when it does not — so a single migrated row can never hold
-   `/readyz` down. A receipt/reservation contradiction on an *unsettled* hold remains
-   fail-closed: it is a genuine unresolved liability needing operator attention.
+   readiness side: a settled reservation is classified terminal before the observation-based
+   charge cross-check — as `Settled` when its stored receipt is fully consistent with the
+   reservation (including the settlement timestamp) and no observation charge contradicts it
+   (the missing-observation case), as the operator-visible `SettledReceiptUnverified` when
+   the receipt is structurally sound but the timestamp drifts — so a single migrated row can
+   never hold `/readyz` down. An observation charge that PRESENTLY contradicts the stored
+   receipt stays fail-closed, as does every other settled-row disagreement (scope, charged
+   tokens, receipt identity, invalid flags) and any receipt/reservation contradiction on an
+   *unsettled* hold: convergence is for unavailable evidence, never against contradicted
+   evidence, and settlement itself is never relaxed.
 
 ## Consequences
 
