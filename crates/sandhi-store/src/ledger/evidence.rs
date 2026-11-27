@@ -62,6 +62,12 @@ pub enum RecoveryState {
     /// the row stops counting against readiness. The stored evidence is intact;
     /// no zero-usage receipt exists and none may be inferred from this state.
     ReleasedAfterRetention,
+    /// Terminal (ADR-0048 convergence isolation): the reservation settled, but its
+    /// stored receipt could not be re-verified against it (e.g. a store migration
+    /// left the receipt's settled_at inconsistent with the reservation). The
+    /// liability is gone — settled rows never gate readiness — and the inconsistency
+    /// is retained for operator inspection instead of blocking recovery forever.
+    SettledReceiptUnverified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,6 +437,44 @@ fn terminal_charge(
             .ok_or(EvidenceError::CorruptObservation)?,
     )
     .map_err(|_| EvidenceError::CorruptObservation)
+}
+
+/// ADR-0048 convergence isolation: true when a settled reservation's stored receipt
+/// is structurally sound (scope, charged tokens, receipt identity) but its settled
+/// timestamp disagrees with the reservation's — the store-migration drift shape.
+/// Every other disagreement is damage, not drift.
+fn settled_receipt_timestamp_drift_only(
+    conn: &Connection,
+    scope: &str,
+    id: u64,
+) -> Result<bool, EvidenceError> {
+    let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) = conn
+        .query_row(
+            "SELECT (scope = ?2), settled, actual, settled_at \
+             FROM budget_reservation WHERE id = ?1",
+            params![id as i64, scope],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+    if !scope_matches || settled != 1 {
+        return Ok(false);
+    }
+    let stored = conn
+        .query_row(
+            "SELECT CASE WHEN length(CAST(receipt_id AS BLOB)) = 64 THEN receipt_id END,
+                reservation_id, CASE WHEN scope = ?2 THEN ?2 END, charged_tokens, settled_at
+         FROM budget_settlement_outbox WHERE reservation_id = ?1",
+            params![id as i64, scope],
+            receipt,
+        )
+        .optional()?;
+    let Some(receipt) = stored else {
+        return Ok(false);
+    };
+    Ok(receipt.charged_tokens == actual as u64
+        && receipt.scope == scope
+        && receipt.reservation_id == id
+        && validate_execution_id(&receipt.receipt_id).is_ok()
+        && Some(receipt.settled_at) != settled_at)
 }
 
 fn checked_terminal_receipt(
@@ -804,9 +848,33 @@ impl SqliteLedger {
                     .map(|o| terminal_charge(&tx, o))
                     .transpose()?
             };
-            let receipt = checked_terminal_receipt(&tx, scope, reservation_id, charge)?;
+            // ADR-0048 convergence isolation: a settled reservation whose stored
+            // receipt disagrees with it ONLY in the settlement timestamp (drift,
+            // e.g. across a store migration) is terminal-by-anomaly — the liability
+            // is gone and the inconsistency is operator-visible instead of holding
+            // /readyz down forever. Every other disagreement (scope, charged
+            // tokens, receipt identity, invalid flags) stays fail-closed damage.
+            let settled: i64 = tx.query_row(
+                "SELECT settled FROM budget_reservation WHERE id = ?1",
+                [reservation_id as i64],
+                |r| r.get(0),
+            )?;
+            let mut timestamp_drift = false;
+            let receipt = match checked_terminal_receipt(&tx, scope, reservation_id, charge) {
+                Ok(receipt) => receipt,
+                Err(EvidenceError::InconsistentSettlement) if settled == 1 => {
+                    if settled_receipt_timestamp_drift_only(&tx, scope, reservation_id)? {
+                        timestamp_drift = true;
+                        None
+                    } else {
+                        return Err(EvidenceError::InconsistentSettlement);
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let state = match (receipt, observed, charge) {
                 (Some(receipt), _, _) => RecoveryState::Settled(receipt),
+                (None, _, _) if timestamp_drift => RecoveryState::SettledReceiptUnverified,
                 (None, None, _) if fence.is_some() => RecoveryState::MayHaveDispatched,
                 (None, None, _) => RecoveryState::MissingObservation,
                 (None, Some(_), None) => RecoveryState::UnresolvedObservation(
@@ -939,7 +1007,10 @@ impl SqliteLedger {
                             execution_id = %execution_id,
                             "aged liability release skipped; row retained in place"
                         );
-                        let _ = sp.rollback();
+                        // A failed rollback would leave partial writes inside the
+                        // page transaction; abort the whole page (the dropped
+                        // transaction rolls back) rather than commit a half-stamp.
+                        sp.rollback()?;
                     }
                 }
             }

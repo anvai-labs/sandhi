@@ -301,6 +301,37 @@ async fn terminal_charge(
 /// `settled = 1` with no receipt is a [`EvidenceError::LegacySettlement`] (kept), and
 /// every other mismatch — including caller-supplied charges that disagree with the
 /// stored receipt — is `InconsistentSettlement`.
+/// ADR-0048 convergence isolation: true when a settled reservation's stored receipt
+/// is structurally sound (scope, charged tokens, receipt identity) but its settled
+/// timestamp disagrees with the reservation's — the store-migration drift shape.
+/// Every other disagreement is damage, not drift.
+async fn settled_receipt_timestamp_drift_only(
+    conn: &mut PgConnection,
+    scope: &str,
+    id: u64,
+) -> Result<bool, EvidenceError> {
+    let (scope_matches, settled, actual, settled_at): (bool, i64, i64, Option<i64>) =
+        sqlx::query_as(
+            "SELECT (scope = $2), settled, actual, settled_at \
+             FROM budget_reservation WHERE id = $1",
+        )
+        .bind(id as i64)
+        .bind(scope)
+        .fetch_one(&mut *conn)
+        .await?;
+    if !scope_matches || settled != 1 {
+        return Ok(false);
+    }
+    let Some(receipt) = receipt_by_reservation(&mut *conn, id, scope).await? else {
+        return Ok(false);
+    };
+    Ok(receipt.charged_tokens == actual as u64
+        && receipt.scope == scope
+        && receipt.reservation_id == id
+        && validate_execution_id(&receipt.receipt_id).is_ok()
+        && Some(receipt.settled_at) != settled_at)
+}
+
 async fn checked_terminal_receipt(
     conn: &mut PgConnection,
     scope: &str,
@@ -982,9 +1013,35 @@ impl PostgresLedger {
                     None => None,
                 }
             };
-            let receipt = checked_terminal_receipt(&mut tx, scope, reservation_id, charge).await?;
+            // ADR-0048 convergence isolation: a settled reservation whose stored
+            // receipt disagrees with it ONLY in the settlement timestamp (drift,
+            // e.g. across a store migration) is terminal-by-anomaly — the liability
+            // is gone and the inconsistency is operator-visible instead of holding
+            // /readyz down forever. Every other disagreement (scope, charged
+            // tokens, receipt identity, invalid flags) stays fail-closed damage.
+            let settled: i64 =
+                sqlx::query_scalar("SELECT settled FROM budget_reservation WHERE id = $1")
+                    .bind(reservation_id as i64)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let mut timestamp_drift = false;
+            let receipt = match checked_terminal_receipt(&mut tx, scope, reservation_id, charge)
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(EvidenceError::InconsistentSettlement) if settled == 1 => {
+                    if settled_receipt_timestamp_drift_only(&mut tx, scope, reservation_id).await? {
+                        timestamp_drift = true;
+                        None
+                    } else {
+                        return Err(EvidenceError::InconsistentSettlement);
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let state = match (receipt, observed, charge) {
                 (Some(receipt), _, _) => RecoveryState::Settled(receipt),
+                (None, _, _) if timestamp_drift => RecoveryState::SettledReceiptUnverified,
                 (None, None, _) if fence.is_some() => RecoveryState::MayHaveDispatched,
                 (None, None, _) => RecoveryState::MissingObservation,
                 (None, Some(_), None) => RecoveryState::UnresolvedObservation(
@@ -1092,11 +1149,17 @@ impl PostgresLedger {
                 )
                 .await;
                 match stamped {
-                    Ok(true) => {
-                        ctx.commit().await?;
-                        released += 1;
-                    }
-                    Ok(false) => ctx.commit().await?,
+                    // A failed commit leaves the transaction dropped (rolled back):
+                    // the row is retained in place and retried by the next sweep
+                    // instead of aborting the sweep's convergence.
+                    Ok(stamped) => match ctx.commit().await {
+                        Ok(()) => released += stamped as usize,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            execution_id = %execution_id,
+                            "aged liability release commit failed; row retained in place"
+                        ),
+                    },
                     Err(error) => {
                         tracing::warn!(
                             %error,
@@ -3658,7 +3721,28 @@ mod tests {
              VALUES ('{}', {}, 'team', 40, 1794873147)",
             poison.execution_id, poison.reservation.id
         ));
-        let IntentAdmission::Admitted(intent) = ledger
+        // A second, unsettled poison: a stray receipt on an unsettled hold drives
+        // `stamp_if_liable` into its error arm, exercising the per-candidate
+        // transaction isolation directly (partial writes roll back, later
+        // candidates still release).
+        let IntentAdmission::Admitted(unsettled_poison) = ledger
+            .reserve_with_intent_durable(
+                "stray",
+                100,
+                now() - Duration::hours(48),
+                Duration::seconds(1),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        ledger.exec(&format!(
+            "INSERT INTO budget_settlement_outbox(receipt_id, reservation_id, scope, charged_tokens, settled_at) \
+             VALUES ('{}', {}, 'stray', 0, 0)",
+            unsettled_poison.execution_id, unsettled_poison.reservation.id
+        ));
+        let IntentAdmission::Admitted(_intent) = ledger
             .reserve_with_intent_durable(
                 "other",
                 100,
@@ -3677,9 +3761,11 @@ mod tests {
                 .release_aged_unresolved_liabilities_durable(now, cutoff)
                 .unwrap(),
             1,
-            "the poisoned row must not block the genuine release"
+            "neither poisoned row may block the genuine release"
         );
         assert_eq!(ledger.reserved_durable("other").unwrap(), 0);
+        // The unsettled poison is retained: still held, no stamp.
+        assert_eq!(ledger.reserved_durable("stray").unwrap(), 100);
         // The poisoned row is untouched: still settled with its own numbers, no stamp.
         let untouched: (i64, i64, i64) = ledger.block(async {
             sqlx::query_as(
@@ -3696,6 +3782,17 @@ mod tests {
         });
         assert_eq!((untouched.0, untouched.1), (40, 1));
         assert_eq!(untouched.2, 0);
+        // Readiness convergence: recovery classifies the settled mismatched-receipt
+        // row terminal (`SettledReceiptUnverified`) without erroring, so one
+        // migrated row cannot hold /readyz down.
+        let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+        assert!(page
+            .entries
+            .iter()
+            .any(|e| matches!(e.state, RecoveryState::SettledReceiptUnverified)));
+        // The unsettled stray row stays fail-closed in recovery (genuine
+        // unresolved liability needing operator attention).
+        assert!(ledger.recovery_page_durable("stray", None, 10).is_err());
         assert_eq!(
             ledger
                 .recovery_page_durable("other", None, 10)

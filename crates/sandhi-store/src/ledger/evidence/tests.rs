@@ -1649,7 +1649,10 @@ fn recovery_rejects_damaged_bindings_observations_and_receipts_without_writes() 
         "UPDATE budget_reservation SET settled = 0",
         "UPDATE budget_reservation SET settled = 2",
         "UPDATE budget_reservation SET actual = 43",
-        "UPDATE budget_reservation SET settled_at = 0",
+        // A timestamp-only settled_at disagreement is ADR-0048 convergence
+        // drift, not damage: recovery classifies it SettledReceiptUnverified
+        // (covered by aged_release_converges_around_a_poisoned_settled_row)
+        // instead of holding readiness down forever.
         "UPDATE budget_settlement_outbox SET scope = 'other'",
         "UPDATE budget_settlement_outbox SET charged_tokens = 43",
         "UPDATE budget_settlement_outbox SET receipt_id = 'invalid'",
@@ -2325,6 +2328,29 @@ fn aged_release_converges_around_a_poisoned_settled_row() {
             rusqlite::params![poison.execution_id, poison.reservation.id as i64],
         )
         .unwrap();
+    // A second, unsettled poison: a stray receipt on an unsettled hold drives
+    // `stamp_if_liable` into its error arm, exercising the per-candidate savepoint
+    // isolation directly (partial writes roll back, later candidates still release).
+    let IntentAdmission::Admitted(unsettled_poison) = ledger
+        .reserve_with_intent_durable(
+            "stray",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    ledger
+        .conn
+        .execute(
+            "INSERT INTO budget_settlement_outbox(receipt_id, reservation_id, scope, charged_tokens, settled_at) \
+             VALUES (?1, ?2, 'stray', 0, 0)",
+            rusqlite::params![unsettled_poison.execution_id, unsettled_poison.reservation.id as i64],
+        )
+        .unwrap();
     let IntentAdmission::Admitted(_intent) = ledger
         .reserve_with_intent_durable(
             "other",
@@ -2344,9 +2370,20 @@ fn aged_release_converges_around_a_poisoned_settled_row() {
             .release_aged_unresolved_liabilities_durable(now, cutoff)
             .unwrap(),
         1,
-        "the poisoned row must not block the genuine release"
+        "neither poisoned row may block the genuine release"
     );
     assert_eq!(ledger.reserved_durable("other").unwrap(), 0);
+    // The unsettled poison is retained: still held, no stamp, receipt untouched.
+    assert_eq!(ledger.reserved_durable("stray").unwrap(), 100);
+    let stray_stamp: Option<i64> = ledger
+        .conn
+        .query_row(
+            "SELECT liability_released_at FROM budget_execution_intent WHERE execution_id = ?1",
+            [&unsettled_poison.execution_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(stray_stamp.is_none());
     // The poisoned row is untouched: still settled with its own numbers, no stamp.
     let (actual, settled, stamp): (i64, i64, Option<i64>) = ledger
         .conn
@@ -2361,6 +2398,26 @@ fn aged_release_converges_around_a_poisoned_settled_row() {
         .unwrap();
     assert_eq!((actual, settled), (40, 1));
     assert!(stamp.is_none());
+    // Settlement stays refused on a drifted row: the drift tolerance is a
+    // recovery-classification rule, never a license to fabricate a receipt.
+    assert!(
+        ledger
+            .settle_terminal_durable("team", &poison.execution_id)
+            .is_err()
+    );
+    // Readiness convergence (F1): recovery classifies BOTH poison scopes terminal —
+    // the settled mismatched-receipt row as `SettledReceiptUnverified` — without
+    // erroring, so one migrated row cannot hold /readyz down.
+    let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+    assert!(matches!(
+        page.entries.last().map(|e| &e.state),
+        Some(RecoveryState::SettledReceiptUnverified),
+    ));
+    // The unsettled stray row stays fail-closed in recovery: it is a genuine
+    // unresolved liability (receipt/reservation contradiction), so its scope
+    // still refuses classification and needs operator attention — unlike the
+    // settled mismatch, which no longer gates readiness.
+    assert!(ledger.recovery_page_durable("stray", None, 10).is_err());
 }
 
 fn paired_context() -> context::ExecutionContext {

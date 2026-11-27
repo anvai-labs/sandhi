@@ -48,7 +48,12 @@
    settled row whose stored receipt disagrees with it, e.g. across a store migration).
    Each remaining candidate classifies and stamps in its own transaction/savepoint: one
    poisoned row is skipped and retained in place (warn-logged) and can never block the
-   release of another aged liability or the readiness convergence of the sweep as a whole.
+   release of another aged liability. The recovery inventory applies the same rule from the
+   readiness side: a settled reservation classifies terminal before the receipt machinery —
+   as `Settled` when its receipt re-verifies, as the operator-visible
+   `SettledReceiptUnverified` when it does not — so a single migrated row can never hold
+   `/readyz` down. A receipt/reservation contradiction on an *unsettled* hold remains
+   fail-closed: it is a genuine unresolved liability needing operator attention.
 
 ## Consequences
 
