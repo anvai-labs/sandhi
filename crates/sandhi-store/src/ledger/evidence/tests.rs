@@ -2290,6 +2290,79 @@ fn aged_unresolved_liability_releases_hold_and_classifies_terminal() {
     );
 }
 
+#[test]
+fn aged_release_converges_around_a_poisoned_settled_row() {
+    // Production shape (DS3 migration): a settled reservation whose stored receipt
+    // disagrees with it. The receipt-consistency machinery rejects that row, but a
+    // settled reservation is not a liability — the sweep must skip it (never abort)
+    // and still release the genuinely aged unresolved intent.
+    let mut ledger = SqliteLedger::open(":memory:").unwrap();
+    let IntentAdmission::Admitted(poison) = ledger
+        .reserve_with_intent_durable(
+            "team",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    ledger
+        .conn
+        .execute(
+            "UPDATE budget_reservation SET settled = 1, actual = 40, settled_at = 1795662826 \
+             WHERE id = ?1",
+            [poison.reservation.id as i64],
+        )
+        .unwrap();
+    ledger
+        .conn
+        .execute(
+            "INSERT INTO budget_settlement_outbox(receipt_id, reservation_id, scope, charged_tokens, settled_at) \
+             VALUES (?1, ?2, 'team', 40, 1794873147)",
+            rusqlite::params![poison.execution_id, poison.reservation.id as i64],
+        )
+        .unwrap();
+    let IntentAdmission::Admitted(_intent) = ledger
+        .reserve_with_intent_durable(
+            "other",
+            100,
+            OffsetDateTime::now_utc() - time::Duration::hours(48),
+            time::Duration::seconds(1),
+            10,
+        )
+        .unwrap()
+    else {
+        panic!("denied")
+    };
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - time::Duration::hours(24);
+    assert_eq!(
+        ledger
+            .release_aged_unresolved_liabilities_durable(now, cutoff)
+            .unwrap(),
+        1,
+        "the poisoned row must not block the genuine release"
+    );
+    assert_eq!(ledger.reserved_durable("other").unwrap(), 0);
+    // The poisoned row is untouched: still settled with its own numbers, no stamp.
+    let (actual, settled, stamp): (i64, i64, Option<i64>) = ledger
+        .conn
+        .query_row(
+            "SELECT r.actual, r.settled, \
+                    (SELECT liability_released_at FROM budget_execution_intent \
+                     WHERE execution_id = ?1) \
+             FROM budget_reservation r WHERE r.id = ?2",
+            rusqlite::params![poison.execution_id, poison.reservation.id as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((actual, settled), (40, 1));
+    assert!(stamp.is_none());
+}
+
 fn paired_context() -> context::ExecutionContext {
     serde_json::from_value(serde_json::json!({"version":1,"ingress":"openai_chat_completions","delivery":"buffered","plane":"translation",
         "upstream_ref":"openai:default","upstream_budget_scope":"upstream:team","requested_model":"model","actual_model":"model","provider":"models",

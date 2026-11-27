@@ -860,7 +860,7 @@ impl SqliteLedger {
             // Immediate: classification reads the post-commit state of any
             // concurrently settling transaction instead of racing a stale
             // WAL snapshot into a SQLITE_BUSY_SNAPSHOT error.
-            let tx = self
+            let mut tx = self
                 .conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             // Converge residuals from releases that shipped before the paired
@@ -895,6 +895,7 @@ impl SqliteLedger {
                      FROM budget_execution_intent i
                      JOIN budget_reservation r ON r.id = i.reservation_id
                      WHERE i.liability_released_at IS NULL AND i.created_at <= ?1
+                       AND r.settled = 0
                        AND i.reservation_id > ?2
                      ORDER BY i.reservation_id LIMIT 200",
                 )?;
@@ -914,69 +915,33 @@ impl SqliteLedger {
             let candidate_count = candidates.len();
             for (execution_id, reservation_id, scope) in candidates {
                 after_id = after_id.max(reservation_id);
-                validate_execution_id(&execution_id)
-                    .map_err(|_| EvidenceError::CorruptObservation)?;
-                validate_scope(&scope)?;
-                let reservation_id = reservation_id as u64;
-                // Same classification as `recovery_page_durable`, evaluated inside
-                // this transaction: the stamp and the release commit together or
-                // not at all, and anything terminal or settleable is skipped.
-                let fence = dispatch::checked_fence(&tx, &scope, &execution_id, reservation_id)?;
-                // Closed-before-dispatch is already terminal; a Prepared intent is
-                // stampable — at retention age nothing is mid-flight anymore.
-                if matches!(&fence, Some(dispatch::Fence::Closed(_))) {
-                    continue;
+                // One savepoint per candidate: the stamp and the release commit
+                // together or not at all, and a poisoned row rolls back alone — one
+                // inconsistent record can never block the release of another aged
+                // liability (the sweep converges around it, retaining it in place).
+                let mut sp = tx.savepoint()?;
+                match Self::stamp_if_liable(
+                    &sp,
+                    released_at,
+                    &execution_id,
+                    reservation_id as u64,
+                    &scope,
+                ) {
+                    Ok(stamped) => {
+                        // Savepoint drop rolls back by default; commit the
+                        // stamp+release explicitly, rollback the poisoned row.
+                        sp.commit()?;
+                        released += stamped as usize;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            execution_id = %execution_id,
+                            "aged liability release skipped; row retained in place"
+                        );
+                        let _ = sp.rollback();
+                    }
                 }
-                let observed = read_observation(&tx, &execution_id, reservation_id, &scope)?;
-                let unresolved_reason = observed
-                    .as_ref()
-                    .map(|o| terminal_unresolved_reason(&tx, o))
-                    .transpose()?
-                    .flatten();
-                let charge = if unresolved_reason.is_some() {
-                    None
-                } else {
-                    observed
-                        .as_ref()
-                        .map(|o| terminal_charge(&tx, o))
-                        .transpose()?
-                };
-                let receipt = checked_terminal_receipt(&tx, &scope, reservation_id, charge)?;
-                let stampable = match (receipt, observed, charge) {
-                    // Final usage exists: recovery settles it, never the release.
-                    (_, Some(_), Some(_)) | (Some(_), _, _) => false,
-                    // Dispatched or observed without final usage: the incident class.
-                    (None, _, _) => true,
-                };
-                if !stampable {
-                    continue;
-                }
-                tx.execute(
-                    "UPDATE budget_execution_intent SET liability_released_at = ?1
-                     WHERE execution_id = ?2 AND liability_released_at IS NULL",
-                    params![released_at, execution_id],
-                )?;
-                let changed = tx.execute(
-                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
-                     WHERE id = ?2 AND settled = 0",
-                    params![released_at, reservation_id as i64],
-                )?;
-                if changed != 1 {
-                    return Err(EvidenceError::CorruptObservation);
-                }
-                // The paired back leg rides the primary's settle on the normal
-                // path (paired::settle); a policy release must close it the same
-                // way or its upstream hold stays unsettled forever. Same
-                // zero-charge release semantics; an already-settled or absent
-                // back leg is left untouched.
-                tx.execute(
-                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
-                     WHERE id = (SELECT reservation_id FROM budget_execution_back_leg
-                                 WHERE execution_id = ?2)
-                       AND settled = 0",
-                    params![released_at, execution_id],
-                )?;
-                released += 1;
             }
             let full_page = candidate_count == 200;
             tx.commit()?;
@@ -984,6 +949,78 @@ impl SqliteLedger {
                 return Ok(released);
             }
         }
+    }
+
+    /// Classify one aged candidate and, when it is the unresolved-liability incident
+    /// class, stamp the release and settle it uncharged in place. Returns whether the
+    /// row was released; every other state (terminal, settleable, already stamped)
+    /// leaves the row untouched for recovery or a later sweep. Same classification as
+    /// `recovery_page_durable`, evaluated inside the caller's transaction/savepoint.
+    fn stamp_if_liable(
+        conn: &rusqlite::Connection,
+        released_at: i64,
+        execution_id: &str,
+        reservation_id: u64,
+        scope: &str,
+    ) -> Result<bool, EvidenceError> {
+        validate_execution_id(execution_id).map_err(|_| EvidenceError::CorruptObservation)?;
+        validate_scope(scope)?;
+        let fence = dispatch::checked_fence(conn, scope, execution_id, reservation_id)?;
+        // Closed-before-dispatch is already terminal; a Prepared intent is
+        // stampable — at retention age nothing is mid-flight anymore.
+        if matches!(&fence, Some(dispatch::Fence::Closed(_))) {
+            return Ok(false);
+        }
+        let observed = read_observation(conn, execution_id, reservation_id, scope)?;
+        let unresolved_reason = observed
+            .as_ref()
+            .map(|o| terminal_unresolved_reason(conn, o))
+            .transpose()?
+            .flatten();
+        let charge = if unresolved_reason.is_some() {
+            None
+        } else {
+            observed
+                .as_ref()
+                .map(|o| terminal_charge(conn, o))
+                .transpose()?
+        };
+        let receipt = checked_terminal_receipt(conn, scope, reservation_id, charge)?;
+        let stampable = match (receipt, observed, charge) {
+            // Final usage exists: recovery settles it, never the release.
+            (_, Some(_), Some(_)) | (Some(_), _, _) => false,
+            // Dispatched or observed without final usage: the incident class.
+            (None, _, _) => true,
+        };
+        if !stampable {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE budget_execution_intent SET liability_released_at = ?1
+             WHERE execution_id = ?2 AND liability_released_at IS NULL",
+            params![released_at, execution_id],
+        )?;
+        let changed = conn.execute(
+            "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
+             WHERE id = ?2 AND settled = 0",
+            params![released_at, reservation_id as i64],
+        )?;
+        if changed != 1 {
+            return Err(EvidenceError::CorruptObservation);
+        }
+        // The paired back leg rides the primary's settle on the normal
+        // path (paired::settle); a policy release must close it the same
+        // way or its upstream hold stays unsettled forever. Same
+        // zero-charge release semantics; an already-settled or absent
+        // back leg is left untouched.
+        conn.execute(
+            "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = ?1
+             WHERE id = (SELECT reservation_id FROM budget_execution_back_leg
+                         WHERE execution_id = ?2)
+               AND settled = 0",
+            params![released_at, execution_id],
+        )?;
+        Ok(true)
     }
 
     /// Settle a tracked execution using its immutable stored charge. Only final

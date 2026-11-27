@@ -1040,9 +1040,8 @@ impl PostgresLedger {
         let mut converged = false;
         let mut after_id = 0i64;
         loop {
-            // One page transaction (READ COMMITTED: classification reads the
-            // post-commit state of any concurrently settling transaction instead of
-            // racing a stale snapshot).
+            // Page candidates in one read transaction (READ COMMITTED: the page
+            // reflects post-commit state of any concurrently settling transaction).
             let mut tx = self.pool.begin().await?;
             // Convergence runs ONCE per sweep call, BEFORE the candidate early-return
             // (SQLite ordering): stamped intents' stranded back legs heal even when the
@@ -1054,11 +1053,15 @@ impl PostgresLedger {
                     .await?;
                 converged = true;
             }
+            // Settled reservations carry no liability — they are excluded here rather
+            // than classified, because the receipt-consistency machinery can reject a
+            // settled row and must never gate the release of other aged liabilities.
             let candidates: Vec<(String, i64, String)> = sqlx::query_as(
                 "SELECT i.execution_id, i.reservation_id, r.scope \
                  FROM budget_execution_intent i \
                  JOIN budget_reservation r ON r.id = i.reservation_id \
                  WHERE i.liability_released_at IS NULL AND i.created_at <= $1 \
+                   AND r.settled = 0 \
                    AND i.reservation_id > $2 \
                  ORDER BY i.reservation_id LIMIT 200",
             )
@@ -1066,103 +1069,127 @@ impl PostgresLedger {
             .bind(after_id)
             .fetch_all(&mut *tx)
             .await?;
+            tx.commit().await?;
             if candidates.is_empty() {
-                tx.commit().await?;
                 return Ok(released);
-            }
-            // Serialize the page's stamp+release against per-scope settlement
-            // transactions: every candidate scope's advisory lock, keys ascending.
-            let mut scopes: Vec<&str> = candidates
-                .iter()
-                .map(|(_, _, scope)| scope.as_str())
-                .collect();
-            scopes.sort_unstable();
-            scopes.dedup();
-            for scope in scopes {
-                scope_lock(&mut tx, scope).await?;
             }
             let candidate_count = candidates.len();
             for (execution_id, reservation_id, scope) in candidates {
                 after_id = after_id.max(reservation_id);
-                let reservation_id = reservation_id as u64;
-                validate_execution_id(&execution_id)
-                    .map_err(|_| EvidenceError::CorruptObservation)?;
-                validate_scope(&scope)?;
-                // Same classification as `recovery_page_durable`, evaluated inside
-                // this transaction: the stamp and the release commit together or not
-                // at all, and anything terminal or settleable is skipped.
-                let fence =
-                    dispatch::checked_fence(&mut tx, &scope, &execution_id, reservation_id).await?;
-                // Closed-before-dispatch is already terminal; a Prepared intent is
-                // stampable — at retention age nothing is mid-flight anymore.
-                if matches!(&fence, Some(dispatch::Fence::Closed(_))) {
-                    continue;
-                }
-                let observed =
-                    read_observation(&mut tx, &execution_id, reservation_id, &scope).await?;
-                let unresolved_reason = match observed.as_ref() {
-                    Some(o) => terminal_unresolved_reason(&mut tx, o).await?,
-                    None => None,
-                };
-                let charge = if unresolved_reason.is_some() {
-                    None
-                } else {
-                    match observed.as_ref().map(|o| terminal_charge(&mut tx, o)) {
-                        Some(future) => Some(future.await?),
-                        None => None,
+                // One transaction per candidate: the stamp and the release commit
+                // together or not at all, and a poisoned row rolls back alone — one
+                // inconsistent record can never block the release of another aged
+                // liability (the sweep converges around it, retaining it in place).
+                let mut ctx = self.pool.begin().await?;
+                // Serialize against per-scope settlement transactions.
+                scope_lock(&mut ctx, &scope).await?;
+                let stamped = Self::stamp_if_liable(
+                    &mut ctx,
+                    released_at,
+                    &execution_id,
+                    reservation_id as u64,
+                    &scope,
+                )
+                .await;
+                match stamped {
+                    Ok(true) => {
+                        ctx.commit().await?;
+                        released += 1;
                     }
-                };
-                let receipt =
-                    checked_terminal_receipt(&mut tx, &scope, reservation_id, charge).await?;
-                let stampable = match (receipt, observed, charge) {
-                    // Final usage exists: recovery settles it, never the release.
-                    (_, Some(_), Some(_)) | (Some(_), _, _) => false,
-                    // Dispatched or observed without final usage: the incident class.
-                    (None, _, _) => true,
-                };
-                if !stampable {
-                    continue;
+                    Ok(false) => ctx.commit().await?,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            execution_id = %execution_id,
+                            "aged liability release skipped; row retained in place"
+                        );
+                        ctx.rollback().await.ok();
+                    }
                 }
-                sqlx::query(
-                    "UPDATE budget_execution_intent SET liability_released_at = $1 \
-                     WHERE execution_id = $2 AND liability_released_at IS NULL",
-                )
-                .bind(released_at)
-                .bind(&execution_id)
-                .execute(&mut *tx)
-                .await?;
-                let changed = sqlx::query(
-                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = $1 \
-                     WHERE id = $2 AND settled = 0",
-                )
-                .bind(released_at)
-                .bind(reservation_id as i64)
-                .execute(&mut *tx)
-                .await?;
-                if changed.rows_affected() != 1 {
-                    return Err(EvidenceError::CorruptObservation);
-                }
-                // The paired back leg rides the primary's settle on the normal path
-                // (paired::settle); a policy release must close it the same way or its
-                // upstream hold stays unsettled forever. An already-settled or absent
-                // back leg is left untouched.
-                sqlx::query(
-                    "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = $1 \
-                     WHERE id = (SELECT reservation_id FROM budget_execution_back_leg \
-                                 WHERE execution_id = $2) \
-                       AND settled = 0",
-                )
-                .bind(released_at)
-                .bind(&execution_id)
-                .execute(&mut *tx)
-                .await?;
-                released += 1;
             }
-            tx.commit().await?;
             if candidate_count != 200 {
                 return Ok(released);
             }
         }
+    }
+
+    /// Classify one aged candidate and, when it is the unresolved-liability incident
+    /// class, stamp the release and settle it uncharged in place. Returns whether the
+    /// row was released; every other state (terminal, settleable, already stamped)
+    /// leaves the row untouched for recovery or a later sweep. Same classification as
+    /// `recovery_page_durable`, evaluated inside the caller's scope-locked transaction.
+    async fn stamp_if_liable(
+        conn: &mut PgConnection,
+        released_at: i64,
+        execution_id: &str,
+        reservation_id: u64,
+        scope: &str,
+    ) -> Result<bool, EvidenceError> {
+        validate_execution_id(execution_id).map_err(|_| EvidenceError::CorruptObservation)?;
+        validate_scope(scope)?;
+        let fence = dispatch::checked_fence(conn, scope, execution_id, reservation_id).await?;
+        // Closed-before-dispatch is already terminal; a Prepared intent is
+        // stampable — at retention age nothing is mid-flight anymore.
+        if matches!(&fence, Some(dispatch::Fence::Closed(_))) {
+            return Ok(false);
+        }
+        let observed = read_observation(conn, execution_id, reservation_id, scope).await?;
+        let unresolved_reason = match observed.as_ref() {
+            Some(o) => terminal_unresolved_reason(conn, o).await?,
+            None => None,
+        };
+        let charge = if unresolved_reason.is_some() {
+            None
+        } else {
+            match observed.as_ref().map(|o| terminal_charge(conn, o)) {
+                Some(future) => Some(future.await?),
+                None => None,
+            }
+        };
+        let receipt = checked_terminal_receipt(conn, scope, reservation_id, charge).await?;
+        let stampable = match (receipt, observed, charge) {
+            // Final usage exists: recovery settles it, never the release.
+            (_, Some(_), Some(_)) | (Some(_), _, _) => false,
+            // Dispatched or observed without final usage: the incident class.
+            (None, _, _) => true,
+        };
+        if !stampable {
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE budget_execution_intent SET liability_released_at = $1 \
+             WHERE execution_id = $2 AND liability_released_at IS NULL",
+        )
+        .bind(released_at)
+        .bind(execution_id)
+        .execute(&mut *conn)
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = $1 \
+             WHERE id = $2 AND settled = 0",
+        )
+        .bind(released_at)
+        .bind(reservation_id as i64)
+        .execute(&mut *conn)
+        .await?;
+        if changed.rows_affected() != 1 {
+            return Err(EvidenceError::CorruptObservation);
+        }
+        // The paired back leg rides the primary's settle on the normal path
+        // (paired::settle); a policy release must close it the same way or its
+        // upstream hold stays unsettled forever. An already-settled or absent
+        // back leg is left untouched.
+        sqlx::query(
+            "UPDATE budget_reservation SET actual = 0, settled = 1, settled_at = $1 \
+             WHERE id = (SELECT reservation_id FROM budget_execution_back_leg \
+                         WHERE execution_id = $2) \
+               AND settled = 0",
+        )
+        .bind(released_at)
+        .bind(execution_id)
+        .execute(&mut *conn)
+        .await?;
+        Ok(true)
     }
 
     /// Settle a tracked execution using its immutable stored charge. Only final
@@ -3596,6 +3623,86 @@ mod tests {
                 .release_aged_unresolved_liabilities_durable(now, cutoff)
                 .unwrap(),
             0
+        );
+        drop_schema(&schema);
+    }
+
+    #[test]
+    #[ignore = "requires SANDHI_TEST_PG_DSN"]
+    fn aged_release_converges_around_a_poisoned_settled_row() {
+        // Production shape (DS3 migration): a settled reservation whose stored
+        // receipt disagrees with it. The receipt-consistency machinery rejects that
+        // row, but a settled reservation is not a liability — the sweep must skip
+        // it (never abort) and still release the genuinely aged unresolved intent.
+        let schema = pg_test::schema("pg-ev-aged-poison");
+        let ledger = pg_ledger("pg-ev-aged-poison");
+        let IntentAdmission::Admitted(poison) = ledger
+            .reserve_with_intent_durable(
+                "team",
+                100,
+                now() - Duration::hours(48),
+                Duration::seconds(1),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        ledger.exec(&format!(
+            "UPDATE budget_reservation SET settled = 1, actual = 40, settled_at = 1795662826 \
+             WHERE id = {}",
+            poison.reservation.id
+        ));
+        ledger.exec(&format!(
+            "INSERT INTO budget_settlement_outbox(receipt_id, reservation_id, scope, charged_tokens, settled_at) \
+             VALUES ('{}', {}, 'team', 40, 1794873147)",
+            poison.execution_id, poison.reservation.id
+        ));
+        let IntentAdmission::Admitted(intent) = ledger
+            .reserve_with_intent_durable(
+                "other",
+                100,
+                now() - Duration::hours(48),
+                Duration::seconds(1),
+                10,
+            )
+            .unwrap()
+        else {
+            panic!("denied")
+        };
+        let now = now();
+        let cutoff = now - Duration::hours(24);
+        assert_eq!(
+            ledger
+                .release_aged_unresolved_liabilities_durable(now, cutoff)
+                .unwrap(),
+            1,
+            "the poisoned row must not block the genuine release"
+        );
+        assert_eq!(ledger.reserved_durable("other").unwrap(), 0);
+        // The poisoned row is untouched: still settled with its own numbers, no stamp.
+        let untouched: (i64, i64, i64) = ledger.block(async {
+            sqlx::query_as(
+                "SELECT r.actual, r.settled, \
+                        (SELECT COUNT(*) FROM budget_execution_intent \
+                         WHERE execution_id = $1 AND liability_released_at IS NOT NULL) \
+                 FROM budget_reservation r WHERE r.id = $2",
+            )
+            .bind(&poison.execution_id)
+            .bind(poison.reservation.id as i64)
+            .fetch_one(&mut *ledger.pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+        });
+        assert_eq!((untouched.0, untouched.1), (40, 1));
+        assert_eq!(untouched.2, 0);
+        assert_eq!(
+            ledger
+                .recovery_page_durable("other", None, 10)
+                .unwrap()
+                .entries[0]
+                .state,
+            RecoveryState::ReleasedAfterRetention
         );
         drop_schema(&schema);
     }

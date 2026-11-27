@@ -42,6 +42,13 @@
    recovery cursor: `recover_inner` stops counting released rows as unresolved, so
    `/readyz` returns to 200 once every intent is terminal — settled, closed, or released —
    and a full sweep completes. Fresh unresolved intents still block readiness exactly as before.
+6. **Convergence isolation (post-incident hardening).** The sweep classifies only
+   unsettled reservations — a settled row is not a liability, so it is excluded from the
+   candidates rather than run through the receipt-consistency machinery (which can reject a
+   settled row whose stored receipt disagrees with it, e.g. across a store migration).
+   Each remaining candidate classifies and stamps in its own transaction/savepoint: one
+   poisoned row is skipped and retained in place (warn-logged) and can never block the
+   release of another aged liability or the readiness convergence of the sweep as a whole.
 
 ## Consequences
 
