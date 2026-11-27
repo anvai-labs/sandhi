@@ -52,7 +52,8 @@
    readiness side: a settled reservation is classified terminal before the observation-based
    charge cross-check — as `Settled` when its stored receipt is fully consistent with the
    reservation (including the settlement timestamp) and no observation charge contradicts it
-   (the missing-observation case), as the operator-visible `SettledReceiptUnverified` when
+   (the unavailable observation charge), as the operator-visible `SettledReceiptUnverified`
+   when
    the receipt is structurally sound but the timestamp drifts — so a single migrated row can
    never hold `/readyz` down. An observation charge that PRESENTLY contradicts the stored
    receipt stays fail-closed, as does every other settled-row disagreement (scope, charged

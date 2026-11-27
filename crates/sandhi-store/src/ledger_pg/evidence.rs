@@ -1055,7 +1055,7 @@ impl PostgresLedger {
                             // evidence on its own — but only when nothing contradicts
                             // it: an observation-derived charge that MISMATCHES the
                             // stored receipt is present tampered evidence and stays
-                            // fail-closed; convergence is for the missing-observation
+                            // fail-closed; convergence is for the unavailable-observation-charge
                             // case (charge unavailable), never against contradicted
                             // evidence.
                             SettledReceiptStanding::Verified(receipt) if charge.is_none() => {
@@ -3723,6 +3723,30 @@ mod tests {
                 .unwrap(),
             0
         );
+        drop_schema(&schema);
+    }
+
+    #[test]
+    #[ignore = "requires SANDHI_TEST_PG_DSN"]
+    fn recovery_classifies_a_settled_row_without_observation_terminal() {
+        // PG mirror of the SQLite coverage: a settled pair whose receipt fully
+        // agrees classifies terminal even with the observation charge
+        // unavailable; settlement stays refused without the observation.
+        let schema = pg_test::schema("pg-ev-aged-noobs");
+        let ledger = pg_ledger("pg-ev-aged-noobs");
+        let intent = tracked(&ledger);
+        ledger
+            .record_terminal_durable("team", &intent.execution_id, &observed_usage(), 10_000)
+            .unwrap();
+        ledger
+            .settle_terminal_durable("team", &intent.execution_id)
+            .unwrap();
+        ledger.exec("DELETE FROM budget_terminal_observation");
+        let page = ledger.recovery_page_durable("team", None, 10).unwrap();
+        assert!(matches!(page.entries[0].state, RecoveryState::Settled(_)));
+        assert!(ledger
+            .settle_terminal_durable("team", &intent.execution_id)
+            .is_err());
         drop_schema(&schema);
     }
 
