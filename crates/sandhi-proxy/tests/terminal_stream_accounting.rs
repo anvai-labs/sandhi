@@ -61,25 +61,25 @@ async fn origin_ending(
 ) {
     let (tx, rx) = mpsc::channel::<Bytes>(1);
     let receiver = Arc::new(Mutex::new(Some(rx)));
-    let origin = Router::new().route(
-        "/v1/chat/completions",
-        post(move || {
-            let receiver = receiver.clone();
-            async move {
-                let mut rx = receiver.lock().await.take().expect("one origin call");
-                let bytes = async_stream::stream! {
-                    while let Some(bytes) = rx.recv().await {
-                        yield Ok::<Bytes, std::io::Error>(bytes);
-                    }
-                    if fail { yield Err(std::io::Error::other("injected origin body failure")); }
-                };
-                (
-                    [("content-type", "text/event-stream")],
-                    Body::from_stream(bytes),
-                )
-            }
-        }),
-    );
+    let stream = post(move || {
+        let receiver = receiver.clone();
+        async move {
+            let mut rx = receiver.lock().await.take().expect("one origin call");
+            let bytes = async_stream::stream! {
+                while let Some(bytes) = rx.recv().await {
+                    yield Ok::<Bytes, std::io::Error>(bytes);
+                }
+                if fail { yield Err(std::io::Error::other("injected origin body failure")); }
+            };
+            (
+                [("content-type", "text/event-stream")],
+                Body::from_stream(bytes),
+            )
+        }
+    });
+    let origin = Router::new()
+        .route("/v1/chat/completions", stream.clone())
+        .route("/v1/messages", stream);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -360,34 +360,75 @@ async fn streaming_fixture(
     duration: Duration,
     idle: Duration,
 ) -> StreamingFixture {
+    streaming_fixture_for(false, translated, fail, duration, idle).await
+}
+
+async fn streaming_fixture_for(
+    anthropic: bool,
+    translated: bool,
+    fail: bool,
+    duration: Duration,
+    idle: Duration,
+) -> StreamingFixture {
     let (tx, address, server) = origin_ending(fail).await;
     let capture = Arc::new(InMemorySink::new());
+    let runtime = ProviderRuntime::new();
+    let (upstream, path, provider, kickoff) = if anthropic {
+        (
+            "anthropic:origin",
+            "/v1/messages",
+            runtime.anthropic(
+                format!("http://{address}"),
+                "fixture-not-a-credential",
+                sandhi_providers::AnthropicAuthScheme::ApiKey,
+                Default::default(),
+                Some(0),
+                None,
+                None,
+                None,
+            ),
+            concat!(
+                "event: message_start\n",
+                r#"data: {"type":"message_start","message":{"id":"msg_fixture","type":"message","role":"assistant","model":"fixture","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":16,"output_tokens":7}}}"#,
+                "\n\n"
+            ),
+        )
+    } else {
+        (
+            "openai:origin",
+            "/v1/chat/completions",
+            runtime.openai_compat(
+                "openai",
+                format!("http://{address}/v1"),
+                "fixture-not-a-credential",
+                Default::default(),
+                Some(0),
+                None,
+                None,
+                None,
+            ),
+            concat!(
+                r#"data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}"#,
+                "\n\n"
+            ),
+        )
+    };
     let keys = KeyStore::new();
     keys.insert(VirtualKey {
         id: "vk_body".into(),
-        upstream_ref: "openai:origin".into(),
+        upstream_ref: upstream.into(),
         ..Default::default()
     });
-    let provider = ProviderRuntime::new().openai_compat(
-        "openai",
-        format!("http://{address}/v1"),
-        "fixture-not-a-credential",
-        Default::default(),
-        Some(0),
-        None,
-        None,
-        None,
-    );
     let state = support::state(
         keys,
         support::Ledger::new(),
         capture.clone(),
-        HashMap::from([("openai:origin".into(), provider)]),
+        HashMap::from([(upstream.into(), provider)]),
         None,
     );
     // Exercise the same canonical configured deadline owner on both planes.
     state.set_streaming_deadlines(sandhi_proxy::deadlines::streaming_from_json(&serde_json::json!({
-        "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"estimate":{"max_body_ms":1},"endpoints":{"openai:origin":{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
+        "streaming_deadlines":{"ceiling_ms":120000,"default":{"setup_ms":1000,"idle_ms":90000,"body_ms":60000},"estimate":{"max_body_ms":1},"endpoints":{(upstream):{"models":{"fixture":{"setup_ms":1000,"idle_ms":idle.as_millis(),"body_ms":duration.as_millis()}}}}}
     }).to_string()).unwrap());
     if translated {
         state
@@ -405,14 +446,16 @@ async fn streaming_fixture(
     let state = Arc::new(state);
     let request = Request::builder()
         .method("POST")
-        .uri("/v1/chat/completions")
+        .uri(path)
         .header("authorization", "Bearer vk_body")
         .header("content-type", "application/json")
         .body(Body::from(
             r#"{"model":"fixture","messages":[{"role":"user","content":"hello"}],"max_tokens":64,"stream":true}"#,
         ))
         .unwrap();
-    tx.send(Bytes::from_static(b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")).await.unwrap();
+    tx.send(Bytes::from_static(kickoff.as_bytes()))
+        .await
+        .unwrap();
     let response = build_app(state.clone()).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     StreamingFixture {
@@ -450,12 +493,24 @@ async fn retained_unpolled_body_closes_origin_and_settles_on_both_planes() {
             tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
                 .await
                 .unwrap();
-            let mut body = response.into_body().into_data_stream();
-            assert!(
-                body.next().await.unwrap().is_err(),
-                "expiry discards queued bytes"
-            );
-            assert!(body.next().await.is_none());
+            let body = tokio::time::timeout(
+                Duration::from_secs(2),
+                axum::body::to_bytes(response.into_body(), 32 * 1024),
+            )
+            .await
+            .expect("expired body must terminate");
+            if duration < idle {
+                let frame = body.expect("owner body deadline sends a structured frame");
+                let text = String::from_utf8_lossy(&frame);
+                assert!(text.contains("\"code\":\"timeout\""));
+                assert!(text.ends_with("data: [DONE]\n\n"));
+                assert!(
+                    !text.contains("hello"),
+                    "expiry discards queued source bytes"
+                );
+            } else {
+                assert!(body.is_err(), "origin idle failure still tears the stream");
+            }
             let events = capture.events();
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].usage_completeness, UsageCompleteness::Unavailable);
@@ -525,5 +580,179 @@ async fn origin_body_errors_do_not_become_clean_eof_or_translated_done() {
             .outcome
             .as_deref()
             .is_some_and(|outcome| outcome.contains("error")));
+    }
+}
+
+/// ADR-0050: an owner-enforced body deadline delivers the structured timeout frame
+/// in-band and ends the stream cleanly. With zero measured usage (the GLM incident
+/// shape) the frame carries no counts, the event stays `Unavailable`, nothing is
+/// charged, and the unresolved liability is retained for the ADR-0048 sweep.
+#[tokio::test]
+async fn owner_body_deadline_delivers_structured_timeout_frame_zero_usage() {
+    let StreamingFixture {
+        tx,
+        state,
+        capture,
+        response,
+        server,
+    } = streaming_fixture(
+        false,
+        false,
+        Duration::from_millis(120),
+        Duration::from_secs(90),
+    )
+    .await;
+    tx.send(Bytes::from_static(
+        b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial reasoning without a terminal usage frame\"},\"finish_reason\":null}]}\n\n",
+    ))
+    .await
+    .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let mut saw_frame = false;
+    let mut saw_done = false;
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("timeout body must terminate")
+    {
+        let chunk = chunk.expect("frame delivery must not tear the stream");
+        let text = String::from_utf8_lossy(&chunk);
+        if text.contains("\"code\":\"timeout\"") {
+            saw_frame = true;
+        }
+        if text.contains("[DONE]") {
+            saw_done = true;
+        }
+    }
+    assert!(saw_frame, "structured timeout frame must be delivered");
+    assert!(saw_done, "the plane's terminal tail must follow the frame");
+    server.abort();
+    let _ = server.await;
+    tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+        .await
+        .unwrap();
+    let events = capture.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].usage_completeness, UsageCompleteness::Unavailable);
+    assert_eq!(events[0].tokens_out, 0);
+    assert_eq!(state.ledger.lock().unwrap().spent("vk:vk_body"), 0);
+}
+
+#[tokio::test]
+async fn owner_deadline_does_not_append_a_timeout_after_origin_done() {
+    let StreamingFixture {
+        tx,
+        response,
+        server,
+        ..
+    } = streaming_fixture(
+        false,
+        false,
+        Duration::from_millis(150),
+        Duration::from_secs(90),
+    )
+    .await;
+    tx.send(Bytes::from_static(b"data: [DONE]\n\n"))
+        .await
+        .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .expect("expired body must terminate")
+    {
+        match chunk {
+            Ok(bytes) => wire.extend_from_slice(&bytes),
+            Err(_) => break,
+        }
+    }
+    drop(tx);
+    server.abort();
+    let _ = server.await;
+    let wire = String::from_utf8_lossy(&wire);
+    assert_eq!(wire.matches("data: [DONE]").count(), 1);
+    assert!(!wire.contains("\"code\":\"timeout\""));
+}
+
+/// An Anthropic message_start reports real progress before message_stop.
+#[tokio::test]
+async fn owner_body_deadline_reports_measured_partial_and_retains_both_reservations() {
+    use sandhi_proxy::ProxyLedger;
+    use sandhi_store::ledger::evidence::RecoveryState;
+
+    let StreamingFixture {
+        tx,
+        state,
+        capture,
+        response,
+        server,
+    } = streaming_fixture_for(
+        true,
+        false,
+        false,
+        Duration::from_millis(150),
+        Duration::from_secs(90),
+    )
+    .await;
+    let body = tokio::time::timeout(
+        Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 32 * 1024),
+    )
+    .await
+    .unwrap()
+    .expect("the owner deadline ends at an SSE boundary");
+    drop(tx);
+    server.abort();
+    let _ = server.await;
+    let body = String::from_utf8_lossy(&body);
+    let timeout_frame = body
+        .split("\n\n")
+        .find(|event| event.starts_with("event: error"))
+        .expect("Anthropic timeout must use its error event");
+    let frame: serde_json::Value = serde_json::from_str(
+        timeout_frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(frame["error"]["code"], "timeout");
+    assert_eq!(frame["error"]["details"]["measured_usage"]["tokens_in"], 16);
+    assert_eq!(frame["error"]["details"]["measured_usage"]["tokens_out"], 7);
+    assert_eq!(
+        frame["error"]["details"]["measured_usage"]["completeness"],
+        "partial"
+    );
+    assert!(!body.contains("[DONE]"));
+
+    tokio::time::timeout(Duration::from_secs(2), state.lifecycle.wait_idle())
+        .await
+        .unwrap();
+    let events = capture.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].usage_completeness, UsageCompleteness::Partial);
+    assert_eq!(events[0].tokens_in, 16);
+    assert_eq!(events[0].tokens_out, 7);
+
+    let guard = state.ledger.lock().unwrap();
+    let ProxyLedger::Durable(ledger) = &*guard else {
+        panic!("SQLite fixture");
+    };
+    let scope = "vk:vk_body";
+    let entries = ledger
+        .recovery_page_durable(scope, None, 4)
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        entries[0].state,
+        RecoveryState::UnresolvedObservation(_)
+    ));
+    let back = ledger
+        .execution_back_leg_durable(scope, &entries[0].execution_id)
+        .unwrap()
+        .unwrap();
+    for scope in [scope, &back.scope] {
+        assert!(guard.reserved(scope) > 0);
+        assert_eq!(guard.spent(scope), 0);
     }
 }

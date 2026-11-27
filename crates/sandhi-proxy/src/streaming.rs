@@ -29,6 +29,10 @@ impl StreamBodyLifetime {
 use crate::{AdmissionPermit, RequestAccounting};
 use axum::body::{Body, Bytes};
 use futures_util::{FutureExt, Stream, StreamExt};
+use sandhi_core::{ChatStreamEventV1, ProviderErrorV1, UsageBasis, UsageCompleteness};
+use sandhi_dialect::{IngressDialect, TranslatedStream};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::{mpsc, watch};
 
@@ -36,9 +40,12 @@ type ByteStream<'a> = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> +
 const QUEUE_FRAMES: usize = 4;
 const FRAME_BYTES: usize = 16 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Failure {
     Deadline,
+    /// Body-deadline cancellation carrying the rendered per-plane timeout frame:
+    /// the one failure mode that surfaces to the client in-band (ADR-0050).
+    DeadlineFrame(Bytes),
     Disconnected,
     Shutdown,
     Lease,
@@ -48,9 +55,9 @@ enum Failure {
 }
 
 impl Failure {
-    fn message(self) -> &'static str {
+    fn message(&self) -> &'static str {
         match self {
-            Self::Deadline => "stream body deadline exceeded",
+            Self::Deadline | Self::DeadlineFrame(_) => "stream body deadline exceeded",
             Self::Disconnected => "stream receiver disconnected",
             Self::Shutdown => "shutdown grace expired",
             Self::Lease => "insufficient reservation lifetime after stream setup",
@@ -60,27 +67,69 @@ impl Failure {
         }
     }
 
-    fn outcome(self) -> &'static str {
+    fn outcome(&self) -> &'static str {
         match self {
-            Self::Deadline => "timeout",
+            Self::Deadline | Self::DeadlineFrame(_) => "timeout",
             Self::Disconnected => "cancelled",
             _ => "error",
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Terminal {
     Running,
     Complete,
     Failed(Failure),
 }
 
+/// Rendered per-plane structured timeout frame (ADR-0050): the error event plus the
+/// plane's terminal tail, produced from the final accounting snapshot at deadline time.
+pub(crate) type TimeoutFrameRenderer = Arc<dyn Fn(&RequestAccounting) -> Bytes + Send + Sync>;
+
+pub(crate) fn deadline_renderer(dialect: IngressDialect, slug: String) -> TimeoutFrameRenderer {
+    Arc::new(move |accounting| {
+        let mut details = BTreeMap::from([("timeout_phase".into(), Value::from("body"))]);
+        let measured = accounting.usage.as_ref().filter(|usage| {
+            usage.completeness != UsageCompleteness::Unavailable
+                && usage.basis == UsageBasis::ProviderReported
+        });
+        if let Some(usage) = measured.and_then(|usage| serde_json::to_value(usage).ok()) {
+            details.insert("measured_usage".into(), usage);
+        }
+        let event = ChatStreamEventV1::Error {
+            error: ProviderErrorV1 {
+                code: "timeout".into(),
+                message: Failure::Deadline.message().into(),
+                retryable: false,
+                http_status: Some(504),
+                provider: Some(slug.clone()),
+                request_id: Some(accounting.request_id.clone()),
+                details,
+            },
+        };
+        let Ok(frames) = TranslatedStream::new(dialect, true).push(&event) else {
+            return Bytes::new();
+        };
+        let mut out = Vec::new();
+        for (name, value) in frames {
+            out.extend_from_slice(crate::sse_frame(name, &value).as_bytes());
+        }
+        if dialect == IngressDialect::OpenAi && !out.is_empty() {
+            out.extend_from_slice(b"data: [DONE]\n\n");
+        }
+        Bytes::from(out)
+    })
+}
+
 /// One owner for both wire planes; their existing generators retain usage parsing authority.
+/// `timeout_frame` (when present) renders the per-plane structured timeout error frame
+/// (ADR-0050) at body-deadline time, with access to the final accounting snapshot.
 pub(super) fn body<F>(
     mut accounting: RequestAccounting,
     permit: Arc<AdmissionPermit>,
     tail: Option<Bytes>,
+    timeout_frame: Option<crate::streaming::TimeoutFrameRenderer>,
     make: F,
 ) -> Body
 where
@@ -153,7 +202,7 @@ where
         .await
         .unwrap_or(Err(Failure::Panic));
         drop(open);
-        if let Err(reason) = result {
+        if let Err(reason) = &result {
             // Measured Final usage remains authoritative even when delivery fails. Only the
             // transport outcome changes; never replace measured counts with an invented zero.
             let outcome = reason.outcome();
@@ -162,16 +211,29 @@ where
                 usage.outcome = Some(outcome.into());
             }
         }
-        // A failure is visible promptly; the accounting owner still outlives the wire.
-        if let Err(reason) = result {
-            terminal_tx.send_replace(Terminal::Failed(reason));
-        }
-        // Read the snapshot only after the borrowed source has dropped. Retain the
-        // permit and lifecycle guard through submission and the bounded settlement wait.
-        let committed = std::panic::AssertUnwindSafe(accounting.finalize_owned())
-            .catch_unwind()
-            .await
-            .unwrap_or(false);
+        // Snapshot usage after the source drops. Publish the timeout from that
+        // snapshot before waiting for the durable settlement.
+        let owner_deadline = matches!(result, Err(Failure::Deadline));
+        let can_frame_timeout = owner_deadline && !qualified::source_terminal_seen(&accounting);
+        let committed = std::panic::AssertUnwindSafe(accounting.finalize_owned_after_source(
+            owner_deadline,
+            |accounting| {
+                if can_frame_timeout {
+                    if let Some(frame) = timeout_frame
+                        .map(|render| render(accounting))
+                        .filter(|frame| !frame.is_empty())
+                    {
+                        result = Err(Failure::DeadlineFrame(frame));
+                    }
+                }
+                if let Err(reason) = &result {
+                    terminal_tx.send_replace(Terminal::Failed(reason.clone()));
+                }
+            },
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or(false);
         if !committed && result.is_ok() {
             result = Err(Failure::Accounting);
         }
@@ -196,14 +258,52 @@ async fn send_bytes(tx: &mpsc::Sender<Bytes>, bytes: Bytes) -> Result<(), Failur
     Ok(())
 }
 
+// HTTP chunks may split any SSE line. Track only the trailing line endings
+// of bytes actually delivered, including a CRLF split across chunks.
+struct SseBoundary {
+    line_endings: u8,
+    last_cr: bool,
+}
+
+impl SseBoundary {
+    fn observe(&mut self, bytes: &[u8]) {
+        let suffix =
+            if let Some(last_content) = bytes.iter().rposition(|&b| b != b'\r' && b != b'\n') {
+                self.line_endings = 0;
+                self.last_cr = false;
+                &bytes[last_content + 1..]
+            } else {
+                bytes
+            };
+        for &byte in suffix {
+            if byte == b'\r' || !self.last_cr {
+                self.line_endings = (self.line_endings + 1).min(2);
+            }
+            self.last_cr = byte == b'\r';
+        }
+    }
+}
+
 fn receiver_body(mut rx: mpsc::Receiver<Bytes>, mut terminal: watch::Receiver<Terminal>) -> Body {
     Body::from_stream(async_stream::stream! {
+        let mut boundary = SseBoundary { line_endings: 2, last_cr: false };
         loop {
-            let status = *terminal.borrow_and_update();
-            if let Terminal::Failed(reason) = status {
-                rx.close();
-                yield Err::<Bytes, std::io::Error>(std::io::Error::other(reason.message()));
-                break;
+            let status = terminal.borrow_and_update().clone();
+            match status {
+                // ADR-0050: the owner-origin body timeout delivers its structured frame
+                // in-band, then ends the stream cleanly — the frame is a wire-transport
+                // terminator, never a settlement receipt (outcome stays "timeout").
+                Terminal::Failed(Failure::DeadlineFrame(frame)) if boundary.line_endings >= 2 => {
+                    rx.close();
+                    yield Ok(frame);
+                    break;
+                }
+                Terminal::Failed(reason) => {
+                    rx.close();
+                    yield Err::<Bytes, std::io::Error>(std::io::Error::other(reason.message()));
+                    break;
+                }
+                _ => {}
             }
             tokio::select! {
                 biased;
@@ -217,7 +317,10 @@ fn receiver_body(mut rx: mpsc::Receiver<Bytes>, mut terminal: watch::Receiver<Te
                     // Terminal failure wins over already queued bytes (including DONE).
                     if matches!(*terminal.borrow(), Terminal::Failed(_)) { continue; }
                     match bytes {
-                        Some(bytes) => yield Ok(bytes),
+                        Some(bytes) => {
+                            boundary.observe(&bytes);
+                            yield Ok(bytes);
+                        }
                         None if matches!(status, Terminal::Complete) => break,
                         None => {
                             if terminal.changed().await.is_err() {
@@ -238,6 +341,36 @@ mod tests {
     use crate::{ProxyLedger, ProxyState};
     use sandhi_core::{ChatRequestV1, InMemorySink, KeyStore};
     use tokio::sync::Semaphore;
+    #[tokio::test]
+    async fn owner_timeout_frame_requires_a_complete_sse_boundary() {
+        for chunks in [
+            vec![Bytes::from_static(b"data: {\"partial\":")],
+            vec![
+                Bytes::from_static(b"data: {}\r\n\r"),
+                Bytes::from_static(b"\n"),
+            ],
+        ] {
+            let complete = chunks.len() == 2;
+            let (tx, rx) = mpsc::channel(QUEUE_FRAMES);
+            let (status, terminal) = watch::channel(Terminal::Running);
+            let mut body = receiver_body(rx, terminal).into_data_stream();
+            for chunk in chunks {
+                tx.send(chunk.clone()).await.unwrap();
+                assert_eq!(body.next().await.unwrap().unwrap(), chunk);
+            }
+            let frame = Bytes::from_static(b"data: {\"error\":{}}\n\n");
+            status.send_replace(Terminal::Failed(Failure::DeadlineFrame(frame.clone())));
+            match body.next().await.unwrap() {
+                Ok(delivered) => {
+                    assert!(complete);
+                    assert_eq!(delivered, frame);
+                }
+                Err(_) => assert!(!complete),
+            }
+            assert!(body.next().await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn unowned_stream_cannot_poll_source_or_emit_success_with_or_without_a_lifetime() {
         for lifetime in [
@@ -273,6 +406,7 @@ mod tests {
                 accounting,
                 permit,
                 Some(Bytes::from_static(b"DONE")),
+                None,
                 |_| panic!("unowned stream must never invoke its source"),
             );
             assert!(axum::body::to_bytes(response, 1000).await.is_err());

@@ -127,7 +127,13 @@ Route policy takes precedence over the Rust body-only setting. Its queue, failur
 usage conservation and shutdown semantics are unchanged.
 
 These are transport deadlines, **not bounded HTTP error delivery or durable
-settlement guarantees**. Setup-error paths still use synchronous legacy settlement;
+settlement guarantees**. [ADR-0050](../adr/0050-structured-owner-origin-timeout-frame.md) adds an in-band,
+dialect-specific error for an owner-enforced **body** deadline when a complete SSE
+event boundary is available and the origin has not supplied a terminal event.
+Codex subscription streams retain their connection-error behavior at the body limit.
+Measured non-final usage stays partial in both the error evidence and accounting,
+with both holds unresolved under the existing recovery and retention policy.
+Setup-error paths still use synchronous legacy settlement;
 ledger contention can delay the HTTP error. The body owner retains its admission
 and lifecycle guards while settlement runs. DONE is not a settlement receipt.
 Neither local timeout nor a closed connection proves origin GPU cancellation.

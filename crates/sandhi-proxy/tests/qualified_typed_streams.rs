@@ -617,17 +617,29 @@ async fn translated_stream_cancellation_keeps_source_final_counts_without_anothe
                     .unwrap();
                 // Complete native events may already be queued before the
                 // terminal transport error; their chunk boundaries are not API semantics.
-                let saw_error = tokio::time::timeout(Duration::from_secs(3), async {
+                // A deadline can send an in-band timeout before source termination.
+                // This fixture can already have supplied its origin terminal; in
+                // that case the transport must not append another terminal event.
+                let deadline = case == "deadline";
+                let saw_terminal = tokio::time::timeout(Duration::from_secs(3), async {
                     while let Some(chunk) = body.next().await {
-                        if chunk.is_err() {
-                            return true;
+                        match chunk {
+                            Err(_) => return true,
+                            Ok(bytes)
+                                if deadline
+                                    && String::from_utf8_lossy(&bytes)
+                                        .contains("\"code\":\"timeout\"") =>
+                            {
+                                return true;
+                            }
+                            _ => {}
                         }
                     }
                     false
                 })
                 .await
                 .unwrap();
-                assert!(saw_error, "{profile}/{case}");
+                assert!(saw_terminal, "{profile}/{case}");
             }
             tokio::time::timeout(Duration::from_secs(3), state.lifecycle.wait_idle())
                 .await

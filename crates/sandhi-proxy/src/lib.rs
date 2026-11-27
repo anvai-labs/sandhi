@@ -3576,13 +3576,22 @@ impl RequestAccounting {
     }
 
     async fn finalize_owned(&mut self) -> bool {
+        self.finalize_owned_after_source(false, |_| {}).await
+    }
+
+    async fn finalize_owned_after_source(
+        &mut self,
+        owner_deadline: bool,
+        before_settlement: impl FnOnce(&Self),
+    ) -> bool {
         let Some(mut owned) = self.owned.take() else {
             return false;
         };
         self.finalized = true;
-        streaming::capture_terminal(self);
-        if let Some(evidence) = owned.attempts.context.qualified_stream_evidence() {
-            streaming::capture_provider_terminal(self, evidence);
+        if !streaming::capture_terminal(self, owner_deadline) {
+            if let Some(evidence) = owned.attempts.context.qualified_stream_evidence() {
+                streaming::capture_provider_terminal(self, evidence, owner_deadline);
+            }
         }
         if let Some(evidence) = owned.attempts.context.qualified_buffered_evidence() {
             let mut source = match evidence.usage {
@@ -3602,6 +3611,7 @@ impl RequestAccounting {
             }
             self.observe(&source);
         }
+        before_settlement(self);
         let mut usage = self.usage.take().unwrap_or_default();
         usage.attempts = owned
             .attempts
@@ -3799,7 +3809,9 @@ async fn stream_response(
     let tail = (dialect == IngressDialect::OpenAi && !native_stream)
         .then(|| Bytes::from_static(b"data: [DONE]\n\n"));
     let response_provider = provider.clone();
-    let body = streaming::body(accounting, permit, tail, move |accounting| {
+    let timeout_frame = (!native_stream && !provider.is_codex_subscription())
+        .then(|| streaming::deadline_renderer(dialect, provider.slug().to_owned()));
+    let body = streaming::body(accounting, permit, tail, timeout_frame, move |accounting| {
         Box::pin(async_stream::try_stream! {
             let mut stream_encoder = TranslatedStream::new(dialect, tracked_translation);
             let mut cache_read_observation = None;
