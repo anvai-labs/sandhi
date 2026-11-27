@@ -130,6 +130,7 @@ These are transport deadlines, **not bounded HTTP error delivery or durable
 settlement guarantees**. [ADR-0050](../adr/0050-structured-owner-origin-timeout-frame.md) adds an in-band,
 dialect-specific error for an owner-enforced **body** deadline when a complete SSE
 event boundary is available and the origin has not supplied a terminal event.
+Codex subscription streams retain their connection-error behavior at the body limit.
 Measured non-final usage stays partial in both the error evidence and accounting,
 with both holds unresolved under the existing recovery and retention policy.
 Setup-error paths still use synchronous legacy settlement;

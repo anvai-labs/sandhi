@@ -150,6 +150,9 @@ impl ChatProvider for TypedOpenAiResponses {
         self.stream_inner(request, headers, Some(context)).await
     }
     fn qualified_buffered_without_raw(&self) -> bool {
+        self.is_codex_subscription()
+    }
+    fn is_codex_subscription(&self) -> bool {
         self.profile == OpenAiResponsesProfile::ChatGptCodex
     }
     fn execution_request(&self, request: &ChatRequestV1) -> Result<Value, ProviderError> {

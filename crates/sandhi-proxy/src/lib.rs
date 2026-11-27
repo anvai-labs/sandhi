@@ -3809,8 +3809,8 @@ async fn stream_response(
     let tail = (dialect == IngressDialect::OpenAi && !native_stream)
         .then(|| Bytes::from_static(b"data: [DONE]\n\n"));
     let response_provider = provider.clone();
-    let timeout_frame =
-        (!native_stream).then(|| streaming::deadline_renderer(dialect, provider.slug().to_owned()));
+    let timeout_frame = (!native_stream && !provider.is_codex_subscription())
+        .then(|| streaming::deadline_renderer(dialect, provider.slug().to_owned()));
     let body = streaming::body(accounting, permit, tail, timeout_frame, move |accounting| {
         Box::pin(async_stream::try_stream! {
             let mut stream_encoder = TranslatedStream::new(dialect, tracked_translation);

@@ -218,6 +218,9 @@ pub trait ChatProvider: Send + Sync {
     fn supports_qualified_streaming(&self) -> bool {
         false
     }
+    fn is_codex_subscription(&self) -> bool {
+        false
+    }
     /// Transport capability; a provider label cannot enable cache synthesis.
     fn allows_cache_synthesis(&self) -> bool {
         false
@@ -537,6 +540,12 @@ impl ProviderHandle {
     #[must_use]
     pub fn supports_streaming_deadlines(&self) -> bool {
         self.streaming_deadline_capable
+    }
+
+    /// Whether this handle uses the built-in constrained Codex subscription codec.
+    #[must_use]
+    pub fn is_codex_subscription(&self) -> bool {
+        self.streaming_deadline_capable && self.inner.is_codex_subscription()
     }
 
     /// Same-family transparent transport; absent for custom/expiring profiles
